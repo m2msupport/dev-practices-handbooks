@@ -1,0 +1,116 @@
+\chapter{Performance and Scalability}
+\section{Chapter Overview}
+Optimise only after measuring.  This chapter describes profiling, data structure choices,
+and concurrency strategies.
+
+\begin{lstlisting}[caption={Capturing performance regressions},label={lst:perf_overview}]
+from __future__ import annotations
+
+
+def regression_ratio(old_ms: float, new_ms: float) -> float:
+    """Compute slowdown factor for benchmarking dashboards."""
+    return round(new_ms / old_ms, 2)
+\end{lstlisting}
+
+\section{Profiling Before Optimising}
+
+\begin{lstlisting}[caption={CProfile harness for a reporting job},label={lst:profiling}]
+import cProfile
+import pstats
+
+from billing.reports import build_monthly_report
+
+
+def profile_report() -> None:
+    with cProfile.Profile() as profiler:
+        build_monthly_report(project_id="alpha")
+    stats = pstats.Stats(profiler)
+    stats.sort_stats("cumulative").print_stats(15)
+\end{lstlisting}
+
+\section{Data Structures}
+Choose data structures that align with access patterns: \texttt{deque} for queues,
+\texttt{set} for membership tests, \texttt{heapq} for priority queues, and \texttt{itertools}
+for streaming.  Avoid expensive operations such as repeated string concatenation inside
+loops.
+
+\begin{lstlisting}[caption={Selecting the right container},label={lst:perf_data_structures}]
+from __future__ import annotations
+
+from collections import deque
+
+
+def process_queue(items: list[int]) -> deque[int]:
+    """Convert lists into deques when pop-left operations dominate."""
+    queue: deque[int] = deque(items)
+    while queue and queue[0] < 0:
+        queue.popleft()
+    return queue
+\end{lstlisting}
+
+\section{Concurrency Choices}
+Use \texttt{asyncio} for I/O-bound services, threads for blocking I/O when async refactors
+are impractical, and processes or native extensions for CPU-bound workloads.  Protect shared
+state with locks or adopt immutable structures.
+
+\begin{lstlisting}[caption={Running I/O-bound tasks concurrently},label={lst:perf_concurrency}]
+from __future__ import annotations
+
+import asyncio
+
+
+async def fetch_record(record_id: str) -> str:
+    """Pretend to call an external service."""
+    await asyncio.sleep(0.1)
+    return record_id
+
+
+async def fetch_many(ids: list[str]) -> list[str]:
+    """Drive multiple calls concurrently for throughput."""
+    return await asyncio.gather(*(fetch_record(item) for item in ids))
+\end{lstlisting}
+
+\section{Scenario: Scaling a Report Generator}
+A consulting firm profiled its overnight PDF generator and discovered 80\% of time spent in
+template rendering.  By caching parsed templates and using \texttt{ThreadPoolExecutor} for
+I/O-bound API calls, they cut runtime from hours to minutes.
+
+\begin{lstlisting}[caption={Caching template compilation},label={lst:perf_template_cache}]
+from __future__ import annotations
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=32)
+def compile_template(name: str) -> str:
+    """Simulate the expensive part of rendering."""
+    return name.upper()
+\end{lstlisting}
+
+\section{Summary}
+Let measurements guide every optimisation, choose data structures intentionally, and pick
+concurrency models that match the workload's constraints.
+
+\begin{lstlisting}[caption={Summarising optimisation impact},label={lst:perf_summary}]
+from __future__ import annotations
+
+
+def summarize_speedups(results: dict[str, float]) -> str:
+    """Generate a concise update for stakeholders."""
+    fastest = min(results, key=results.get)
+    return f"{fastest} achieved best runtime at {results[fastest]:.2f}s."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Profile a slow task using \texttt{cProfile}.  Optimise the top offending function
+  and measure the difference.
+  \item Rewrite a loop that concatenates strings with a more efficient approach using
+  \texttt{"".join()}.
+  \item Implement both threaded and async versions of a simple downloader.  Compare code
+  complexity and throughput.
+  \item Build a benchmark harness that records baseline metrics for a key workflow.
+  \item Identify a cacheable computation and design an invalidation strategy.
+  \item Extend Listing~\ref{lst:perf_concurrency} so it enforces a concurrency limit and
+  records latency histograms.
+\end{enumerate}

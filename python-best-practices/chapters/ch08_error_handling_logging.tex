@@ -1,0 +1,148 @@
+\chapter{Error Handling and Logging}
+\section{Chapter Overview}
+Error handling and observability are inseparable.  Without clear error pathways and
+structured logs, diagnosing issues becomes guesswork.
+
+\begin{lstlisting}[caption={Categorising errors for alerting},label={lst:error_overview}]
+from __future__ import annotations
+
+
+def categorize_error(exc: Exception) -> str:
+    """Return an alert bucket given an exception instance."""
+    name = exc.__class__.__name__
+    if "Timeout" in name:
+        return "transient"
+    if "Validation" in name:
+        return "user"
+    return "system"
+\end{lstlisting}
+
+\section{Domain-Specific Exceptions}
+Define exceptions that reflect your business language so logs and alerts remain meaningful.
+Listing~\ref{lst:service_layer} already illustrated raising domain errors from services.
+
+\begin{lstlisting}[caption={Expressive domain-level exception hierarchy},label={lst:error_domain}]
+from __future__ import annotations
+
+
+class BillingError(RuntimeError):
+    """Base error for billing workflows."""
+
+
+class PaymentInstrumentDeclined(BillingError):
+    """Raised when the processor rejects a card."""
+\end{lstlisting}
+
+\section{Structured Logging}
+
+\begin{lstlisting}[caption={Structured logging with contextual metadata},label={lst:logging}]
+import logging
+from logging.config import dictConfig
+
+
+def configure_logging() -> None:
+    dictConfig(
+        {
+            "version": 1,
+            "formatters": {
+                "json": {
+                    "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+                    "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                }
+            },
+            "handlers": {
+                "stderr": {
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stderr",
+                    "formatter": "json",
+                }
+            },
+            "root": {"level": "INFO", "handlers": ["stderr"]},
+        }
+    )
+
+
+logger = logging.getLogger("billing.events")
+logger = logging.LoggerAdapter(logger, extra={"service": "billing"})
+
+
+def log_payment_event(invoice_id: str, amount: str) -> None:
+    logger.info("payment_completed", extra={"invoice_id": invoice_id, "amount": amount})
+\end{lstlisting}
+
+\section{Bad vs Good Error Handling}
+
+\begin{lstlisting}[caption={Anti-pattern: swallowing every exception},label={lst:bare_except}]
+def run_job() -> None:
+    try:
+        do_work()
+        persist_results()
+    except Exception:
+        return None
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Improved version with explicit logging},label={lst:handled_error}]
+from __future__ import annotations
+
+import logging
+
+
+def run_job(logger: logging.Logger) -> None:
+    try:
+        do_work()
+        persist_results()
+    except NetworkError:
+        logger.warning("Transient network issue; job will retry")
+        raise
+    except PersistenceError:
+        logger.error("Failed to persist results", exc_info=True)
+        raise
+\end{lstlisting}
+
+\section{Scenario: Incident Response}
+During an outage, the on-call engineer used structured logs to correlate failed HTTP
+requests with a downstream dependency.  Because each log entry included contextual fields
+such as user ID and feature flag state, the team restored service within minutes.
+
+\begin{lstlisting}[caption={Extracting timeline data from logs},label={lst:error_incident}]
+from __future__ import annotations
+
+from datetime import datetime
+
+
+def build_incident_timeline(entries: list[dict[str, str]]) -> list[str]:
+    """Return a human-readable sequence of incident events."""
+    sorted_entries = sorted(entries, key=lambda entry: entry["timestamp"])
+    return [
+        f"{datetime.fromisoformat(entry['timestamp'])}: {entry['message']}"
+        for entry in sorted_entries
+    ]
+\end{lstlisting}
+
+\section{Summary}
+Name your exceptions after real business events, log them with structure and context, and
+practice incident drills so the information proves useful under pressure.
+
+\begin{lstlisting}[caption={Summarising alert volume},label={lst:error_summary}]
+from __future__ import annotations
+
+
+def summarize_alerts(alerts: dict[str, int]) -> str:
+    """Condense alert tallies into a planning sentence."""
+    worst = max(alerts, key=alerts.get)
+    return f"{sum(alerts.values())} alerts fired; {worst} noisy category."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Replace bare \texttt{except} blocks in your codebase with targeted exceptions.
+  \item Configure structured logging locally and confirm that observability dashboards parse
+  the fields.
+  \item Write a chaos test that injects failures into a dependency and verify the logs are
+  actionable.
+  \item Create a "runbook" log template that every subsystem uses for critical events.
+  \item Review a recent incident report and map each detection or mitigation step to logging
+  improvements.
+  \item Extend Listing~\ref{lst:error_incident} so it groups events by feature flag and
+  produces a Markdown report suitable for postmortems.
+\end{enumerate}

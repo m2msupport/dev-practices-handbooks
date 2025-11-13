@@ -1,0 +1,61 @@
+\chapter{Continuous Integration and GitHub Actions}
+\section{Chapter Overview}
+CI catches bugs before customers do. Fast, deterministic pipelines encourage compliance; flaky or slow ones tempt developers to bypass safeguards. Treat workflows as code and enforce budgets.
+
+\section{Designing Fast, Reliable Pipelines}
+Parallelize linting, unit, and integration suites. Cache dependencies, fail fast on formatting errors, and set clear time budgets for each job so performance regressions surface early.
+
+\begin{lstlisting}[style=gitconfig,caption={Lean CI job with caching}]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+\end{lstlisting}
+
+\section{Workflows as Code and Reuse}
+Store workflows under version control, review them like any other code, and use reusable workflows (\texttt{workflow\_call}) to keep multiple repositories consistent.
+
+\begin{lstlisting}[style=gitconfig,caption={Invoking a reusable workflow}]
+name: service-ci
+on:
+  pull_request:
+jobs:
+  main:
+    uses: org/.github/.github/workflows/python-ci.yml@v2
+    with:
+      pytest-marker: service
+    secrets: inherit
+\end{lstlisting}
+
+\section{Secrets and Environments}
+Never hardcode credentials inside workflow files. Use GitHub environments with required reviewers for production deploys and rotate secrets proactively.
+
+\begin{lstlisting}[style=shell,caption={Managing secrets for workflows}]
+$ gh secret set DOCKER_PASSWORD --org org --body "$(pass show docker/password)"
+$ gh api -X PUT repos/org/app/environments/prod/protection \
+    -F required_reviewers[0][type]=User \
+    -F required_reviewers[0][id]=123456 \
+    -F wait_timer=15
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Measure the longest-running workflow in your repo and propose a runtime budget.
+  \item Split an existing pipeline into parallel jobs and compare runtimes before and after.
+  \item Create a reusable workflow in a central repo and call it from at least two services.
+  \item Rotate a GitHub Actions secret and document how you validated the change.
+  \item Configure staging and production environments with required reviewers; rehearse approvals.
+  \item Analyze the last ten CI failures and categorize them (flake, infra, product bug).
+  \item Pin action versions (e.g., \texttt{@v4}) and record the audit for security reviews.
+\end{enumerate}
+

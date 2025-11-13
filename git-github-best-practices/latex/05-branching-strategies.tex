@@ -1,0 +1,53 @@
+\chapter{Branching Strategies}
+\section{Chapter Overview}
+Branch policy determines merge risk, conflict frequency, and release cadence. Whether you embrace trunk-based development or regulated release trains, the strategy must minimize drift and clarify responsibilities.
+
+\section{Trunk-Based with Short-Lived Branches}
+Trunk-based teams keep \texttt{main} releasable and rely on feature flags to hide incomplete work. Branches should live for days, not weeks, and CI must stay green or merges stop.
+
+\begin{lstlisting}[style=shell,caption={Trunk-based flow with feature flags}]
+$ git switch main
+$ git pull --ff-only
+$ git switch -c feat/alerts-toggle
+$ git add flag_config.yaml alerts.py
+$ git commit -m "feat: add alert suppression flag"
+$ git push -u origin feat/alerts-toggle
+$ gh pr merge --squash --auto feat/alerts-toggle
+\end{lstlisting}
+
+\section{Git Flow in Regulated Teams}
+Highly regulated teams need long-lived release branches for audits. Automate merges between \texttt{develop}, \texttt{release/x.y}, and \texttt{main} so fixes propagate deterministically and no branch becomes the "real" source of truth.
+
+\begin{lstlisting}[style=shell,caption={Synchronizing develop and release branches}]
+$ git switch develop
+$ git pull
+$ git switch -c release/2024.06
+$ git push -u origin release/2024.06
+$ git switch release/2024.06
+$ git merge --no-ff develop
+$ git push origin release/2024.06
+$ git switch develop
+$ git merge --no-ff release/2024.06
+$ git push origin develop
+\end{lstlisting}
+
+\section{Environment Branches Are Anti-Patterns}
+Branches named \texttt{staging} or \texttt{qa} collect unreviewed fixes and confuse incident responders. Replace them with deployment tags or environment-specific workflows tied to the real source branch.
+
+\begin{lstlisting}[style=shell,caption={Deploying via tags instead of environment branches}]
+$ git tag -a staging-2024-05-18 -m "Deploy build 345 to staging"
+$ git push origin staging-2024-05-18
+$ gh workflow run deploy.yml -f environment=staging -f ref=staging-2024-05-18
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Inventory branch types in your org and document expected lifetime plus naming conventions.
+  \item List remote branches older than 30 days and decide which to prune or archive.
+  \item Design a feature-flag rollout plan that keeps \texttt{main} releasable even when work is half-done.
+  \item Diagram how fixes move between \texttt{develop}, \texttt{release/x.y}, and \texttt{main} today; highlight bottlenecks.
+  \item Replace one environment branch with a tag-driven deployment in a sandbox repo.
+  \item Compare squash merges and merge commits for trunk-based work and justify your default.
+  \item Set up monitoring for branch age and open-PR lifetime to spot stagnation early.
+\end{enumerate}
+

@@ -1,0 +1,45 @@
+\chapter{Mental Models for Git}
+\section{Chapter Overview}
+Git is a content-addressable database where immutable commits form a graph and branches are movable pointers. Once you see history as math instead of magic, recovery and collaboration become predictable.
+
+\section{Commits, References, and the DAG}
+Commits form a directed acyclic graph (DAG). Branches, tags, and \texttt{HEAD} merely name specific nodes. Rebases create new nodes; merges add nodes with multiple parents. This mental model explains why history rewrites must be coordinated and why reflog recovery works.
+
+\begin{lstlisting}[style=shell,caption={Interrogating the commit graph}]
+$ git log --graph --decorate --oneline --all | head -n 12
+$ git for-each-ref --format='%(refname:short) %(objectname:short)' refs/heads
+$ git merge-base feature/payments release/2024-06
+\end{lstlisting}
+
+\section{Working Tree, Index, and Object Database}
+Git tracks three zones: working tree (files on disk), index (staged changes), and object database (commits). Confusing them produces noisy diffs and broken rollbacks. Stage intentionally, inspect cached diffs, and verify what you are about to publish.
+
+\begin{lstlisting}[style=shell,caption={Keeping zones aligned deliberately}]
+$ git status -sb
+$ git add -p src/session.py
+$ git diff --cached
+$ git commit -m "fix: expire sessions on logout"
+\end{lstlisting}
+
+\section{Scenario: Detached HEAD Without Panic}
+During a bisect, an engineer checked out a specific commit, forgetting it detaches HEAD. Instead of panicking, they created a branch pointing to that node, committed their findings, and moved on. Detached HEAD is just a pointer state, not a disaster.
+
+\begin{lstlisting}[style=shell,caption={Salvaging work from a detached HEAD}]
+$ git checkout 1f2e8c1   # HEAD detached
+$ vim metrics/job.py
+$ git switch -c spike/job-metrics
+$ git commit -am "spike: prototype job metrics"
+$ git push -u origin spike/job-metrics
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Draw the DAG for your last merge, labeling branch pointers before and after.
+  \item Explain \texttt{HEAD\textasciitilde 2} versus \texttt{HEAD\^} using real commits from your repo.
+  \item Practice \texttt{git add -p} until you can stage half a file without rereading documentation.
+  \item Simulate a detached HEAD, create a branch from it, and push the branch for safekeeping.
+  \item Use \texttt{git merge-base} to find where your feature diverged from \texttt{main} and note the SHA.
+  \item Inspect \texttt{git reflog --date=iso | head -n 5} and annotate which entries correspond to resets or rebases.
+  \item Teach this mental model to a teammate and record open questions.
+\end{enumerate}
+

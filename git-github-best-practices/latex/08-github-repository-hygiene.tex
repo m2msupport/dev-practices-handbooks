@@ -1,0 +1,65 @@
+\chapter{GitHub Repository Hygiene}
+\section{Chapter Overview}
+Repository settings drift as teams grow. Regular audits keep permissions tight, templates consistent, and automation helpful rather than noisy.
+
+\section{Repository Settings and Permissions}
+Require reviews, enforce linear history where appropriate, and restrict who can push to protected branches. Document break-glass procedures and log every exception.
+
+\begin{lstlisting}[style=shell,caption={Auditing and updating repository settings}]
+$ gh repo view org/app --json name,defaultBranchRef,visibility
+$ gh api repos/org/app -X PATCH \
+    -F allow_merge_commit=false \
+    -F allow_rebase_merge=false \
+    -F allow_squash_merge=true \
+    -F delete_branch_on_merge=true
+$ gh api repos/org/app/branches/main/protection
+\end{lstlisting}
+
+\section{Templates, CODEOWNERS, and Defaults}
+Templates encode expectations for issues, pull requests, and security disclosures. CODEOWNERS ensures the right reviewers see changes immediately, keeping review latency low.
+
+\begin{lstlisting}[style=gitconfig,caption={Repository hygiene files}]
+# CODEOWNERS
+src/api/ @backend-core
+infra/terraform/ @sre-team
+*.md @docs
+
+# .github/pull_request_template.md
+## Context
+- Problem:
+- Solution:
+
+## Validation
+- [ ] Tests
+- [ ] Monitoring links
+\end{lstlisting}
+
+\section{Automations and Bot Etiquette}
+Bots such as Dependabot, secret scanning, and enforcement bots keep repositories healthy. Tune them carefully: noise is a configuration bug, not an excuse to disable automation.
+
+\begin{lstlisting}[style=gitconfig,caption={Dependabot configuration excerpt}]
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    reviewers:
+      - backend-core
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Export repository settings via the GitHub API and compare them to policy documents.
+  \item Draft a break-glass procedure for temporarily relaxing protections during incidents.
+  \item Update CODEOWNERS so every critical path has at least two reviewers.
+  \item Implement or revise issue templates that collect reproduction steps and rollback plans.
+  \item Enable Dependabot and secret scanning in a sandbox, then trigger each to verify alert routing.
+  \item Decide which merge strategies to allow (merge, squash, rebase) and justify the choice.
+  \item Audit third-party GitHub Apps installed on the repo and remove unused ones.
+\end{enumerate}
+

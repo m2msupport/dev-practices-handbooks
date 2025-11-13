@@ -1,0 +1,49 @@
+\chapter{Commits: Units of Change}
+\section{Chapter Overview}
+Commits are the smallest units reviewers approve, release scripts package, and incident responders blame. Well-formed commits isolate behaviors, document motivation, and provide evidence of testing.
+
+\section{Crafting Focused Commits}
+Group code by behavior, not file extension. If a change touches schema, application logic, and documentation, split it into separate commits so reviewers can reason about one concept at a time.
+
+\begin{lstlisting}[style=shell,caption={Building a feature with narrative commits}]
+$ git add migrations/2024_05_add_feature.sql
+$ git commit -m "feat: add raw_score column"
+$ git add app/services/score.py
+$ git commit -m "feat: compute raw score using new column"
+$ git add feature_flags.yaml
+$ git commit -m "chore: guard raw score rollout"
+\end{lstlisting}
+
+\section{Commit Message Quality}
+Messages explain intent. \textbf{Bad:} "fix stuff". \textbf{Good:} "fix: clamp retry interval under 5 minutes to meet SLA". Use templates or Conventional Commits to encode motivation, validation, and risk.
+
+\begin{lstlisting}[style=shell,caption={Applying a commit template}]
+$ cat .git/commit_template
+Summary (imperative):
+Motivation:
+Testing:
+$ git config commit.template .git/commit_template
+$ git commit
+\end{lstlisting}
+
+\section{Scenario: Repairing History Before Sharing}
+A teammate stacked five WIP commits with failing tests. Instead of asking reviewers to "ignore the first four", they used fixup commits plus \texttt{--autosquash} to rewrite history before publishing, saving reviewers time and preserving bisect-friendly history.
+
+\begin{lstlisting}[style=shell,caption={Polishing a branch before pushing}]
+$ git commit --fixup 9ac3baf
+$ git commit --fixup 9ac3baf
+$ git rebase -i --autosquash origin/main
+$ git push --force-with-lease origin feat/runtime-metrics
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Rewrite a recent multi-file commit into focused slices and compare the review conversation.
+  \item Configure a commit template and enforce its use in your primary repo.
+  \item Practice creating fixup commits and autosquashing before pushing.
+  \item Explain to a teammate when \texttt{git commit --amend} is safe versus when it becomes destructive.
+  \item Produce a bad-versus-good commit message pair for a bug you recently fixed.
+  \item Create a feature flag branch that merges daily even though the feature remains disabled.
+  \item Add automated lint checks that fail CI when commit messages violate your format.
+\end{enumerate}
+

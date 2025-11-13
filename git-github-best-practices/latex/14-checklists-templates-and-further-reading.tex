@@ -1,0 +1,55 @@
+\chapter{Checklists, Templates, and Further Reading}
+\section{Chapter Overview}
+Checklists and templates encode hard-won lessons into repeatable process. Keep them in the repository so updates travel with the code they describe.
+
+\section{Daily Flow Checklist}
+Give developers a predictable routine that keeps workspaces clean, branches fresh, and CI friendly.
+
+\begin{lstlisting}[style=gitconfig,caption={Daily flow checklist}]
+- Pull latest: git fetch --prune && git switch main && git pull --ff-only
+- Rebase feature branches before coding
+- Run lint + unit tests locally
+- Update PR descriptions with validation evidence
+- Clean merged branches locally and remotely
+\end{lstlisting}
+
+\section{Template Snippets}
+Standardize release notes, PR templates, and incident summaries so responses stay consistent even under stress.
+
+\begin{lstlisting}[style=gitconfig,caption={Release note template sketch}]
+## Impact
+-
+
+## Changes
+-
+
+## Validation
+- [ ] Tests
+- [ ] Metrics linked
+
+## Rollback
+-
+\end{lstlisting}
+
+\section{Further Reading}
+Curate trusted sources so engineers know where to deepen Git and GitHub expertise.
+
+\begin{lstlisting}[style=gitconfig,caption={Curated reading list}]
+- Pro Git (Chacon & Straub)
+- GitHub Engineering Blog
+- Atlassian Git Tutorials
+- Internal RFC-102 Branch Protection Policy
+- Internal RFC-118 CI/CD Architecture
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Create a \texttt{docs/checklists/} directory in your repo and add at least two actionable checklists.
+  \item Customize the daily checklist above for your stack and share it during stand-up.
+  \item Test the release note template in the next deployment dry run and gather feedback.
+  \item Assemble the reading list in your company wiki, linking to both external and internal resources.
+  \item Build a script that validates the presence of required templates and fails CI if they disappear.
+  \item Assign owners to every checklist/template and schedule quarterly reviews.
+  \item Add links to these resources in onboarding documentation for new engineers.
+\end{enumerate}
+

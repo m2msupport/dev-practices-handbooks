@@ -1,0 +1,133 @@
+\chapter{Type Hints and Static Analysis}
+\section{Chapter Overview}
+Type hints capture intent and enable automated reasoning.  Combined with static analyzers,
+they prevent entire classes of bugs.
+
+\begin{lstlisting}[caption={Capturing annotation coverage},label={lst:types_overview}]
+from __future__ import annotations
+
+
+def annotation_coverage(total_objects: int, typed_objects: int) -> float:
+    """Return the proportion of typed callables and modules."""
+    return round(typed_objects / total_objects, 2)
+\end{lstlisting}
+
+\section{Why Annotate}
+Annotations clarify contracts for both humans and tools.  They document mutability,
+optional values, and expected shapes.  Their primary benefit is catching mismatches at
+development time rather than in production.
+
+\begin{lstlisting}[caption={Capturing optional state via annotations},label={lst:types_optional}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(slots=True)
+class InvoiceDraft:
+    """Represent an invoice that may or may not be finalised."""
+
+    issued_at: datetime | None
+    total: int
+
+
+def finalize(draft: InvoiceDraft, *, issued_at: datetime) -> InvoiceDraft:
+    """Produce a finalized invoice with explicit timestamps."""
+    return InvoiceDraft(issued_at=issued_at, total=draft.total)
+\end{lstlisting}
+
+\section{Protocols and Dataclasses}
+Protocols describe structural typing, allowing you to express behaviour without inheritance.
+Dataclasses handle boilerplate while keeping types explicit.
+
+\begin{lstlisting}[caption={Scheduling interface using protocols},label={lst:typed_interface}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Protocol
+
+
+class Schedulable(Protocol):
+    priority: int
+
+    def execute(self) -> None: ...
+
+
+@dataclass(slots=True)
+class ScheduledJob:
+    job: Schedulable
+    eta: datetime
+
+
+def schedule_jobs(jobs: Iterable[Schedulable], *, start: datetime) -> list[ScheduledJob]:
+    """Order jobs by priority and assign execution windows."""
+    sorted_jobs = sorted(jobs, key=lambda job: job.priority, reverse=True)
+    schedule: list[ScheduledJob] = []
+    for offset, job in enumerate(sorted_jobs):
+        schedule.append(ScheduledJob(job=job, eta=start + timedelta(minutes=offset)))
+    return schedule
+\end{lstlisting}
+
+\section{Static Analysis Workflow}
+Run \texttt{mypy} or \texttt{pyright} in CI alongside \texttt{ruff}.  Treat warnings as
+actionable feedback.  If a suppression is necessary, add a comment explaining why.
+
+\begin{lstlisting}[caption={Running mypy with strict settings programmatically},label={lst:types_mypy}]
+from __future__ import annotations
+
+import subprocess
+
+
+def run_type_checks() -> None:
+    """Invoke mypy with the strict profile used in CI."""
+    subprocess.run(["mypy", "--strict", "src"], check=True)
+\end{lstlisting}
+
+\section{Scenario: Type Hints Caught a Regression}
+A data platform refactored a parser to support new file formats.  Type hints and \texttt{mypy}
+flagged that the new code returned \texttt{None} in a branch where downstream code expected
+a \texttt{str}.  The regression never reached staging.
+
+\begin{lstlisting}[caption={Regression prevented by precise return types},label={lst:types_regression}]
+from __future__ import annotations
+
+
+def parse_status(raw: str) -> str:
+    """Return a validated status string."""
+    match raw.lower():
+        case "paid" | "pending":
+            return raw.lower()
+        case _:
+            raise ValueError(f"Unknown status: {raw}")
+\end{lstlisting}
+
+\section{Summary}
+Treat annotations as executable documentation, layer protocols and dataclasses to express
+behaviour, and rely on static analyzers for immediate feedback during reviews and CI.
+
+\begin{lstlisting}[caption={Summarising type-check results},label={lst:types_summary}]
+from __future__ import annotations
+
+
+def summarize_type_errors(errors: list[str]) -> str:
+    """Condense mypy output for leadership updates."""
+    if not errors:
+        return "Type checks clean; no regressions."
+    return f"{len(errors)} type errors remain; triage blockers first."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Add type hints to an untyped module and run \texttt{mypy}.  Document each warning
+  and the fix.
+  \item Convert a nominal interface into a \texttt{Protocol} and note how it simplifies
+  testing.
+  \item Configure \texttt{pyright} or \texttt{mypy} in \texttt{pre-commit}.  Measure the
+  runtime impact.
+  \item Identify a place where you rely on \texttt{Any}.  Replace it with a precise type.
+  \item Debate with your team when to use \texttt{TypedDict}, \texttt{dataclass}, or
+  \texttt{attrs}.
+\end{enumerate}

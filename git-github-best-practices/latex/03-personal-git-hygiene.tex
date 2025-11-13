@@ -1,0 +1,53 @@
+\chapter{Personal Git Hygiene}
+\section{Chapter Overview}
+Your laptop is the first place Git fails. Harden it with repeatable dotfiles, safety nets, and bootstrap scripts so crashes, lost terminals, or compliance audits become inconveniences instead of outages.
+
+\section{Opinionated Dotfiles and Aliases}
+Treat dotfiles as code. Store \texttt{~/.gitconfig}, hooks, and helper scripts in a private repository so every machine shares safe defaults. Include commit signing, color hints, and hunk-friendly aliases.
+
+\begin{lstlisting}[style=gitconfig,caption={Minimal but opinionated ~/.gitconfig}]
+[user]
+  name = Jane Developer
+  email = jane@example.com
+[commit]
+  gpgsign = true
+[alias]
+  st = status --short --branch
+  lg = log --graph --decorate --oneline
+[color]
+  ui = auto
+\end{lstlisting}
+
+\section{Local Safety Nets}
+Reflogs, stashes, and backup branches let you experiment without fear. Treat destructive commands (like \texttt{git clean -fd}) as safe only when you can quickly rewind via reflog checkpoints.
+
+\begin{lstlisting}[style=shell,caption={Capturing WIP before risky commands}]
+$ git reflog --date=iso | head -n 4
+$ git stash push -m "wip: parser refactor"
+$ git reset --hard origin/main
+$ git stash pop
+$ git branch backup/wip HEAD@{1}
+\end{lstlisting}
+
+\section{Scenario: Laptop Rebuild in Under an Hour}
+A data scientist's laptop failed mid-sprint. Because they used managed dotfiles, password-vaulted SSH keys, and checklist-driven bootstrap scripts, they were committing again within an hour. Without hygiene, the outage would have stolen days of throughput.
+
+\begin{lstlisting}[style=shell,caption={Bootstrapping a fresh workstation}]
+$ git clone git@github.com:jane/dotfiles.git ~/.dotfiles
+$ ~/.dotfiles/bootstrap.sh
+$ ssh-keygen -t ed25519 -C "jane@example.com"
+$ gh auth login --hostname github.com --web
+$ git clone git@github.com:org/app.git
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item List every location where Git is configured on your machine (system, global, repo) and reconcile inconsistencies.
+  \item Reinstall your dotfiles on a disposable VM and document anything that still requires manual work.
+  \item Enable commit signing and verify GitHub labels a pushed commit as "Verified".
+  \item Practice recovering from an intentional \texttt{git reset --hard} using the reflog.
+  \item Normalize \texttt{core.autocrlf} and \texttt{core.ignorecase} across your team.
+  \item Publish a short guide describing the aliases you rely on and why.
+  \item Schedule quarterly reminders to rotate SSH/GPG keys and test new hardware onboarding.
+\end{enumerate}
+

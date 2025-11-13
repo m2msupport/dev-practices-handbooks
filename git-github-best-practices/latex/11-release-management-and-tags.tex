@@ -1,0 +1,46 @@
+\chapter{Release Management and Tags}
+\section{Chapter Overview}
+Releases translate commits into artifacts customers can trust. Consistent tagging, changelog generation, and hotfix procedures keep launches boring and auditable.
+
+\section{Semantic Versioning in Practice}
+Agree on what constitutes MAJOR, MINOR, and PATCH changes. Automate version bumps so marketing, product, and SRE speak the same language about risk.
+
+\begin{lstlisting}[style=shell,caption={Automating semantic version bumps}]
+$ npm run release -- --release-as minor
+$ git push origin main
+$ git push origin v2.4.0
+\end{lstlisting}
+
+\section{Annotated Tags and Changelogs}
+Annotated tags carry context for auditors and incident responders. Lightweight tags lack metadata, making it harder to reconstruct what shipped.
+
+\begin{lstlisting}[style=shell,caption={Creating annotated tags and releases}]
+$ git tag -a v2.4.0 -m "Release v2.4.0\n- feat: async ingestion\n- fix: clamp retries"
+$ git push origin v2.4.0
+$ gh release create v2.4.0 --notes-file CHANGELOG.md --target main
+\end{lstlisting}
+
+\section{Scenario: Coordinated Hotfix}
+When production alarms fired, the team branched from the last tag, cherry-picked the fix, ran targeted tests, then merged the hotfix back into both release and main. Because the playbook was documented, the entire event took minutes, not hours.
+
+\begin{lstlisting}[style=shell,caption={Hotfix branch dance}]
+$ git fetch origin
+$ git checkout -b hotfix/2024-05-21 v2.4.0
+$ git cherry-pick 4ac9dbe
+$ pytest critical/tests
+$ git push origin hotfix/2024-05-21
+$ gh pr create --base release/2.4 --title "hotfix: clamp retries"
+$ gh pr create --base main --title "hotfix: clamp retries (main backport)"
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Define MAJOR/MINOR/PATCH criteria for your product and circulate the decision.
+  \item Create an annotated tag in a sandbox and verify it appears in \texttt{git describe} output.
+  \item Automate changelog generation from commit messages or PR labels.
+  \item Practice cutting a hotfix branch from the last production tag and merging it back.
+  \item Evaluate whether your release process supports dry runs; propose improvements if not.
+  \item Document a rollback plan tied to tags for your primary service.
+  \item Track lead time from merge to release and set a goal to reduce it.
+\end{enumerate}
+

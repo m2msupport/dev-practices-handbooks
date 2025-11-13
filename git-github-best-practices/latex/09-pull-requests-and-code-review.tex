@@ -1,0 +1,47 @@
+\chapter{Pull Requests and Code Review}
+\section{Chapter Overview}
+Pull requests are change proposals, not raw diffs. They tell the story of a problem, solution, and verification so reviewers can focus on risk instead of archaeology.
+
+\section{Narrative Pull Requests}
+Explain the why before the how. Include validation evidence, screenshots, log snippets, and links to dashboards so reviewers can judge risk quickly.
+
+\begin{lstlisting}[style=shell,caption={Creating a narrative pull request}]
+$ gh pr create \
+    --title "feat: async ingestion pipeline" \
+    --body $'Problem: queue backpressure at 50k msg/min.\nSolution: shard workers by tenant.\nValidation: load test 1129, Grafana link.'
+\end{lstlisting}
+
+\section{Review Checklists and Expectations}
+Shared checklists align reviewers on architecture, tests, observability, and rollback plans. Without them, reviews devolve into style debates.
+
+\begin{lstlisting}[style=gitconfig,caption={Reviewer checklist fragment}]
+- [ ] Design matches architecture docs
+- [ ] Tests cover happy + sad paths
+- [ ] Observability updated (logs, metrics, alerts)
+- [ ] Rollback or feature flag documented
+- [ ] Security/privacy implications addressed
+\end{lstlisting}
+
+\section{Handling Feedback and Iteration}
+Treat comments as collaboration. Push incremental commits so reviewers can focus on deltas, and announce rebases before force-pushing.
+
+\begin{lstlisting}[style=shell,caption={Addressing review feedback with fixup commits}]
+$ git add processors/ingest.py
+$ git commit --fixup 1f2d3ab
+$ git add docs/runbook.md
+$ git commit --fixup 1f2d3ab
+$ git rebase -i --autosquash origin/main
+$ git push --force-with-lease origin feat/async-ingest
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Rewrite a past pull request body to emphasize problem, approach, and validation explicitly.
+  \item Add a reviewer checklist to your PR template and gather feedback after a week.
+  \item Practice responding to feedback by pushing incremental commits rather than rewriting history.
+  \item Measure review lead time (creation to merge) and discuss bottlenecks with your team.
+  \item Role-play a review session with one engineer defending a risky change and another probing for risk.
+  \item Configure required reviewers for sensitive paths through CODEOWNERS and verify enforcement.
+  \item Build a notification that pings you when PRs waiting on your review exceed 24 hours.
+\end{enumerate}
+

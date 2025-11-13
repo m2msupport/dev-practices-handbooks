@@ -1,0 +1,53 @@
+\chapter{Merging, Rebasing, and Conflict Resolution}
+\section{Chapter Overview}
+Merging is diplomacy plus Git mechanics. Know when to rebase, when to merge, and how to resolve conflicts calmly so history stays readable and teammates keep trust.
+
+\section{Choosing Merge or Rebase}
+Use \texttt{git rebase} to tidy private work before sharing; use \texttt{git merge} when you need a durable record of integration. Communicate before rewriting public branches and always prefer \texttt{--force-with-lease} over \texttt{--force}.
+
+\begin{lstlisting}[style=shell,caption={Contrasting merge and rebase flows}]
+$ git switch feat/new-router
+$ git fetch origin
+$ git rebase origin/main
+$ git switch main
+$ git merge --no-ff feat/new-router
+$ git push origin main
+\end{lstlisting}
+
+\section{Conflict Management Workflow}
+Conflicts are inevitable; chaos is optional. Fetch everything, reproduce the merge locally, inspect blame/history for context, rerun tests, and narrate tricky decisions in the pull request.
+
+\begin{lstlisting}[style=shell,caption={Structured conflict resolution checklist}]
+$ git fetch --all
+$ git rebase origin/main
+$ git status
+$ git log -S"retry_interval" -- src/jobs/scheduler.py
+$ git mergetool
+$ pytest jobs/tests/test_scheduler.py
+$ git add src/jobs/scheduler.py
+$ git rebase --continue
+\end{lstlisting}
+
+\section{Scenario: Broken History After a Rebase}
+A shared branch was rebased without warning, then pushed with \texttt{--force}. Teammates lost commits until reflog pointers rescued them. The team now announces rewrites in chat, uses \texttt{--force-with-lease}, and keeps a backup branch before rewrites.
+
+\begin{lstlisting}[style=shell,caption={Recovering overwritten commits via reflog}]
+$ git fetch origin
+$ git checkout feature/shared
+$ git reflog show feature/shared | head -n 5
+$ git branch backup/rewrite feature/shared@{1}
+$ git push origin backup/rewrite
+$ git push --force-with-lease origin feature/shared
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Define when your team should use merge commits versus rebases and socialize it.
+  \item Resolve a contrived conflict using both CLI and GUI tools; record what felt faster.
+  \item Simulate overwriting teammate commits and recover using reflog plus \texttt{--force-with-lease}.
+  \item Write a pre-push hook that warns when you're about to force-push a protected branch.
+  \item Compare audit trails between merge commits and rebased histories for the same feature.
+  \item Draft a runbook for handling conflict-heavy rebases in your repo.
+  \item Track how often conflicts occur and flag hotspots so architecture can address them.
+\end{enumerate}
+

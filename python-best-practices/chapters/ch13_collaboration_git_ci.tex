@@ -1,0 +1,117 @@
+\chapter{Collaboration, Git, and CI/CD}
+\section{Chapter Overview}
+People practices sustain technical excellence.  This chapter covers source control habits,
+code reviews, and automation.
+
+\begin{lstlisting}[caption={Tracking collaboration metrics},label={lst:collab_overview}]
+from __future__ import annotations
+
+
+def review_latency(hours_waited: list[int]) -> float:
+    """Return the median wait time for reviews."""
+    sorted_hours = sorted(hours_waited)
+    mid = len(sorted_hours) // 2
+    return float(sorted_hours[mid])
+\end{lstlisting}
+
+\section{Git Hygiene}
+Commit early with focused changes.  Write imperative commit messages.  Rebase feature
+branches onto main before opening pull requests.
+
+\begin{lstlisting}[caption={Guarding commit messages via hook},label={lst:collab_git}]
+from __future__ import annotations
+
+
+def validate_commit_message(message: str) -> None:
+    """Ensure commits follow imperative style."""
+    if not message or message[0].islower():
+        raise SystemExit("Commit message must start with an imperative verb.")
+\end{lstlisting}
+
+\section{Code Review Culture}
+Treat reviews as collaborative design conversations.  Authors provide context and testing
+evidence; reviewers prioritise correctness and maintainability.
+
+\begin{lstlisting}[caption={Summarising review context automatically},label={lst:collab_review}]
+from __future__ import annotations
+
+
+def build_pr_template(tests: list[str], risks: list[str]) -> str:
+    """Produce a review-ready description."""
+    tests_block = "\n".join(f"- {test}" for test in tests)
+    risks_block = "\n".join(f"- {item}" for item in risks)
+    return f"## Tests\n{tests_block}\n\n## Risks\n{risks_block}"
+\end{lstlisting}
+
+\section{Automation and Hooks}
+
+\begin{lstlisting}[caption={Pre-commit configuration for consistent tooling},label={lst:precommit}]
+repos:
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.6.8
+    hooks:
+      - id: ruff
+      - id: ruff-format
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+\end{lstlisting}
+
+\section{Scenario: CI as Gatekeeper}
+A data team configured CI to run linters, type checkers, tests, and deployment previews.  A
+regression slipped through local testing but failed in CI because the environment built from
+scratch.  The automated gate prevented a broken migration from reaching production.
+
+\begin{lstlisting}[caption={Failing fast when CI requirements are missing},label={lst:collab_ci}]
+from __future__ import annotations
+
+
+def ensure_checks(checks: dict[str, bool]) -> None:
+    """Guard CI merges until each check reports success."""
+    missing = [name for name, passed in checks.items() if not passed]
+    if missing:
+        raise RuntimeError(f"CI gatekeeper blocked by {missing}")
+\end{lstlisting}
+
+\section{Summary}
+Healthy collaboration relies on disciplined git hygiene, respectful reviews, and CI
+pipelines that run the same automated checks for everyone.
+
+\begin{lstlisting}[caption={Summarising collaboration signals},label={lst:collab_summary}]
+from __future__ import annotations
+
+
+def summarize_collab(metrics: dict[str, float]) -> str:
+    """Return a narrative summary for the weekly sync."""
+    return (
+        f"Median review wait {metrics['review_latency']}h; "
+        f"{metrics['ci_pass_rate'] * 100:.0f}% CI pass rate."
+    )
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Review your last five commits.  Were they cohesive?  If not, how would you split
+them?
+  \item Establish a rotating reviewer schedule to spread knowledge.
+  \item Add \texttt{pre-commit} to your repository and enforce it in CI.
+  \item Create a checklist for pull request descriptions (context, tests, screenshots).
+  \item Simulate a CI outage and document manual fallback steps.
+  \item Extend Listing~\ref{lst:collab_ci} so it posts a Slack alert whenever a gatekeeper
+  blocks a merge.
+\end{enumerate}
+\begin{lstlisting}[caption={Python helper to run pre-commit},label={lst:collab_precommit}]
+from __future__ import annotations
+
+import subprocess
+
+
+def run_hooks() -> None:
+    """Re-run hooks locally so CI never surprises engineers."""
+    subprocess.run(["pre-commit", "run", "--all-files"], check=True)
+\end{lstlisting}

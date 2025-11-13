@@ -1,0 +1,144 @@
+\chapter{Testing and Quality Assurance}
+\section{Chapter Overview}
+Testing gives confidence that code behaves as designed.  This chapter covers strategy,
+tooling, and common pitfalls.
+
+\begin{lstlisting}[caption={Capturing test suite health},label={lst:testing_overview}]
+from __future__ import annotations
+
+
+def test_success_rate(passed: int, total: int) -> float:
+    """Return percentage of passing tests across the suite."""
+    return round((passed / total) * 100, 2)
+\end{lstlisting}
+
+\section{Testing Pyramid}
+Think of tests as layers:
+\begin{itemize}
+  \item Unit tests: fast, pure logic.
+  \item Integration tests: real dependencies (databases, APIs).
+  \item End-to-end tests: simulate user workflows.
+\end{itemize}
+Balance investment so feedback stays fast but coverage remains meaningful.
+
+\begin{lstlisting}[caption={Defining representative tests per layer},label={lst:testing_layers}]
+from __future__ import annotations
+
+
+def classify_test(duration_seconds: float) -> str:
+    """Return the pyramid layer a test belongs to."""
+    if duration_seconds < 0.2:
+        return "unit"
+    if duration_seconds < 5:
+        return "integration"
+    return "end_to_end"
+\end{lstlisting}
+
+\section{Pytest Example}
+
+\begin{lstlisting}[caption={Pytest module with fixtures and time control},label={lst:pytest}]
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from billing.invoices import InvoiceLine, summarise_invoice
+
+
+@pytest.fixture
+def sample_lines() -> list[InvoiceLine]:
+    return [
+        InvoiceLine(description="Subscription", quantity=1, unit_price=Decimal("49.00")),
+        InvoiceLine(description="Support", quantity=3, unit_price=Decimal("15.00")),
+    ]
+
+
+def test_summarise_invoice_counts_lines(sample_lines, freezer):
+    freezer.move_to("2024-05-01T12:00:00Z")
+    payload = summarise_invoice(sample_lines, issued_at=datetime.now(tz=UTC))
+    assert payload["line_count"] == 2
+    assert payload["subtotal"] == Decimal("94.00")
+\end{lstlisting}
+
+\section{Anti-Pattern: Untestable Code}
+
+\begin{lstlisting}[caption={Deeply coupled function that defies testing},label={lst:untestable}]
+import os
+import shutil
+from uuid import uuid4
+
+import boto3
+
+
+def sync_everything() -> None:
+    client = boto3.client("s3")
+    for path in os.listdir("/tmp"):
+        if path.endswith(".json"):
+            client.upload_file(path, "analytics-bucket", f"imports/{uuid4()}")
+            shutil.move(path, "/archive")
+\end{lstlisting}
+
+Break the function into collaborators that can be faked in tests.  Inject the S3 client and
+filesystem wrapper rather than instantiating them inline.
+
+\section{Scenario: Catching a Production Bug}
+A fintech company reproduced a production bug by writing a failing pytest that mimicked the
+customer's inputs.  After the fix, the test joined the regression suite, ensuring the issue
+could never return silently.
+
+\begin{lstlisting}[caption={Regression test distilled from an incident},label={lst:testing_regression}]
+from __future__ import annotations
+
+from billing.reports import render_statement
+
+
+def test_regression_missing_currency() -> None:
+    """Lock in the fix for an incident triggered by malformed input."""
+    payload = render_statement(currency="EUR", amount=0)
+    assert "currency" in payload
+\end{lstlisting}
+
+\section{Summary}
+Healthy suites blend fast unit tests with targeted integrations, emphasise testable code
+structure, and capture regressions the moment they appear in CI pipelines.
+
+\begin{lstlisting}[caption={Summarising flaky tests},label={lst:testing_summary}]
+from __future__ import annotations
+
+
+def summarize_flakes(failing: list[str]) -> str:
+    """Produce a string for Slack alerts describing flaky tests."""
+    if not failing:
+        return "No flaky tests detected this week."
+    return f"Flaky tests: {', '.join(sorted(failing))}"
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Rewrite Listing~\ref{lst:untestable} into a testable design with injected
+dependencies.
+  \item Add a property-based test using \texttt{hypothesis} for a function with tricky input
+domains.
+  \item Introduce contract tests for an external API your service consumes.
+  \item Configure coverage reporting in CI.  Identify untested modules.
+  \item Design a rollback drill: break a test intentionally, fix it, and measure the time it
+takes.
+  \item Extend Listing~\ref{lst:testing_layers} so it emits Prometheus metrics for each test
+  classification.
+  \item Pair-review a flaky test.  Capture the timeline of failures, hypothesise the root
+  cause, and document the outcome in the regression suite.
+\end{enumerate}
+\begin{lstlisting}[caption={Improved design with injectable collaborators},label={lst:testing_good}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+from uuid import uuid4
+
+
+def sync_documents(paths: Iterable[str], client, mover) -> None:
+    """Delegate I/O to collaborators so tests can substitute them."""
+    for path in paths:
+        if path.endswith(".json"):
+            client.upload_file(path, "analytics-bucket", f"imports/{uuid4()}")
+            mover.move(path, "/archive")
+\end{lstlisting}

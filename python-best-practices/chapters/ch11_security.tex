@@ -1,0 +1,108 @@
+\chapter{Security for Python Developers}
+\section{Chapter Overview}
+Security is everyone's responsibility.  This chapter addresses dependency hygiene, input
+validation, and safe filesystem access.
+
+\begin{lstlisting}[caption={Capturing CVE exposure},label={lst:security_overview}]
+from __future__ import annotations
+
+
+def compute_vulnerability_rate(vulnerable: int, total: int) -> float:
+    """Return proportion of dependencies with known issues."""
+    return round(vulnerable / total, 2)
+\end{lstlisting}
+
+\section{Dependency Hygiene}
+Run \texttt{pip-audit} or \texttt{Safety} regularly.  Automate updates with Dependabot or
+Renovate so vulnerabilities are patched quickly.
+
+\begin{lstlisting}[caption={Invoking pip-audit from Python},label={lst:security_audit}]
+from __future__ import annotations
+
+import subprocess
+
+
+def run_pip_audit() -> None:
+    """Fail the build when vulnerabilities exist."""
+    subprocess.run(["pip-audit", "--strict"], check=True)
+\end{lstlisting}
+
+\section{Input Validation}
+Use Pydantic models, \texttt{argparse}, or custom validators to treat all external input as
+untrusted.  Explicitly constrain formats and ranges.
+
+\begin{lstlisting}[caption={Validating API payloads},label={lst:security_validation}]
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class PaymentRequest(BaseModel):
+    """Trusted structure for inbound payloads."""
+
+    account_id: str = Field(min_length=8, max_length=32)
+    amount_cents: int = Field(gt=0, lt=100_000_00)
+\end{lstlisting}
+
+\section{Safe File Handling}
+\begin{lstlisting}[caption={Safe path resolution guards against traversal},label={lst:safe_path}]
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def read_report(report_name: str, base_dir: Path) -> str:
+    reports_dir = base_dir / "reports"
+    reports_dir.mkdir(exist_ok=True)
+    candidate = (reports_dir / report_name).resolve()
+    if reports_dir.resolve() not in candidate.parents:
+        raise PermissionError("Illegal path traversal attempt detected")
+    return candidate.read_text(encoding="utf-8")
+\end{lstlisting}
+
+\section{Scenario: Dependency Supply-Chain Attack}
+An open-source package added a malicious post-install hook.  Because the team pinned
+versions and used hash-checking installers, the compromised release never reached
+production.  They then set up signed releases and mirrored dependencies internally.
+
+\begin{lstlisting}[caption={Validating package hashes},label={lst:security_hashes}]
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+
+def verify_package(path: Path, expected_hash: str) -> None:
+    """Raise when downloaded artifacts do not match expectation."""
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != expected_hash:
+        raise RuntimeError("Package hash mismatch detected")
+\end{lstlisting}
+
+\section{Summary}
+Keep dependencies patched, treat every external input as hostile, and harden filesystem
+access to avoid trivial escalation paths.
+
+\begin{lstlisting}[caption={Summarising security posture},label={lst:security_summary}]
+from __future__ import annotations
+
+
+def summarize_findings(findings: list[str]) -> str:
+    """Condense security findings for exec summaries."""
+    if not findings:
+        return "No blocking security findings."
+    critical = [item for item in findings if "critical" in item.lower()]
+    return f"{len(findings)} findings ({len(critical)} critical) remain."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Run \texttt{pip-audit} on your project and triage any findings.
+  \item Add validation for a CLI command that currently trusts user input.
+  \item Design a security review checklist for third-party libraries.
+  \item Implement hash checking for dependency installation using \texttt{pip --require-hashes}.
+  \item Build a small demo exploiting a path traversal bug, then patch it as in
+  Listing~\ref{lst:safe_path}.
+  \item Extend Listing~\ref{lst:security_hashes} so it also validates a digital signature
+  before trusting a binary package.
+\end{enumerate}

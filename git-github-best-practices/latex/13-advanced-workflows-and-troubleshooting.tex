@@ -1,0 +1,48 @@
+\chapter{Advanced Workflows and Troubleshooting}
+\section{Chapter Overview}
+Large codebases demand advanced Git tactics: sparse checkout for monorepos, automated bisection for regressions, and calm recovery drills for destructive mistakes.
+
+\section{Monorepo Strategies}
+Use sparse checkout and partial clones so developers only touch relevant paths. Combine with path-based CI filters to avoid rebuilding the entire repository for every change.
+
+\begin{lstlisting}[style=shell,caption={Working on part of a monorepo}]
+$ git clone --filter=blob:none --sparse git@github.com:org/monorepo.git
+$ cd monorepo
+$ git sparse-checkout init --cone
+$ git sparse-checkout set services/billing shared/libs
+$ npm install --workspace services/billing
+$ npm test --workspace services/billing
+\end{lstlisting}
+
+\section{Bisecting Bugs Quickly}
+Git bisect halves the search space for regressions. Script the test command so every iteration is deterministic and logged for future reference.
+
+\begin{lstlisting}[style=shell,caption={Automated bisect run}]
+$ git bisect start
+$ git bisect bad HEAD
+$ git bisect good v2.3.0
+$ git bisect run ./scripts/smoke-test.sh
+$ git bisect reset
+\end{lstlisting}
+
+\section{Recovering from Mistakes}
+Wrong branch, wrong remote, destructive reset---these happen. Reflog and backup branches turn panic into procedure. Communicate early when mistakes affect shared history.
+
+\begin{lstlisting}[style=shell,caption={Undoing an accidental reset}]
+$ git reset --hard HEAD~3   # oops
+$ git reflog | head -n 5
+$ git reset --hard HEAD@{1}
+$ git push --force-with-lease origin feature/payment-cleanup
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Clone a large repository using \texttt{--filter=blob:none} and compare size/time to a full clone.
+  \item Configure sparse checkout for directories you actively modify and measure build savings.
+  \item Script a bisect session that runs your smoke tests automatically and logs the culprit commit.
+  \item Intentionally reset away local commits in a sandbox and recover them via reflog.
+  \item Design a playbook for responding to a destructive force push on \texttt{main}.
+  \item Evaluate whether your monorepo needs path-based CI filtering and outline the rollout.
+  \item Practice using \texttt{git worktree} to juggle multiple reviews without extra clones.
+\end{enumerate}
+

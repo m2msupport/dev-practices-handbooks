@@ -1,0 +1,81 @@
+\chapter{Checklists, Templates, and Further Reading}
+\section{Chapter Overview}
+The appendix collects reusable assets that keep teams aligned.
+
+\begin{lstlisting}[caption={Representing checklist ownership},label={lst:appendix_overview}]
+from __future__ import annotations
+
+
+def checklist_owner(name: str) -> str:
+    """Map checklist names to owners."""
+    return f"{name} owner: platform team"
+\end{lstlisting}
+
+\section{Launch Checklist}
+Before shipping, confirm that formatting, linting, typing, and tests pass locally and in CI.
+Review documentation updates, rotate credentials if needed, and run deployment rehearsals.
+
+\begin{lstlisting}[caption={Evaluating launch readiness programmatically},label={lst:appendix_launch}]
+from __future__ import annotations
+
+
+def launch_ready(checks: dict[str, bool]) -> bool:
+    """Return True when every checklist item passes."""
+    return all(checks.values())
+\end{lstlisting}
+
+\section{Template Repository}
+Maintain a starter repo containing \texttt{pyproject.toml}, \texttt{noxfile.py}, CI
+workflows, and documentation scaffolding.  New services can fork it to inherit best
+practices.
+
+\begin{lstlisting}[caption={Scaffolding a new repository from a template},label={lst:appendix_template}]
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+
+def scaffold_from_template(template: Path, destination: Path) -> None:
+    """Copy the template repo into a new project directory."""
+    shutil.copytree(template, destination, dirs_exist_ok=True)
+\end{lstlisting}
+
+\section{Further Reading}
+Recommended resources include Brett Slatkin's \emph{Effective Python}, Hynek Schlawack's
+\emph{Solid Python}, the official \emph{Python Packaging User Guide}, and the \emph{Twelve
+Factor App}.  Follow tool maintainers (Black, Ruff, Pytest, Mypy) to stay current.
+
+\begin{lstlisting}[caption={Generating reading lists},label={lst:appendix_reading}]
+from __future__ import annotations
+
+
+def reading_plan(topics: list[str]) -> list[str]:
+    """Pair topics with recommended books."""
+    return [f"{topic}: Effective Python (2nd Ed.)" for topic in topics]
+\end{lstlisting}
+
+\section{Summary}
+Standardised checklists, templates, and curated resources ensure every new initiative starts
+with the same proven guardrails.
+
+\begin{lstlisting}[caption={Summarising appendix assets},label={lst:appendix_summary}]
+from __future__ import annotations
+
+
+def summarize_assets(counts: dict[str, int]) -> str:
+    """Provide a short statement listing asset counts."""
+    return ", ".join(f"{kind}: {count}" for kind, count in counts.items())
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Build a personalised launch checklist and compare it with this appendix.
+  \item Create a template repository for your organisation and solicit feedback.
+  \item Curate a reading list tailored to your team's domain (web, data, ML).
+  \item Run a brown-bag session where each engineer shares one tool configuration tip.
+  \item Evaluate whether your onboarding guide references every relevant checklist; update
+  as needed.
+  \item Extend Listing~\ref{lst:appendix_launch} so it prints which checklist item failed
+  when the launch is blocked.
+\end{enumerate}

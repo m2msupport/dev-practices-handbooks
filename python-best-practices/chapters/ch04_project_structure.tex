@@ -1,0 +1,156 @@
+\chapter{Project Structure and Architecture}
+\section{Chapter Overview}
+A thoughtful structure reinforces boundaries and accelerates development.  This chapter
+covers folder layout, layering, and refactoring strategies.
+
+\begin{lstlisting}[caption={Capturing ownership of directories},label={lst:structure_overview}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class ModuleBoundary:
+    """Describe how code is grouped and who maintains it."""
+
+    path: str
+    owner_team: str
+    depends_on: list[str]
+\end{lstlisting}
+
+\section{Repository Layout}
+Place application code in \texttt{src/}, tests in \texttt{tests/}, documentation in
+\texttt{docs/}, and experimentation in \texttt{experiments/}.  The goal is to make every
+directory self-explanatory.
+
+\begin{lstlisting}[caption={Predictable repository layout},label={lst:layout}]
+python-best-practices/
+|-- pyproject.toml
+|-- README.md
+|-- src/
+|   `-- billing/
+|       |-- __init__.py
+|       |-- invoices.py
+|       `-- repositories.py
+|-- tests/
+|   `-- test_invoices.py
+`-- docs/
+    `-- architecture.md
+\end{lstlisting}
+
+\section{Architectural Layers}
+Layered architectures separate domain logic from infrastructure.  A typical service
+contains domain models, repositories, adapters, and entry points (CLI, HTTP, messaging).
+Each layer depends inward, making it easier to test and swap components.
+
+\begin{lstlisting}[caption={Defining explicit boundaries between layers},label={lst:structure_layers}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class Command:
+    """DTO that carries user intent from the presentation layer."""
+
+    user_id: str
+    action: str
+\end{lstlisting}
+
+\section{Scenario: Refactoring a Monolith}
+A logistics company inherited a single-file monolith that processed shipments, handled
+notifications, and exposed a CLI.  By splitting responsibilities into modules that matched
+their architecture diagram, they unlocked parallel development.  Teams could now work on
+inventory, billing, or reporting without stepping on each other's toes.
+
+\begin{lstlisting}[caption={Coarse-grained monolith vs refactored entry point},label={lst:structure_monolith}]
+def process_all() -> None:
+    """Monolithic script that mixes unrelated behaviours."""
+    load_inventory()
+    notify_customers()
+    run_cli()
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Modular orchestration after refactor},label={lst:structure_refactor}]
+from __future__ import annotations
+
+
+def orchestrate() -> None:
+    """Dispatch into modules that mirror architecture boundaries."""
+    inventory.run_pipeline()
+    notifications.send_digest()
+    cli.run()
+\end{lstlisting}
+
+\section{Code Example: Service Layer Pattern}
+Listing~\ref{lst:service_layer} shows a service that decouples use cases from persistence.
+
+\begin{lstlisting}[caption={Service layer separating domain and persistence},label={lst:service_layer}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+from uuid import UUID
+
+
+class UserGateway(Protocol):
+    def deactivate(self, user_id: UUID) -> None: ...
+
+
+class UserNotFoundError(RuntimeError):
+    """Raised when a user identifier does not exist."""
+
+
+@dataclass(slots=True)
+class UserService:
+    gateway: UserGateway
+
+    def deactivate_user(self, user_id: UUID) -> None:
+        try:
+            self.gateway.deactivate(user_id)
+        except UserNotFoundError as exc:
+            raise ValueError(f"Unknown user {user_id}") from exc
+\end{lstlisting}
+
+\section{Summary}
+Let the directory tree mirror the architecture, keep responsibilities separated by layers,
+and refactor incrementally so structure evolves alongside the product.
+
+\begin{lstlisting}[caption={Asserting architectural contracts in tests},label={lst:structure_summary}]
+from __future__ import annotations
+
+
+def assert_dependency_rule(module: str, allowed: set[str], imports: set[str]) -> None:
+    """Guardrails to ensure layers only depend inward."""
+    illegal = imports - allowed
+    if illegal:
+        raise AssertionError(f"{module} cannot import {illegal}")
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Draw an architecture diagram of your current project.  How well does the folder
+  structure reflect that diagram?
+  \item Apply the service-layer pattern from Listing~\ref{lst:service_layer} to another use
+  case (e.g., invoice approval).
+  \item Identify a module that performs both domain and persistence work.  Split it into two
+  files and note how tests change.
+  \item Design a strategy for handling cross-cutting concerns (validation, logging) without
+  violating layering.
+  \item Propose a directory naming convention for experiments or spikes and document it.
+  \item Use the pseudo-monolith snippet in Listing~\ref{lst:structure_monolith} as input and
+  sketch a refactoring plan that introduces adapters, services, and repositories.
+\end{enumerate}
+\begin{lstlisting}[caption={Validating repository layout in CI},label={lst:structure_layout}]
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def validate_layout(root: Path) -> None:
+    """Ensure expected top-level directories exist."""
+    required = {"src", "tests", "docs"}
+    missing = required - {path.name for path in root.iterdir() if path.is_dir()}
+    if missing:
+        raise SystemExit(f"Missing required directories: {sorted(missing)}")
+\end{lstlisting}

@@ -1,0 +1,81 @@
+﻿\documentclass[11pt]{book}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage{csquotes}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\lstdefinestyle{python}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  stringstyle=\color{teal},
+  commentstyle=\itshape\color{gray},
+  showstringspaces=false,
+  frame=single,
+  breaklines=true,
+  tabsize=4,
+  captionpos=b
+}
+\lstset{style=python}
+
+\title{Python Development Best Practices}
+\author{Diogo Ribeiro\\
+Data Scientist Lead\\
+Portugal\\
+\texttt{https://diogoribeiro7.github.io}\\
+\texttt{https://github.com/DiogoRibeiro7}}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+
+\maketitle
+
+\chapter*{Abstract}
+This book expands a practitioner-oriented article into a comprehensive handbook for
+intermediate and advanced Python developers.  It explains why best practices matter,
+demonstrates how to apply them with idiomatic Python~3.12 examples, and describes how real
+teams use these techniques to ship reliable software.  Each chapter blends theory,
+scenarios, code, and exercises so readers can internalise the material and adapt it to
+their own projects.
+
+\tableofcontents
+
+\mainmatter
+
+\include{chapters/ch01_introduction.tex}
+\include{chapters/ch02_code_style_readability.tex}
+\include{chapters/ch03_comments_documentation.tex}
+\include{chapters/ch04_project_structure.tex}
+\include{chapters/ch05_dependencies_environments.tex}
+\include{chapters/ch06_type_hints_static_analysis.tex}
+\include{chapters/ch07_testing_quality.tex}
+\include{chapters/ch08_error_handling_logging.tex}
+\include{chapters/ch09_configuration_secrets.tex}
+\include{chapters/ch10_performance_scalability.tex}
+\include{chapters/ch11_security.tex}
+\include{chapters/ch12_packaging_versioning.tex}
+\include{chapters/ch13_collaboration_git_ci.tex}
+\include{chapters/ch14_case_studies.tex}
+
+\appendix
+
+\include{chapters/ch15_checklists_appendix.tex}
+
+\backmatter
+
+\end{document}

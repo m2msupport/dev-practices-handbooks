@@ -1,0 +1,228 @@
+\chapter{Introduction: Why Best Practices Matter}
+\section{Chapter Overview}
+Professional Python development rarely fails because of missing syntax knowledge.  Most
+problems emerge when the surrounding practices—testing, structure, automation, culture—are
+weak or inconsistent.  This opening chapter reframes best practices as strategic tools for
+reducing risk and enabling collaboration.
+
+\begin{lstlisting}[caption={Tracking practice adoption across a portfolio},label={lst:intro_practice_debt}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class PracticeScore:
+    """Represent how consistently a team applies a given practice."""
+
+    name: str
+    health: float  # 0-1 scale
+    blocking_incidents: int
+
+
+def needs_exec_attention(score: PracticeScore) -> bool:
+    """Escalate when weakened practices repeatedly cause incidents."""
+    return score.health < 0.6 and score.blocking_incidents >= 2
+\end{lstlisting}
+
+Teams often add similar lightweight metrics to post-incident reviews so they can link
+failures back to neglected practices instead of blaming individuals.
+
+\section{From Scripts to Systems}
+Many engineers fall in love with Python by automating a tedious task.  The moment that
+script becomes a service, library, or data pipeline, the definition of success changes.
+Colleagues need repeatable environments, reliable releases, and discoverable behaviour.
+Ignoring those expectations leads to outages that are harder to diagnose than the original
+problem.
+
+\begin{lstlisting}[caption={Promoting an exploratory script into a service-friendly module},label={lst:intro_script_to_system}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(slots=True)
+class SyncJobConfig:
+    """Describe the inputs required to run the nightly sync job."""
+
+    input_dir: Path
+    output_dir: Path
+    dry_run: bool = False
+
+
+def run_sync_job(config: SyncJobConfig) -> int:
+    """Convert ad-hoc filesystem work into a composable, testable unit."""
+    processed = 0
+    for source in config.input_dir.glob("*.csv"):
+        destination = config.output_dir / source.name
+        if not config.dry_run:
+            destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        processed += 1
+    return processed
+\end{lstlisting}
+
+Bad scripts hide configuration inside global constants; production-ready modules model
+dependencies explicitly the way `SyncJobConfig` does, making it obvious how to parameterise
+jobs for CI or data replay.
+
+\subsection{Scenario: The Overnight Script}
+A support engineer wrote a quick file-parsing script that was then scheduled to run nightly
+on production data.  Weeks later an upstream schema change broke the script silently and
+the company did not notice until invoices failed.  The fix involved adding tests,
+documentation, and alerts—essentially retrofitting everything a well-structured project
+would have had from day one.  The lesson: treat every piece of code as a future dependency.
+
+\begin{lstlisting}[caption={Anti-pattern: implicit schema assumptions},label={lst:intro_schema_bad}]
+def nightly_parse(path: str) -> list[str]:
+    """Process rows but fail silently when columns change."""
+    results = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split(",")
+            results.append(parts[3])  # hard-coded column index
+    return results
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Resilient parser with validation hooks},label={lst:intro_schema_good}]
+from __future__ import annotations
+
+from pathlib import Path
+
+EXPECTED_HEADERS = ("invoice_id", "customer_id", "status", "total")
+
+
+def parse_invoices(path: Path) -> list[dict[str, str]]:
+    """Validate incoming files so incidents surface immediately."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = tuple(lines[0].split(","))
+    if header != EXPECTED_HEADERS:
+        raise ValueError(f"Unexpected schema: {header}")
+    return [
+        dict(zip(EXPECTED_HEADERS, row.split(","), strict=True))
+        for row in lines[1:]
+    ]
+\end{lstlisting}
+
+When the team deployed the validated parser, they also routed failures to PagerDuty,
+transforming a silent data loss issue into a ten-minute debugging session.
+
+\section{Four Pillars of Professional Python}
+Best practices reinforce four outcomes:
+\begin{description}
+  \item[Readability] Code tells a clear story so reviewers and incident responders can
+  reason quickly.
+  \item[Reliability] Tests, type hints, and logging ensure behaviour is predictable and
+  regressions are caught early.
+  \item[Maintainability] Modular design, versioning, and automation keep change costs low
+  even as teams grow.
+  \item[Reproducibility] Environments, data, and configuration can be recreated on fresh
+  machines, enabling confident deployments.
+\end{description}
+
+\begin{lstlisting}[caption={Capturing pillar health as structured data},label={lst:intro_pillars}]
+from __future__ import annotations
+
+from enum import Enum, auto
+
+
+class Pillar(Enum):
+    READABILITY = auto()
+    RELIABILITY = auto()
+    MAINTAINABILITY = auto()
+    REPRODUCIBILITY = auto()
+
+
+def missing_pillars(observed: set[Pillar]) -> list[Pillar]:
+    """Return the set of pillars not satisfied by a service review."""
+    return [pillar for pillar in Pillar if pillar not in observed]
+\end{lstlisting}
+
+Teams often embed functions like \texttt{missing\_pillars} inside CI linters so pull requests fail
+when key artefacts—tests, docs, deployment manifests—are absent.
+
+\section{A Motivating Code Example}
+Listing~\ref{lst:intro_example} juxtaposes an exploratory script with a production-ready
+function.  The logic is the same, but the maintainable version adds validation, typing,
+and logging hooks to support future owners.
+
+\begin{lstlisting}[caption={Transforming a script into a reusable function},label={lst:intro_example}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+
+def total_active_users(user_counts: Iterable[int]) -> int:
+    """Return the sum of daily active users after validating inputs."""
+    totals = []
+    for count in user_counts:
+        if count < 0:
+            raise ValueError("daily active users cannot be negative")
+        totals.append(count)
+    return sum(totals)
+\end{lstlisting}
+
+\section{How to Use This Book}
+Read sequentially if you are building a new codebase.  Dip into specific chapters when
+improving an existing system.  Each chapter ends with exercises to reinforce the concepts
+and to provide prompts for team discussions.
+
+\begin{lstlisting}[caption={Generating a study plan from chapter metadata},label={lst:intro_study_plan}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class Chapter:
+    """Metadata describing how a team might prioritise chapters."""
+
+    name: str
+    focus: str
+    effort_hours: int
+
+
+def pick_next_chapter(chapters: list[Chapter], topic: str) -> Chapter:
+    """Select the shortest chapter that matches the requested topic."""
+    candidates = [chapter for chapter in chapters if chapter.focus == topic]
+    return min(candidates, key=lambda chapter: chapter.effort_hours)
+\end{lstlisting}
+
+Embedding chapter planning in onboarding tooling helps managers pair new hires with the
+sections most relevant to current incidents or projects.
+
+\section{Summary}
+Best practices succeed when teams treat every script as a future dependency, pursue the four
+pillars consistently, and lean on automation plus documentation to scale collaboration.  The
+rest of the book dives into each pillar with practical guidance.
+
+\begin{lstlisting}[caption={Turning retrospectives into action items},label={lst:intro_summary}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+
+def summarize_retrospective(findings: Iterable[str]) -> dict[str, list[str]]:
+    """Group retrospective findings by pillar for postmortem dashboards."""
+    summary: dict[str, list[str]] = {"people": [], "process": [], "tooling": []}
+    for finding in findings:
+        bucket = "tooling" if "automation" in finding else "process"
+        if "on-call" in finding:
+            bucket = "people"
+        summary[bucket].append(finding)
+    return summary
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Identify a script in your organisation that quietly became a service.  List the
+  missing practices (tests, logging, configuration) and sketch a plan to add them.
+  \item Rewrite a quick-and-dirty function by applying the patterns from
+  Listing~\ref{lst:intro_example}.  What impeded readability?
+  \item Interview a teammate about a recent incident.  Which of the four pillars would have
+  prevented or shortened it?
+  \item Draft a one-page document explaining how new hires should navigate your repository.
+  Share it with the team and capture feedback.
+  \item Build a checklist for scripts that might graduate to production and store it in
+  version control.
+\end{enumerate}

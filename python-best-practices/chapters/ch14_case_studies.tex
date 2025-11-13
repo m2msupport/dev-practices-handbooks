@@ -1,0 +1,126 @@
+\chapter{Case Studies and Patterns in Real Projects}
+\section{Chapter Overview}
+Abstract guidance becomes tangible through stories.  This chapter captures recurring
+patterns from real teams.
+
+\begin{lstlisting}[caption={Representing case study metadata},label={lst:case_overview}]
+from __future__ import annotations
+
+
+def case_study_summary(name: str, impact: str) -> str:
+    """Return a short descriptor for dashboards."""
+    return f"{name}: {impact}"
+\end{lstlisting}
+
+\section{Billing Platform Modernisation}
+A SaaS billing team inherited a cron-based script that generated invoices.  They introduced
+source layout discipline (Listing~\ref{lst:layout}), wrapped calculations with typed
+modules (Listing~\ref{lst:invoice}), and added pytest coverage for every pricing rule.
+Structured logging (Listing~\ref{lst:logging}) helped support staff diagnose customer
+complaints.  Deployment frequency increased because engineers trusted their safety nets.
+
+\begin{lstlisting}[caption={Capturing invoice recalculation state},label={lst:case_billing}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class InvoiceProjection:
+    """Aggregate data used during the refactor."""
+
+    customer_id: str
+    subtotal: float
+    taxes: float
+
+
+def total_due(projection: InvoiceProjection) -> float:
+    """Return the amount customers see post-refactor."""
+    return projection.subtotal + projection.taxes
+\end{lstlisting}
+
+\section{Data Pipeline Hardening}
+An analytics squad maintained a nightly ingestion job similar to
+Listing~\ref{lst:untestable}.  After a costly outage, they refactored into injectable
+components, added property-based tests to validate CSV parsing, and enforced configuration
+loading via \texttt{Settings}.  CI now spins up ephemeral storage backends for integration
+tests, and performance monitoring from Chapter~10 alerts engineers when runtimes drift.
+
+\begin{lstlisting}[caption={Injectable pipeline components},label={lst:case_pipeline}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+
+def transform_rows(rows: Iterable[str], *, delimiter: str = ",") -> list[list[str]]:
+    """Ensure pipeline logic works with dependency injection."""
+    return [row.split(delimiter) for row in rows]
+\end{lstlisting}
+
+\section{Future Work}
+\% TODO: Add a machine-learning-focused case study covering experiment tracking,
+reproducible data, and model deployment.
+
+\begin{lstlisting}[caption={Scaffolding future case studies},label={lst:case_future}]
+from __future__ import annotations
+
+
+def placeholder_case(title: str) -> dict[str, str]:
+    """Reserve space for future patterns."""
+    return {"title": title, "status": "draft"}
+\end{lstlisting}
+
+\section{Summary}
+Case studies show how layered practices—structure, typing, testing, observability—combine to
+deliver predictable outcomes, and they highlight where future research is needed.
+
+\begin{lstlisting}[caption={Summarising lessons learned},label={lst:case_summary}]
+from __future__ import annotations
+
+
+def summarize_lessons(lessons: list[str]) -> str:
+    """Produce a concise statement for leadership debriefs."""
+    return "; ".join(lessons[:3])
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Interview another team about their most successful refactor.  Map their steps to the
+  practices in earlier chapters.
+  \item Create a mini case study for your project, documenting before/after metrics.
+  \item Design a "playbook" template for capturing future case studies.
+  \item Identify a legacy system in your organisation and propose the first three incremental
+  steps toward modernisation.
+  \item Reflect on a failed initiative.  Which missing practices contributed to the outcome?
+  \item Implement code based on Listing~\ref{lst:case_pipeline} that validates CSV headers
+  before transformation to avoid future ingestion incidents.
+\end{enumerate}
+\begin{lstlisting}[caption={Capturing invoice recalculation state},label={lst:case_billing}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class InvoiceProjection:
+    """Aggregate data used during the refactor."""
+
+    customer_id: str
+    subtotal: float
+    taxes: float
+
+
+def total_due(projection: InvoiceProjection) -> float:
+    """Return the amount customers see post-refactor."""
+    return projection.subtotal + projection.taxes
+\end{lstlisting}
+\begin{lstlisting}[caption={Injectable pipeline components},label={lst:case_pipeline}]
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+
+def transform_rows(rows: Iterable[str], *, delimiter: str = ",") -> list[list[str]]:
+    """Ensure pipeline logic works with dependency injection."""
+    return [row.split(delimiter) for row in rows]
+\end{lstlisting}

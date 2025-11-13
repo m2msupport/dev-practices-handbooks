@@ -1,0 +1,15 @@
+# Ignore everything by default
+*
+
+# But don't ignore directories (so Git can traverse them)
+!*/
+
+# Keep the gitignore file itself
+!.gitignore
+
+# Allow all .tex and .pdf files in any folder
+!**/*.tex
+!**/*.pdf
+
+!*.md
+!LICENSE

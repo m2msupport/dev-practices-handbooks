@@ -1,0 +1,72 @@
+\documentclass[11pt]{book}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage{csquotes}
+
+\geometry{margin=1in}
+
+\definecolor{shellgray}{gray}{0.95}
+\definecolor{keywordblue}{RGB}{39,92,158}
+
+\lstdefinestyle{shell}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shellgray},
+  frame=single,
+  keywordstyle=\color{keywordblue},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\lstdefinestyle{gitconfig}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shellgray},
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\title{Git and GitHub Best Practices}
+\author{Diogo Ribeiro\\Data Scientist Lead, Portugal\\\href{https://diogoribeiro7.github.io}{https://diogoribeiro7.github.io}\\\href{https://github.com/DiogoRibeiro7}{https://github.com/DiogoRibeiro7}}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+Pragmatic Git and GitHub usage lets engineering teams ship quickly without gambling on history rewrites or risky deploys. This book distills field-tested workflows, policy templates, and recovery tactics so intermediate users can operate with senior-level discipline.
+
+\tableofcontents
+
+\mainmatter
+
+\include{latex/01-introduction-why-version-control-discipline-matters}
+\include{latex/02-mental-models-for-git}
+\include{latex/03-personal-git-hygiene}
+\include{latex/04-commits-units-of-change}
+\include{latex/05-branching-strategies}
+\include{latex/06-merging-rebasing-and-conflict-resolution}
+\include{latex/07-working-with-remotes-and-forks}
+\include{latex/08-github-repository-hygiene}
+\include{latex/09-pull-requests-and-code-review}
+\include{latex/10-continuous-integration-and-github-actions}
+\include{latex/11-release-management-and-tags}
+\include{latex/12-security-secrets-and-compliance}
+\include{latex/13-advanced-workflows-and-troubleshooting}
+
+\appendix
+
+\include{latex/14-checklists-templates-and-further-reading}
+
+\end{document}

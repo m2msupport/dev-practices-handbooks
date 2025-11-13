@@ -1,0 +1,114 @@
+\chapter{Packaging, Distribution, and Versioning}
+\section{Chapter Overview}
+Packaging turns code into artifacts that other teams can trust.  Follow modern packaging
+standards and disciplined versioning.
+
+\begin{lstlisting}[caption={Recording release metadata},label={lst:packaging_overview}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class Release:
+    """Track release metadata for internal dashboards."""
+
+    version: str
+    commit: str
+    released_by: str
+\end{lstlisting}
+
+\section{Build Real Packages}
+Provide \texttt{\_\_init\_\_.py} files, export stable APIs, and publish wheels to internal
+or public registries.  Modern workflows revolve around \texttt{pyproject.toml}.
+
+\begin{lstlisting}[caption={Building distributions via Python},label={lst:packaging_build}]
+from __future__ import annotations
+
+import subprocess
+
+
+def build_package() -> None:
+    """Invoke the build backend and emit sdist + wheel."""
+    subprocess.run(["python", "-m", "build"], check=True)
+\end{lstlisting}
+
+\section{Entry Points}
+\begin{lstlisting}[caption={Console script entry point},label={lst:entry_point}]
+[project.scripts]
+bill = "billing.cli:main"
+\end{lstlisting}
+
+\section{Versioning Discipline}
+Adopt semantic versioning: MAJOR for breaking changes, MINOR for new features, PATCH for
+bug fixes.  Tag releases in Git and maintain a human-readable changelog.
+
+\begin{lstlisting}[caption={Bumping semantic versions programmatically},label={lst:packaging_version}]
+from __future__ import annotations
+
+
+def bump(version: str, level: str) -> str:
+    """Return a new semver string at the requested level."""
+    major, minor, patch = map(int, version.split("."))
+    match level:
+        case "major":
+            major += 1
+            minor = 0
+            patch = 0
+        case "minor":
+            minor += 1
+            patch = 0
+        case "patch":
+            patch += 1
+        case _:
+            raise ValueError("Unknown level")
+    return f"{major}.{minor}.{patch}"
+\end{lstlisting}
+
+\section{Scenario: Coordinated Release Train}
+A platform team shipped a library consumed by ten services.  They instituted a release train
+where every Wednesday a new minor version shipped with release notes and migration guides.
+Incidents dropped because downstream teams could plan upgrades.
+
+\begin{lstlisting}[caption={Generating release train schedules},label={lst:packaging_schedule}]
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+
+def release_train(start: date, *, cadence_days: int = 7) -> list[date]:
+    """Return upcoming release windows."""
+    return [start + timedelta(days=cadence_days * offset) for offset in range(4)]
+\end{lstlisting}
+
+\section{Summary}
+Ship libraries with modern metadata, expose clear entry points, and manage semantic versions
+plus changelogs so downstream consumers can upgrade confidently.
+
+\begin{lstlisting}[caption={Summarising adoption},label={lst:packaging_summary}]
+from __future__ import annotations
+
+
+def summarize_consumers(consumers: list[str]) -> str:
+    """Return a summary of services pinned to the latest release."""
+    return f"{len(consumers)} downstream services upgraded this sprint."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Package a small module into a wheel and install it in a clean environment.
+  \item Create a changelog entry for a hypothetical breaking change.
+  \item Add release automation to CI (e.g., publish to TestPyPI on tag).
+  \item Define compatibility guarantees for your public API and document them.
+  \item Evaluate whether your project should use namespace packages or a monorepo layout.
+  \item Extend Listing~\ref{lst:packaging_version} so it updates \texttt{pyproject.toml}
+  and commits the change automatically.
+\end{enumerate}
+\begin{lstlisting}[caption={Implementing the console script target},label={lst:packaging_entrypoint}]
+from __future__ import annotations
+
+
+def main() -> None:
+    """Entrypoint invoked by console scripts."""
+    print("Billing CLI ready")
+\end{lstlisting}

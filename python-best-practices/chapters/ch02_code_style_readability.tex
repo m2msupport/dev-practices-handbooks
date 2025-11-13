@@ -1,0 +1,188 @@
+\chapter{Code Style and Readability}
+\section{Chapter Overview}
+Style is not mere aesthetics; it is a communication contract.  When code follows shared
+conventions, teams spend less time deciphering formatting and more time reasoning about
+behaviour.
+
+\begin{lstlisting}[caption={Capturing style rule adherence},label={lst:style_score}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class StyleScore:
+    """Lightweight structure for tracking readability drift."""
+
+    module: str
+    naming_rules_passed: bool
+    formatter_ran: bool
+\end{lstlisting}
+
+\section{PEP~8 as a Shared Vocabulary}
+PEP~8 codifies naming, indentation, and whitespace rules.  Adhering to it means any Python
+developer can jump into the repository without a style orientation session.  When exceptions
+are necessary—long SQL strings or generated code—document the rationale in the README or a
+style guide.
+
+\begin{lstlisting}[caption={Encoding naming rules in review helpers},label={lst:pep8_helper}]
+from __future__ import annotations
+
+
+def enforce_snake_case(names: list[str]) -> list[str]:
+    """Return identifiers that require refactoring."""
+    return [name for name in names if any(ch.isupper() for ch in name)]
+\end{lstlisting}
+
+Many teams run helpers like \texttt{enforce\_snake\_case} in review bots so regression is impossible
+without an explicit waiver.
+
+\section{Tooling Over Taste}
+Automate style enforcement to reduce cognitive load.  \texttt{black} or \texttt{ruff
+format} handle formatting, \texttt{ruff} enforces linting rules, and \texttt{isort} (or
+\texttt{ruff}'s import subsystem) maintains deterministic import order.  Configure the tools
+in \texttt{pyproject.toml} and run them via \texttt{pre-commit} so every change goes through
+the same gate.
+
+\begin{lstlisting}[caption={Guarding formatters inside CI scripts},label={lst:style_tooling}]
+from __future__ import annotations
+
+import subprocess
+
+
+def run_formatter() -> None:
+    """Exit the build early when the formatter changes files."""
+    result = subprocess.run(["ruff", "format", "--check", "."], check=False)
+    if result.returncode != 0:
+        msg = "Formatting drift detected; run `ruff format` locally."
+        raise SystemExit(msg)
+\end{lstlisting}
+
+\section{Bad vs Good Example}
+Listing~\ref{lst:bad_style} and Listing~\ref{lst:good_style} show how naming and structure
+transform comprehension.  Both compute a discounted total, but the improved version reveals
+intent immediately.
+
+\begin{lstlisting}[caption={Anti-pattern: inconsistent naming and hidden branching},label={lst:bad_style}]
+def calc(d, p):
+    t = 0
+    for x in d:
+        t += x
+    if p:
+        t -= t * p
+    return t
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Readable implementation with validation},label={lst:good_style}]
+from __future__ import annotations
+
+
+def calculate_discounted_total(prices: list[float], discount: float) -> float:
+    """Return the discounted total after validating all inputs."""
+    if discount < 0 or discount > 1:
+        raise ValueError("discount must be a percentage between 0 and 1")
+
+    if any(price < 0 for price in prices):
+        raise ValueError("prices must be non-negative")
+
+    subtotal = sum(prices)
+    return subtotal * (1 - discount)
+\end{lstlisting}
+
+\section{Module-Sized Example}
+Listing~\ref{lst:invoice} demonstrates how naming, docstrings, and dataclasses combine in a
+realistic module that a billing service could ship.
+
+\begin{lstlisting}[caption={Invoice summariser for a billing engine},label={lst:invoice}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Iterable
+
+
+@dataclass(frozen=True)
+class InvoiceLine:
+    description: str
+    quantity: int
+    unit_price: Decimal
+
+    def total(self) -> Decimal:
+        """Return a rounded line total."""
+        subtotal = self.unit_price * self.quantity
+        return subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def summarise_invoice(lines: Iterable[InvoiceLine], issued_at: datetime) -> dict[str, object]:
+    """Produce a payload for downstream email, PDF, or API consumers."""
+    totals = [line.total() for line in lines]
+    return {
+        "issued_at": issued_at.isoformat(),
+        "line_count": len(totals),
+        "subtotal": sum(totals),
+        "currency": "USD",
+    }
+\end{lstlisting}
+
+\section{Scenario: Style Drift in a Release Crunch}
+During a tight deadline, a payments team disabled the formatter because it produced merge
+conflicts with an experimental branch.  Within two weeks, code reviews were bogged down by
+spacing debates and subtle bugs introduced by inconsistent imports.  After the release,
+they reinstated \texttt{pre-commit} hooks and added \texttt{ruff} checks to CI to prevent
+future drift.
+
+\begin{lstlisting}[caption={Detecting inconsistent formatting in a pull request},label={lst:style_drift}]
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def detect_style_drift(diff_root: Path) -> list[Path]:
+    """Spot modules that violate formatting during emergency fixes."""
+    offenders = []
+    for path in diff_root.rglob("*.py"):
+        if "\t" in path.read_text(encoding="utf-8"):
+            offenders.append(path)
+    return offenders
+\end{lstlisting}
+
+When the crunch was over, the team ran \texttt{detect\_style\_drift} against every hotfix branch,
+opened follow-up issues for each offender, and cleared the debt before the next release.
+
+\section{Summary}
+Consistent style grows from agreed rules, automated enforcement, and shared examples that
+clarify expectations.  Keep the tooling always-on so humans focus on logic rather than
+indentation debates.
+
+\begin{lstlisting}[caption={Summarising style violations for dashboards},label={lst:style_summary}]
+from __future__ import annotations
+
+
+def summarize_violations(violations: dict[str, int]) -> str:
+    """Return a short sentence for incident reviews."""
+    worst_offender = max(violations, key=violations.get)
+    total = sum(violations.values())
+    return f"{total} style issues detected; {worst_offender} needs a cleanup."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Format a messy module manually, then re-run \texttt{black}.  Note every change the
+  formatter made and decide which rules you would not have caught.
+  \item Using Listing~\ref{lst:bad_style}, annotate each readability issue and propose a
+  rule that would catch it automatically.
+  \item Configure \texttt{ruff} to enforce import sorting.  Break the rule intentionally and
+  observe the linter output.
+  \item Pair with a teammate and review a 200-line pull request.  Track how often naming or
+  formatting slowed understanding.  Compare notes and create a shared checklist.
+  \item Extend your team's style guide with two domain-specific conventions (e.g., how to
+  name dataclass factories) and circulate the update.
+  \item Refactor the snippet below into readable code with docstrings and typing.
+  \begin{lstlisting}[caption={Exercise: refactor for clarity},label={lst:style_exercise_refactor}]
+def calc(x, y):
+    return sum([a * y for a in x if a > 0])
+  \end{lstlisting}
+  \item Evaluate a formatter configuration that lives in \texttt{pyproject.toml}.  Explain
+  which defaults you overrode and why they matter to your domain.
+\end{enumerate}

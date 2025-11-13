@@ -1,0 +1,46 @@
+\chapter{Working with Remotes and Forks}
+\section{Chapter Overview}
+Remote configuration determines whether forks stay current or turn into merge nightmares. Know which remote is authoritative, how to sync safely, and how to mirror repositories for compliance without risking divergence.
+
+\section{Upstream Sync}
+Forks fall behind quickly unless you routinely pull from the canonical repository. Automate syncing so your pull requests only contain intentional work.
+
+\begin{lstlisting}[style=shell,caption={Keeping a fork aligned with upstream}]
+$ git remote add upstream git@github.com:org/app.git
+$ git fetch upstream
+$ git switch main
+$ git merge --ff-only upstream/main
+$ git push origin main
+\end{lstlisting}
+
+\section{Collaborating via Forks}
+When contributors lack direct write access, forks plus pull requests enable safely audited contributions. Keep branches narrow, mention maintainers early, and reference issues for context.
+
+\begin{lstlisting}[style=shell,caption={Submitting work from a fork}]
+$ git switch -c feat/api-timeouts
+$ git commit -am "feat: add per-client timeout config"
+$ git push --set-upstream origin feat/api-timeouts
+$ gh pr create --title "feat: customizable timeouts" --body "Problem, solution, validation"
+\end{lstlisting}
+
+\section{Mirrors and Read-Only Remotes}
+Some enterprises mirror GitHub repositories into internal Git servers for analytics or legal archiving. Treat mirrors as read-only replication targets and push only to the primary remote to avoid split histories.
+
+\begin{lstlisting}[style=shell,caption={Updating a read-only mirror}]
+$ git clone --bare git@github.com:org/app.git
+$ cd app.git
+$ git remote add mirror ssh://git.corp/mirrors/app.git
+$ git push --mirror mirror
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item List every remote in your flagship repository and identify who owns each.
+  \item Automate fork syncing with a scheduled GitHub Action or cron job.
+  \item Practice submitting a pull request from a fork with zero write access.
+  \item Configure a read-only mirror in a sandbox and verify pushes to it fail.
+  \item Document when developers may use \texttt{--force-with-lease} versus when to open a new branch.
+  \item Evaluate whether stale forks should be archived and propose a review cadence.
+  \item Inspect remote URLs for SSH vs HTTPS usage and align with company policy.
+\end{enumerate}
+

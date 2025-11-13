@@ -1,0 +1,65 @@
+\chapter{Introduction: Why Version Control Discipline Matters}
+\section{Chapter Overview}
+Discipline in version control keeps fast-moving teams from tripping over their own velocity. This chapter shows why sloppy histories cost real money, which guardrails prevent incidents, and how to tell if your repository health is drifting in the wrong direction.
+
+\section{From Solo Hacks to Team Delivery}
+A lone developer can survive with improvised workflows, but once multiple contributors share a branch every shortcut multiplies risk. Agree on branch creation, commit hygiene, pull request narratives, and validation evidence before work begins so nobody has to reverse-engineer intent during a release train.
+
+\begin{lstlisting}[style=shell,caption={Moving from improvisation to a reviewable workflow}]
+$ git switch main
+$ git pull --ff-only
+$ git switch -c feat/runtime-metrics
+$ git add dashboards/runtime.py flag_config.yaml
+$ git commit -m "feat: add runtime metrics dashboard"
+$ git push -u origin feat/runtime-metrics
+$ gh pr create --title "feat: runtime metrics" --body-file .github/pull_request_template.md
+\end{lstlisting}
+
+\section{Guardrails that Fail Fast}
+Automation protects the team from its own urgency. Branch protection, required checks, and signed commits block dangerous merges before customers feel the blast radius. Without guardrails, "just this once" force pushes become habit and recovering lost work dominates sprint time.
+
+\begin{lstlisting}[style=shell,caption={Enforcing protections with the GitHub CLI}]
+$ cat > .github/main-protection.json <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["ci"]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "required_approving_review_count": 2
+  },
+  "required_linear_history": true,
+  "restrictions": null
+}
+JSON
+$ gh api \
+    -X PUT \
+    -H "Accept: application/vnd.github+json" \
+    repos/org/app/branches/main/protection \
+    --input .github/main-protection.json
+\end{lstlisting}
+
+\section{Scenario: Hotfix Fallout}
+A payments team force-pushed a hotfix directly to \texttt{main}. The patch worked, but the push rewound three approved commits that had already rolled through staging. Customers were double charged, the on-call team spent hours rebuilding history from reflog entries, and finance issued refunds for a preventable incident. The fix was simple: a protected hotfix branch, documented approval steps, and a recovery checklist.
+
+\begin{lstlisting}[style=shell,caption={Post-incident recovery runbook}]
+$ git fetch origin
+$ git checkout -b incident/recover-main origin/main@{1}
+$ git cherry-pick 4f2c1ab 7ac923e
+$ git push origin incident/recover-main
+$ gh pr create --title "Restore commits lost to hotfix" --body "Recovered from reflog; includes QA transcript."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Document the last Git-related incident in your team and identify the missing guardrail.
+  \item Run \texttt{git status -sb}, \texttt{git branch -vv}, and \texttt{gh run list --limit 5} on your flagship repo; note surprises.
+  \item Draft a force-push policy covering who may do it, notification steps, and recovery expectations.
+  \item Export current branch protection rules via \texttt{gh api} and diff them against your documented policy.
+  \item Build a script that highlights pull requests lacking CI results after 30 minutes.
+  \item Interview product or support partners about how Git discipline affects their release confidence.
+  \item Propose quantitative signals (lead time, rollback count, branch age) that indicate version-control drift.
+\end{enumerate}
+

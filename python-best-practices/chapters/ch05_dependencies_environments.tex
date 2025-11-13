@@ -1,0 +1,131 @@
+\chapter{Dependencies and Environments}
+\section{Chapter Overview}
+Environment drift is a leading cause of ``works on my machine'' bugs.  This chapter explains
+how to manage dependencies systematically.
+
+\begin{lstlisting}[caption={Capturing environment information},label={lst:deps_overview}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class EnvironmentReport:
+    """Track interpreter, dependency lock, and platform data."""
+
+    python_version: str
+    lockfile_hash: str
+    platform: str
+\end{lstlisting}
+
+\section{Virtual Environments Everywhere}
+Use \texttt{python -m venv}, \texttt{uv}, or \texttt{pipenv} to isolate dependencies per
+project.  Document activation commands and add helper scripts that install tooling in one
+step.
+
+\begin{lstlisting}[caption={Bootstrapping a virtual environment programmatically},label={lst:deps_venv}]
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+
+def create_environment(venv_dir: Path) -> None:
+    """Create and populate a deterministic virtual environment."""
+    subprocess.run(["python", "-m", "venv", str(venv_dir)], check=True)
+    subprocess.run([str(venv_dir / "Scripts" / "python"), "-m", "pip", "install", "-U", "pip"], check=True)
+\end{lstlisting}
+
+\section{Pinning and Locking}
+Declare dependencies in \texttt{pyproject.toml} and generate lock files with \texttt{uv
+lock} or \texttt{pip-compile}.  Commit the lock files so CI and production match local
+development.
+
+\begin{lstlisting}[caption={Verifying lock files before deployment},label={lst:deps_lock}]
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+
+def lock_hash(path: Path) -> str:
+    """Return the hash used to verify reproducible installs."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+\end{lstlisting}
+
+\section{Example: pyproject Snippet}
+\begin{lstlisting}[caption={pyproject snippet with optional dependencies},label={lst:pyproject}]
+[project]
+name = "billing-service"
+version = "0.4.0"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.5",
+  "ruff==0.6.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "mypy>=1.11", "hypothesis>=6.99"]
+\end{lstlisting}
+
+\section{Scenario: Missing Dependency in Production}
+An e-commerce team relied on a globally installed CLI utility that was present on their
+laptops but not on CI servers.  A deployment failed hours before Black Friday.  The root
+cause was a missing dependency specification.  After the incident, they moved all tooling
+into \texttt{pyproject.toml} and added smoke tests to CI that bootstrap environments from
+scratch.
+
+\begin{lstlisting}[caption={Ensuring tools are declared explicitly},label={lst:deps_missing}]
+from __future__ import annotations
+
+from importlib import metadata
+
+
+def assert_tool_declared(package: str) -> None:
+    """Fail fast when required tooling is absent."""
+    try:
+        metadata.version(package)
+    except metadata.PackageNotFoundError as exc:
+        raise RuntimeError(f"Missing dependency: {package}") from exc
+\end{lstlisting}
+
+\section{Summary}
+Reliable deployments depend on isolated environments, locked dependency graphs, and CI
+pipelines that recreate installations exactly as production does.
+
+\begin{lstlisting}[caption={Summarising dependency health for dashboards},label={lst:deps_summary}]
+from __future__ import annotations
+
+
+def summarize_dependencies(outdated: list[str]) -> str:
+    """Provide leadership-friendly summary of update backlog."""
+    if not outdated:
+        return "All dependencies are current."
+    return f"{len(outdated)} packages require upgrades: {', '.join(outdated[:5])}..."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Regenerate your lock file using \texttt{uv} or \texttt{pip-compile}.  How many
+  transitive dependencies changed?
+  \item Write a shell script that recreates the project environment from scratch.  Run it on
+  a clean machine or container.
+  \item Audit your repository for globally installed tools.  Add them to \texttt{pyproject}
+  extras.
+  \item Introduce a deliberate dependency conflict and run \texttt{pip check} to observe the
+  failure.
+  \item Design a process for handling emergency dependency upgrades triggered by security
+  advisories.
+  \item Extend Listing~\ref{lst:deps_lock} to compare hash values between CI and production
+  deployments.  Explain how you would alert on mismatches.
+\end{enumerate}
+\begin{lstlisting}[caption={Install dependencies from the defined groups},label={lst:deps_install}]
+from __future__ import annotations
+
+import subprocess
+
+
+def install_group(group: str) -> None:
+    """Install an optional dependency group from pyproject metadata."""
+    subprocess.run(["uv", "pip", "install", f".[{group}]"], check=True)
+\end{lstlisting}

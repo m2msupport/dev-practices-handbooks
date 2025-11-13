@@ -1,0 +1,149 @@
+\chapter{Comments and Documentation}
+\section{Chapter Overview}
+Well-structured code minimises the need for comments, yet documentation remains essential
+for sharing context, intent, and processes.
+
+\begin{lstlisting}[caption={Tracking documentation freshness},label={lst:docs_overview}]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(slots=True)
+class DocumentStatus:
+    """Keep tabs on which guides need attention."""
+
+    path: str
+    last_reviewed: datetime
+
+
+def needs_refresh(status: DocumentStatus, *, months: int = 6) -> bool:
+    """Flag documents that have gone stale."""
+    delta = datetime.now(tz=status.last_reviewed.tzinfo) - status.last_reviewed
+    return delta.days > months * 30
+\end{lstlisting}
+
+\section{Docstrings that Educate}
+Docstrings should answer three questions: what does this item do, what are its inputs and
+outputs, and when does it raise exceptions?  Follow the "one-line summary + details"
+format so tools like Sphinx can render the text neatly.
+
+\begin{lstlisting}[caption={Docstring capturing behaviour and failure modes},label={lst:docs_docstring}]
+from __future__ import annotations
+
+
+def parse_currency(value: str) -> int:
+    """Return cents for a currency string; raise ValueError on malformed input."""
+    if not value.startswith("$"):
+        raise ValueError("Currency must start with a dollar sign.")
+    dollars, cents = value[1:].split(".")
+    return int(dollars) * 100 + int(cents)
+\end{lstlisting}
+
+\section{Inline Comments for Intent}
+Inline comments should explain \emph{why}, not \emph{what}.  They are ideal for noting
+workarounds, referencing bug tickets, or clarifying domain constraints.  Delete them once
+they become obsolete to avoid misleading readers.
+
+\begin{lstlisting}[caption={Inline comments that explain surprising workarounds},label={lst:docs_inline}]
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+
+def next_billing_window(now: datetime) -> datetime:
+    """Return the start of the next billing window."""
+    window = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    # Stripe batches reconcile at 5-minute intervals, so align to that cadence.
+    return window.replace(minute=(window.minute // 5 + 1) * 5)
+\end{lstlisting}
+
+\section{Project Documentation Stack}
+Combine lightweight Markdown guides with generated API references.  Example structure:
+\texttt{README.md} for onboarding, \texttt{docs/architecture.md} for high-level design,
+Sphinx or MkDocs for API references, and runbooks for deployment and incident response.
+
+\begin{lstlisting}[caption={Generating a docs index programmatically},label={lst:docs_stack}]
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def ensure_docs_index(root: Path) -> None:
+    """Create a landing page that references every Markdown guide."""
+    guides = sorted(root.glob("*.md"))
+    body = "\n".join(f"- [{guide.stem}]({guide.name})" for guide in guides)
+    (root / "index.md").write_text(body, encoding="utf-8")
+\end{lstlisting}
+
+\section{Code Example: Documentation-Driven Development}
+Listing~\ref{lst:documented_function} demonstrates an API that uses docstrings and inline
+comments to highlight non-obvious behaviour.
+
+\begin{lstlisting}[caption={Docstring and inline comment illustrating intent},label={lst:documented_function}]
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+
+def anonymise_timestamp(raw_timestamp: str) -> datetime:
+    """Return an hourly bucket so analytics cannot deanonymise individual events."""
+    timestamp = datetime.fromisoformat(raw_timestamp).astimezone(UTC)
+    # We discard minutes/seconds to comply with the analytics retention policy.
+    return timestamp.replace(minute=0, second=0, microsecond=0)
+\end{lstlisting}
+
+\section{Scenario: Docs Saved a Launch}
+A healthcare startup had to demonstrate auditability to regulators.  Because the team
+maintained up-to-date architecture diagrams and onboarding walkthroughs, they produced the
+requested evidence in hours instead of weeks.  The documentation discipline paid off even
+though the company had never planned for a government review.
+
+\begin{lstlisting}[caption={Collecting evidence links quickly},label={lst:docs_audit}]
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def gather_audit_artifacts(root: Path) -> list[Path]:
+    """Return runbooks and diagrams needed during regulated reviews."""
+    return [path for path in root.rglob("*") if path.suffix in {".md", ".drawio"}]
+\end{lstlisting}
+
+\section{Summary}
+Documentation succeeds when it explains intent, evolves with the system, and exists at
+multiple layers—from docstrings to architecture guides and runbooks.
+
+\begin{lstlisting}[caption={Summarising documentation gaps},label={lst:docs_summary}]
+from __future__ import annotations
+
+
+def summarize_gaps(gaps: dict[str, list[str]]) -> str:
+    """Turn gap analysis into a concise statement for leadership."""
+    missing = ", ".join(sorted(gaps))
+    return f"Docs need updates for {missing}; owners assigned."
+\end{lstlisting}
+
+\section*{Exercises}
+\begin{enumerate}
+  \item Choose an undocumented function and write a docstring that follows the style in
+  Listing~\ref{lst:documented_function}.
+  \item Create an inline comment explaining a surprising line of code, then refactor until
+  the comment is unnecessary.
+  \item Generate API documentation with Sphinx for a small module.  What metadata is
+  missing?
+  \item Draft a runbook for a scheduled job.  Include inputs, expected outputs, and failure
+  procedures.
+  \item Interview a new hire about confusing documentation gaps and log the findings as
+  GitHub issues.
+  \item Use the snippet below to explain how you would document the edge cases.
+  \begin{lstlisting}[caption={Exercise: document behaviour},label={lst:docs_ex_doc}]
+def compute(offset: int) -> int:
+    if offset < 0:
+        return 0
+    return offset * 2
+  \end{lstlisting}
+  \item Sketch a documentation stack diagram that shows how README files, architecture
+  records, and runbooks link to each other.  Identify who updates each artefact.
+\end{enumerate}
