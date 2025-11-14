@@ -1,0 +1,1985 @@
+\chapter{MLOps Automation and CI/CD}
+
+\section{Introduction}
+
+Manual ML deployments fail. A data scientist manually trains a model, copies files to production via SCP, restarts services, and hopes nothing breaks. Two weeks later, nobody remembers which model version is deployed, what data it was trained on, or how to rollback if issues arise. This is the reality for 60\% of ML teams—and why most ML projects never deliver sustained business value.
+
+\subsection{The Manual Deployment Problem}
+
+Consider a fraud detection team that manually deploys models weekly. One Friday afternoon, a data scientist deploys a new model that was accidentally trained on corrupted data. The model approves 95\% of transactions (baseline: 85\%), including fraudulent ones. By Monday morning, \$3M in fraudulent charges have been approved. The team spends 12 hours finding and reverting to the correct model version.
+
+\subsection{Why MLOps Automation Matters}
+
+ML systems differ from traditional software:
+
+\begin{itemize}
+    \item \textbf{Code + Data + Model}: Three components that must be versioned together
+    \item \textbf{Experimental Nature}: Models evolve through experimentation, requiring rapid iteration
+    \item \textbf{Performance Decay}: Models degrade over time, requiring automated retraining
+    \item \textbf{Complex Dependencies}: Training environments differ from serving environments
+    \item \textbf{Reproducibility}: Exact model recreation requires tracking all inputs and hyperparameters
+    \item \textbf{Multiple Stages}: Dev, staging, production require different configurations
+\end{itemize}
+
+\subsection{The Cost of Manual MLOps}
+
+Industry evidence shows:
+\begin{itemize}
+    \item \textbf{Manual deployments} take 4-6 hours and have 40\% failure rate
+    \item \textbf{Configuration errors} cause 35\% of production ML incidents
+    \item \textbf{Lack of automation} delays model updates by 2-4 weeks
+    \item \textbf{Manual rollbacks} take 8-12 hours during incidents
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-grade MLOps automation:
+
+\begin{enumerate}
+    \item \textbf{CI/CD Pipelines}: Automated testing, building, and deployment
+    \item \textbf{Training Automation}: Trigger-based retraining with validation
+    \item \textbf{Infrastructure as Code}: Terraform/CloudFormation for ML infrastructure
+    \item \textbf{Model Promotion}: Automated validation and approval workflows
+    \item \textbf{Configuration Management}: Environment-specific settings and secrets
+    \item \textbf{Rollback Automation}: Instant reversion to previous versions
+    \item \textbf{GitOps}: Git as single source of truth for deployments
+\end{enumerate}
+
+\section{CI/CD Pipelines for ML}
+
+Automated pipelines ensure every code and model change is tested, validated, and deployed consistently.
+
+\subsection{CICDManager: Git-Integrated Pipeline}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive CI/CD Framework}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable
+from enum import Enum
+from pathlib import Path
+from datetime import datetime
+import subprocess
+import logging
+import yaml
+import json
+
+logger = logging.getLogger(__name__)
+
+class PipelineStage(Enum):
+    """CI/CD pipeline stages."""
+    LINT = "lint"
+    TEST = "test"
+    BUILD = "build"
+    SECURITY_SCAN = "security_scan"
+    DEPLOY_STAGING = "deploy_staging"
+    VALIDATE = "validate"
+    DEPLOY_PROD = "deploy_prod"
+
+class DeploymentStatus(Enum):
+    """Deployment status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+
+@dataclass
+class PipelineConfig:
+    """
+    CI/CD pipeline configuration.
+
+    Attributes:
+        name: Pipeline identifier
+        trigger_branch: Git branch that triggers pipeline
+        stages: Ordered list of stages to execute
+        auto_deploy_staging: Auto-deploy to staging on success
+        auto_deploy_prod: Auto-deploy to prod (requires approval)
+        slack_webhook: Slack webhook for notifications
+        rollback_on_failure: Auto-rollback on validation failure
+    """
+    name: str
+    trigger_branch: str = "main"
+    stages: List[PipelineStage] = field(default_factory=list)
+    auto_deploy_staging: bool = True
+    auto_deploy_prod: bool = False
+    slack_webhook: Optional[str] = None
+    rollback_on_failure: bool = True
+
+@dataclass
+class DeploymentRecord:
+    """
+    Record of a deployment.
+
+    Attributes:
+        deployment_id: Unique identifier
+        git_commit: Git commit SHA
+        model_version: Model version deployed
+        environment: Target environment
+        status: Deployment status
+        timestamp: When deployment occurred
+        duration: Deployment duration in seconds
+        artifacts: Deployed artifacts
+        rollback_to: Previous version (for rollback)
+    """
+    deployment_id: str
+    git_commit: str
+    model_version: str
+    environment: str
+    status: DeploymentStatus
+    timestamp: datetime
+    duration: Optional[float] = None
+    artifacts: Dict[str, str] = field(default_factory=dict)
+    rollback_to: Optional[str] = None
+
+class CICDManager:
+    """
+    CI/CD pipeline manager for ML projects.
+
+    Integrates with Git, runs automated tests, validates models,
+    and manages deployments across environments.
+
+    Example:
+        >>> cicd = CICDManager(config, repo_path=".")
+        >>> cicd.run_pipeline()
+    """
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        repo_path: str = ".",
+        artifacts_path: str = "./artifacts"
+    ):
+        """
+        Initialize CI/CD manager.
+
+        Args:
+            config: Pipeline configuration
+            repo_path: Path to Git repository
+            artifacts_path: Path for build artifacts
+        """
+        self.config = config
+        self.repo_path = Path(repo_path)
+        self.artifacts_path = Path(artifacts_path)
+
+        # Create artifacts directory
+        self.artifacts_path.mkdir(parents=True, exist_ok=True)
+
+        # Deployment history
+        self.deployments: List[DeploymentRecord] = []
+
+        logger.info(f"Initialized CI/CD pipeline: {config.name}")
+
+    def run_pipeline(
+        self,
+        skip_stages: Optional[List[PipelineStage]] = None
+    ) -> bool:
+        """
+        Execute CI/CD pipeline.
+
+        Args:
+            skip_stages: Stages to skip
+
+        Returns:
+            True if pipeline succeeded
+        """
+        skip_stages = skip_stages or []
+        start_time = datetime.now()
+
+        logger.info(f"Starting CI/CD pipeline: {self.config.name}")
+
+        # Get Git info
+        git_commit = self._get_git_commit()
+        git_branch = self._get_git_branch()
+
+        logger.info(f"Git commit: {git_commit}, branch: {git_branch}")
+
+        # Check if branch matches trigger
+        if git_branch != self.config.trigger_branch:
+            logger.info(
+                f"Branch {git_branch} does not match trigger "
+                f"{self.config.trigger_branch}, skipping"
+            )
+            return False
+
+        try:
+            # Execute stages
+            for stage in self.config.stages:
+                if stage in skip_stages:
+                    logger.info(f"Skipping stage: {stage.value}")
+                    continue
+
+                logger.info(f"Running stage: {stage.value}")
+
+                if stage == PipelineStage.LINT:
+                    success = self._run_lint()
+                elif stage == PipelineStage.TEST:
+                    success = self._run_tests()
+                elif stage == PipelineStage.BUILD:
+                    success = self._run_build()
+                elif stage == PipelineStage.SECURITY_SCAN:
+                    success = self._run_security_scan()
+                elif stage == PipelineStage.DEPLOY_STAGING:
+                    success = self._deploy_staging(git_commit)
+                elif stage == PipelineStage.VALIDATE:
+                    success = self._validate_deployment()
+                elif stage == PipelineStage.DEPLOY_PROD:
+                    success = self._deploy_production(git_commit)
+                else:
+                    logger.warning(f"Unknown stage: {stage}")
+                    success = True
+
+                if not success:
+                    logger.error(f"Stage {stage.value} failed")
+                    self._notify_failure(stage, git_commit)
+                    return False
+
+            # Pipeline succeeded
+            duration = (datetime.now() - start_time).total_seconds()
+            logger.info(
+                f"Pipeline completed successfully in {duration:.2f}s"
+            )
+
+            self._notify_success(git_commit)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Pipeline failed with exception: {e}")
+            self._notify_failure(None, git_commit, str(e))
+            return False
+
+    def _get_git_commit(self) -> str:
+        """Get current Git commit SHA."""
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout.strip()
+
+    def _get_git_branch(self) -> str:
+        """Get current Git branch."""
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout.strip()
+
+    def _run_lint(self) -> bool:
+        """Run code linting."""
+        logger.info("Running linters...")
+
+        # Flake8 for Python
+        result = subprocess.run(
+            ["flake8", "src/", "--max-line-length=100"],
+            cwd=self.repo_path,
+            capture_output=True
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Flake8 failed:\n{result.stdout.decode()}")
+            return False
+
+        # Black for formatting
+        result = subprocess.run(
+            ["black", "--check", "src/"],
+            cwd=self.repo_path,
+            capture_output=True
+        )
+
+        if result.returncode != 0:
+            logger.error("Code not formatted with Black")
+            return False
+
+        # MyPy for type checking
+        result = subprocess.run(
+            ["mypy", "src/", "--ignore-missing-imports"],
+            cwd=self.repo_path,
+            capture_output=True
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"Type checking issues:\n{result.stdout.decode()}")
+            # Don't fail on type errors, just warn
+
+        logger.info("Linting passed")
+        return True
+
+    def _run_tests(self) -> bool:
+        """Run automated tests."""
+        logger.info("Running tests...")
+
+        # Unit tests
+        result = subprocess.run(
+            ["pytest", "tests/", "-v", "--tb=short", "--cov=src"],
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Tests failed:\n{result.stdout}")
+            return False
+
+        # Parse coverage
+        coverage_match = None
+        for line in result.stdout.split("\n"):
+            if "TOTAL" in line:
+                coverage_match = line
+
+        if coverage_match:
+            logger.info(f"Coverage: {coverage_match}")
+
+        logger.info("Tests passed")
+        return True
+
+    def _run_build(self) -> bool:
+        """Build artifacts."""
+        logger.info("Building artifacts...")
+
+        # Build Docker image
+        image_tag = f"ml-model:{self._get_git_commit()[:8]}"
+
+        result = subprocess.run(
+            ["docker", "build", "-t", image_tag, "."],
+            cwd=self.repo_path,
+            capture_output=True
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Docker build failed:\n{result.stderr.decode()}")
+            return False
+
+        # Save image tag
+        artifacts = {
+            'docker_image': image_tag,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        artifacts_file = self.artifacts_path / "build_artifacts.json"
+        with open(artifacts_file, 'w') as f:
+            json.dump(artifacts, f, indent=2)
+
+        logger.info(f"Built Docker image: {image_tag}")
+        return True
+
+    def _run_security_scan(self) -> bool:
+        """Run security scans."""
+        logger.info("Running security scans...")
+
+        # Scan Python dependencies
+        result = subprocess.run(
+            ["safety", "check", "--json"],
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            try:
+                vulnerabilities = json.loads(result.stdout)
+                if vulnerabilities:
+                    logger.error(
+                        f"Found {len(vulnerabilities)} vulnerabilities"
+                    )
+                    return False
+            except json.JSONDecodeError:
+                logger.warning("Could not parse safety output")
+
+        # Scan Docker image
+        artifacts_file = self.artifacts_path / "build_artifacts.json"
+        with open(artifacts_file) as f:
+            artifacts = json.load(f)
+
+        image_tag = artifacts['docker_image']
+
+        result = subprocess.run(
+            ["trivy", "image", "--severity", "HIGH,CRITICAL", image_tag],
+            capture_output=True,
+            text=True
+        )
+
+        if "Total: 0" not in result.stdout:
+            logger.warning(f"Docker image vulnerabilities:\n{result.stdout}")
+            # Don't fail on vulnerabilities, just warn
+
+        logger.info("Security scan completed")
+        return True
+
+    def _deploy_staging(self, git_commit: str) -> bool:
+        """Deploy to staging environment."""
+        logger.info("Deploying to staging...")
+
+        # Load artifacts
+        artifacts_file = self.artifacts_path / "build_artifacts.json"
+        with open(artifacts_file) as f:
+            artifacts = json.load(f)
+
+        # Create deployment record
+        deployment = DeploymentRecord(
+            deployment_id=f"staging-{git_commit[:8]}",
+            git_commit=git_commit,
+            model_version=artifacts.get('model_version', 'unknown'),
+            environment="staging",
+            status=DeploymentStatus.RUNNING,
+            timestamp=datetime.now(),
+            artifacts=artifacts
+        )
+
+        try:
+            # Deploy to staging (implementation depends on infrastructure)
+            # For demo, simulate deployment
+            self._simulate_deployment("staging", artifacts)
+
+            deployment.status = DeploymentStatus.SUCCESS
+            deployment.duration = 30.0
+
+            self.deployments.append(deployment)
+
+            logger.info("Staging deployment successful")
+            return True
+
+        except Exception as e:
+            logger.error(f"Staging deployment failed: {e}")
+            deployment.status = DeploymentStatus.FAILED
+            self.deployments.append(deployment)
+            return False
+
+    def _validate_deployment(self) -> bool:
+        """Validate staging deployment."""
+        logger.info("Validating deployment...")
+
+        # Get latest staging deployment
+        staging_deployments = [
+            d for d in self.deployments
+            if d.environment == "staging"
+        ]
+
+        if not staging_deployments:
+            logger.error("No staging deployment found")
+            return False
+
+        latest = staging_deployments[-1]
+
+        # Run validation tests
+        # 1. Health check
+        # 2. Smoke tests
+        # 3. Performance tests
+
+        # For demo, simulate validation
+        validation_passed = True
+
+        if validation_passed:
+            logger.info("Validation passed")
+            return True
+        else:
+            logger.error("Validation failed")
+
+            if self.config.rollback_on_failure:
+                self._rollback_deployment("staging")
+
+            return False
+
+    def _deploy_production(self, git_commit: str) -> bool:
+        """Deploy to production."""
+        if not self.config.auto_deploy_prod:
+            logger.info("Production deployment requires manual approval")
+            return True
+
+        logger.info("Deploying to production...")
+
+        # Similar to staging deployment
+        artifacts_file = self.artifacts_path / "build_artifacts.json"
+        with open(artifacts_file) as f:
+            artifacts = json.load(f)
+
+        deployment = DeploymentRecord(
+            deployment_id=f"prod-{git_commit[:8]}",
+            git_commit=git_commit,
+            model_version=artifacts.get('model_version', 'unknown'),
+            environment="production",
+            status=DeploymentStatus.RUNNING,
+            timestamp=datetime.now(),
+            artifacts=artifacts
+        )
+
+        try:
+            self._simulate_deployment("production", artifacts)
+
+            deployment.status = DeploymentStatus.SUCCESS
+            deployment.duration = 45.0
+
+            self.deployments.append(deployment)
+
+            logger.info("Production deployment successful")
+            return True
+
+        except Exception as e:
+            logger.error(f"Production deployment failed: {e}")
+            deployment.status = DeploymentStatus.FAILED
+            self.deployments.append(deployment)
+
+            # Auto-rollback on production failure
+            self._rollback_deployment("production")
+
+            return False
+
+    def _simulate_deployment(self, environment: str, artifacts: Dict):
+        """Simulate deployment (replace with actual deployment logic)."""
+        logger.info(f"Deploying to {environment}: {artifacts}")
+        # In production:
+        # - Update Kubernetes deployment
+        # - Update service mesh routing
+        # - Update feature flags
+        # - Drain old pods
+        # - Monitor new pods
+        pass
+
+    def _rollback_deployment(self, environment: str):
+        """Rollback to previous deployment."""
+        logger.info(f"Rolling back {environment} deployment")
+
+        # Get previous successful deployment
+        env_deployments = [
+            d for d in self.deployments
+            if d.environment == environment and d.status == DeploymentStatus.SUCCESS
+        ]
+
+        if len(env_deployments) < 2:
+            logger.error("No previous deployment to rollback to")
+            return
+
+        previous = env_deployments[-2]
+
+        logger.info(
+            f"Rolling back to deployment {previous.deployment_id}"
+        )
+
+        # Create rollback deployment record
+        rollback = DeploymentRecord(
+            deployment_id=f"rollback-{previous.deployment_id}",
+            git_commit=previous.git_commit,
+            model_version=previous.model_version,
+            environment=environment,
+            status=DeploymentStatus.RUNNING,
+            timestamp=datetime.now(),
+            artifacts=previous.artifacts,
+            rollback_to=previous.deployment_id
+        )
+
+        try:
+            self._simulate_deployment(environment, previous.artifacts)
+
+            rollback.status = DeploymentStatus.ROLLED_BACK
+            self.deployments.append(rollback)
+
+            logger.info("Rollback successful")
+
+        except Exception as e:
+            logger.error(f"Rollback failed: {e}")
+            rollback.status = DeploymentStatus.FAILED
+            self.deployments.append(rollback)
+
+    def _notify_success(self, git_commit: str):
+        """Send success notification."""
+        if not self.config.slack_webhook:
+            return
+
+        message = {
+            "text": f"[SUCCESS] CI/CD Pipeline Success",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Pipeline*: {self.config.name}\n"
+                            f"*Commit*: `{git_commit[:8]}`\n"
+                            f"*Status*: Success"
+                        )
+                    }
+                }
+            ]
+        }
+
+        # Send to Slack
+        self._send_slack(message)
+
+    def _notify_failure(
+        self,
+        stage: Optional[PipelineStage],
+        git_commit: str,
+        error: Optional[str] = None
+    ):
+        """Send failure notification."""
+        if not self.config.slack_webhook:
+            return
+
+        stage_name = stage.value if stage else "Unknown"
+
+        message = {
+            "text": f"[FAILED] CI/CD Pipeline Failed",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Pipeline*: {self.config.name}\n"
+                            f"*Commit*: `{git_commit[:8]}`\n"
+                            f"*Failed Stage*: {stage_name}\n"
+                            f"*Error*: {error or 'See logs'}"
+                        )
+                    }
+                }
+            ]
+        }
+
+        self._send_slack(message)
+
+    def _send_slack(self, message: Dict):
+        """Send Slack notification."""
+        import requests
+
+        try:
+            response = requests.post(
+                self.config.slack_webhook,
+                json=message
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to send Slack notification: {e}")
+
+    def get_deployment_history(
+        self,
+        environment: Optional[str] = None
+    ) -> List[DeploymentRecord]:
+        """
+        Get deployment history.
+
+        Args:
+            environment: Filter by environment
+
+        Returns:
+            List of deployments
+        """
+        if environment:
+            return [
+                d for d in self.deployments
+                if d.environment == environment
+            ]
+
+        return self.deployments
+\end{lstlisting}
+
+\subsection{GitHub Actions Integration}
+
+\begin{lstlisting}[caption={.github/workflows/ml-cicd.yml}]
+name: ML CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: '3.9'
+  MODEL_REGISTRY: 'your-registry.azurecr.io'
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint with flake8
+        run: |
+          flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src/ --count --max-line-length=100 --statistics
+
+      - name: Check formatting with black
+        run: black --check src/
+
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        continue-on-error: true
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run safety check
+        run: |
+          pip install safety
+          safety check --json
+
+      - name: Run bandit security linter
+        run: |
+          pip install bandit
+          bandit -r src/ -f json
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.MODEL_REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.MODEL_REGISTRY }}/ml-model:${{ github.sha }}
+            ${{ env.MODEL_REGISTRY }}/ml-model:latest
+          cache-from: type=registry,ref=${{ env.MODEL_REGISTRY }}/ml-model:latest
+          cache-to: type=inline
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy to staging
+        run: |
+          # Update Kubernetes deployment
+          kubectl set image deployment/ml-model \
+            ml-model=${{ env.MODEL_REGISTRY }}/ml-model:${{ github.sha }} \
+            -n staging
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/ml-model -n staging
+
+      - name: Run smoke tests
+        run: |
+          python tests/smoke_tests.py --env staging
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://api.production.com
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy to production
+        run: |
+          kubectl set image deployment/ml-model \
+            ml-model=${{ env.MODEL_REGISTRY }}/ml-model:${{ github.sha }} \
+            -n production
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/ml-model -n production
+
+      - name: Verify deployment
+        run: |
+          python tests/smoke_tests.py --env production
+
+      - name: Notify Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment ${{ job.status }}'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+\end{lstlisting}
+
+\section{Model Training Automation}
+
+Automated retraining ensures models stay current with changing data patterns.
+
+\subsection{MLPipeline: Automated Training System}
+
+\begin{lstlisting}[language=Python, caption={Automated ML Training Pipeline}]
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+import logging
+import joblib
+import json
+
+logger = logging.getLogger(__name__)
+
+class TriggerCondition(Enum):
+    """Training trigger conditions."""
+    SCHEDULED = "scheduled"
+    PERFORMANCE_DEGRADATION = "performance_degradation"
+    DATA_DRIFT = "data_drift"
+    MANUAL = "manual"
+    DATA_THRESHOLD = "data_threshold"
+
+@dataclass
+class TrainingConfig:
+    """
+    Training configuration.
+
+    Attributes:
+        model_name: Model identifier
+        training_schedule: Cron expression for scheduled training
+        performance_threshold: Min performance before retraining
+        drift_threshold: Max drift before retraining
+        min_training_samples: Minimum samples required
+        validation_split: Validation set proportion
+        hyperparameters: Model hyperparameters
+    """
+    model_name: str
+    training_schedule: Optional[str] = "0 2 * * *"  # 2 AM daily
+    performance_threshold: float = 0.85
+    drift_threshold: float = 0.15
+    min_training_samples: int = 10000
+    validation_split: float = 0.2
+    hyperparameters: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class TrainingRun:
+    """
+    Record of a training run.
+
+    Attributes:
+        run_id: Unique run identifier
+        trigger: What triggered this run
+        start_time: When training started
+        end_time: When training completed
+        status: Training status
+        metrics: Evaluation metrics
+        model_path: Path to trained model
+        artifacts: Additional artifacts
+    """
+    run_id: str
+    trigger: TriggerCondition
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    status: str = "running"
+    metrics: Dict[str, float] = field(default_factory=dict)
+    model_path: Optional[str] = None
+    artifacts: Dict[str, str] = field(default_factory=dict)
+
+class MLPipeline:
+    """
+    Automated ML training pipeline with triggers and validation.
+
+    Handles data loading, training, evaluation, and model registration.
+
+    Example:
+        >>> pipeline = MLPipeline(config)
+        >>> pipeline.check_triggers()
+        >>> if pipeline.should_train():
+        ...     pipeline.train()
+    """
+
+    def __init__(
+        self,
+        config: TrainingConfig,
+        data_loader: Callable,
+        model_factory: Callable,
+        output_path: str = "./models"
+    ):
+        """
+        Initialize ML pipeline.
+
+        Args:
+            config: Training configuration
+            data_loader: Function to load training data
+            model_factory: Function to create model instance
+            output_path: Where to save trained models
+        """
+        self.config = config
+        self.data_loader = data_loader
+        self.model_factory = model_factory
+        self.output_path = Path(output_path)
+
+        # Create output directory
+        self.output_path.mkdir(parents=True, exist_ok=True)
+
+        # Training history
+        self.training_runs: List[TrainingRun] = []
+
+        # Current production model
+        self.current_model = None
+        self.current_metrics: Dict[str, float] = {}
+
+        logger.info(f"Initialized ML pipeline: {config.model_name}")
+
+    def check_triggers(self) -> List[TriggerCondition]:
+        """
+        Check if any training triggers are active.
+
+        Returns:
+            List of active triggers
+        """
+        active_triggers = []
+
+        # Check scheduled trigger
+        if self._should_train_scheduled():
+            active_triggers.append(TriggerCondition.SCHEDULED)
+
+        # Check performance degradation
+        if self._has_performance_degraded():
+            active_triggers.append(TriggerCondition.PERFORMANCE_DEGRADATION)
+
+        # Check data drift
+        if self._has_data_drifted():
+            active_triggers.append(TriggerCondition.DATA_DRIFT)
+
+        # Check data volume
+        if self._has_sufficient_new_data():
+            active_triggers.append(TriggerCondition.DATA_THRESHOLD)
+
+        return active_triggers
+
+    def should_train(self) -> bool:
+        """
+        Determine if training should be triggered.
+
+        Returns:
+            True if any trigger is active
+        """
+        triggers = self.check_triggers()
+
+        if triggers:
+            logger.info(f"Training triggers active: {triggers}")
+            return True
+
+        return False
+
+    def train(
+        self,
+        trigger: TriggerCondition = TriggerCondition.MANUAL
+    ) -> TrainingRun:
+        """
+        Execute training pipeline.
+
+        Args:
+            trigger: What triggered training
+
+        Returns:
+            Training run record
+        """
+        run_id = f"{self.config.model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        run = TrainingRun(
+            run_id=run_id,
+            trigger=trigger,
+            start_time=datetime.now()
+        )
+
+        logger.info(f"Starting training run: {run_id}")
+
+        try:
+            # Load data
+            logger.info("Loading training data")
+            X_train, X_val, y_train, y_val = self._load_data()
+
+            # Check minimum samples
+            if len(X_train) < self.config.min_training_samples:
+                raise ValueError(
+                    f"Insufficient training samples: {len(X_train)} < "
+                    f"{self.config.min_training_samples}"
+                )
+
+            # Create model
+            logger.info("Creating model")
+            model = self.model_factory(self.config.hyperparameters)
+
+            # Train model
+            logger.info("Training model")
+            model.fit(X_train, y_train)
+
+            # Evaluate model
+            logger.info("Evaluating model")
+            metrics = self._evaluate_model(model, X_val, y_val)
+
+            run.metrics = metrics
+
+            # Validate performance
+            if not self._validate_performance(metrics):
+                run.status = "failed_validation"
+                logger.error("Model failed validation")
+                return run
+
+            # Save model
+            model_path = self._save_model(model, run_id)
+            run.model_path = str(model_path)
+
+            # Save artifacts
+            artifacts_path = self._save_artifacts(run, metrics)
+            run.artifacts = {"metadata": str(artifacts_path)}
+
+            run.status = "success"
+            run.end_time = datetime.now()
+
+            self.training_runs.append(run)
+
+            logger.info(
+                f"Training completed successfully. Metrics: {metrics}"
+            )
+
+            return run
+
+        except Exception as e:
+            logger.error(f"Training failed: {e}")
+            run.status = "failed"
+            run.end_time = datetime.now()
+            self.training_runs.append(run)
+            raise
+
+    def _load_data(self):
+        """Load and split training data."""
+        # Load data using provided function
+        data = self.data_loader()
+
+        from sklearn.model_selection import train_test_split
+
+        # Split features and target
+        X = data.drop('target', axis=1)
+        y = data['target']
+
+        # Train/validation split
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y,
+            test_size=self.config.validation_split,
+            random_state=42,
+            stratify=y
+        )
+
+        return X_train, X_val, y_train, y_val
+
+    def _evaluate_model(self, model, X_val, y_val) -> Dict[str, float]:
+        """Evaluate model performance."""
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score,
+            f1_score, roc_auc_score
+        )
+
+        # Predictions
+        y_pred = model.predict(X_val)
+        y_prob = model.predict_proba(X_val)[:, 1]
+
+        # Compute metrics
+        metrics = {
+            'accuracy': accuracy_score(y_val, y_pred),
+            'precision': precision_score(y_val, y_pred),
+            'recall': recall_score(y_val, y_pred),
+            'f1': f1_score(y_val, y_pred),
+            'auc': roc_auc_score(y_val, y_prob)
+        }
+
+        return metrics
+
+    def _validate_performance(self, metrics: Dict[str, float]) -> bool:
+        """Validate model meets minimum requirements."""
+        # Check primary metric (accuracy)
+        if metrics['accuracy'] < self.config.performance_threshold:
+            logger.warning(
+                f"Model accuracy {metrics['accuracy']:.3f} below "
+                f"threshold {self.config.performance_threshold}"
+            )
+            return False
+
+        # Check if better than current model
+        if self.current_metrics:
+            current_accuracy = self.current_metrics.get('accuracy', 0)
+
+            if metrics['accuracy'] <= current_accuracy:
+                logger.warning(
+                    f"New model accuracy {metrics['accuracy']:.3f} not "
+                    f"better than current {current_accuracy:.3f}"
+                )
+                # Still valid, just not an improvement
+                # In production, might want to require improvement
+
+        return True
+
+    def _save_model(self, model, run_id: str) -> Path:
+        """Save trained model."""
+        model_path = self.output_path / f"{run_id}.pkl"
+        joblib.dump(model, model_path)
+
+        logger.info(f"Model saved to {model_path}")
+
+        return model_path
+
+    def _save_artifacts(
+        self,
+        run: TrainingRun,
+        metrics: Dict[str, float]
+    ) -> Path:
+        """Save training artifacts."""
+        artifacts = {
+            'run_id': run.run_id,
+            'trigger': run.trigger.value,
+            'start_time': run.start_time.isoformat(),
+            'metrics': metrics,
+            'config': {
+                'model_name': self.config.model_name,
+                'hyperparameters': self.config.hyperparameters
+            }
+        }
+
+        artifacts_path = self.output_path / f"{run.run_id}_metadata.json"
+
+        with open(artifacts_path, 'w') as f:
+            json.dump(artifacts, f, indent=2)
+
+        return artifacts_path
+
+    def _should_train_scheduled(self) -> bool:
+        """Check if scheduled training is due."""
+        if not self.config.training_schedule:
+            return False
+
+        # Check last training time
+        if not self.training_runs:
+            return True
+
+        last_run = self.training_runs[-1]
+        hours_since = (datetime.now() - last_run.start_time).total_seconds() / 3600
+
+        # If using daily schedule and > 24 hours, retrain
+        return hours_since >= 24
+
+    def _has_performance_degraded(self) -> bool:
+        """Check if model performance has degraded."""
+        if not self.current_metrics:
+            return False
+
+        # In production, check recent performance metrics
+        # For demo, simulate check
+        recent_accuracy = 0.82  # Would come from monitoring
+
+        return recent_accuracy < self.config.performance_threshold
+
+    def _has_data_drifted(self) -> bool:
+        """Check if data drift exceeds threshold."""
+        # In production, check drift metrics from monitoring
+        # For demo, simulate check
+        drift_score = 0.10  # Would come from drift detector
+
+        return drift_score > self.config.drift_threshold
+
+    def _has_sufficient_new_data(self) -> bool:
+        """Check if enough new data is available."""
+        # In production, check data warehouse for new records
+        # For demo, simulate check
+        new_samples = 15000  # Would query data source
+
+        return new_samples >= self.config.min_training_samples
+
+    def promote_to_production(self, run_id: str):
+        """
+        Promote a trained model to production.
+
+        Args:
+            run_id: Training run to promote
+        """
+        # Find run
+        run = next((r for r in self.training_runs if r.run_id == run_id), None)
+
+        if not run:
+            raise ValueError(f"Run {run_id} not found")
+
+        if run.status != "success":
+            raise ValueError(f"Run {run_id} did not succeed")
+
+        # Load model
+        model = joblib.load(run.model_path)
+
+        # Update current model
+        self.current_model = model
+        self.current_metrics = run.metrics
+
+        # Copy to production location
+        prod_path = self.output_path / "production" / f"{self.config.model_name}.pkl"
+        prod_path.parent.mkdir(parents=True, exist_ok=True)
+
+        joblib.dump(model, prod_path)
+
+        logger.info(f"Promoted model {run_id} to production")
+\end{lstlisting}
+
+\section{Infrastructure as Code}
+
+IaC ensures consistent, version-controlled infrastructure across environments.
+
+\subsection{Terraform Configuration for ML Infrastructure}
+
+\begin{lstlisting}[language=Python, caption={Terraform Configuration Generator}]
+from typing import Dict, List, Optional
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+class InfrastructureManager:
+    """
+    Generate and manage infrastructure as code.
+
+    Creates Terraform configurations for ML infrastructure.
+
+    Example:
+        >>> infra = InfrastructureManager("ml-platform")
+        >>> infra.create_training_cluster(instance_type="n1-standard-8")
+        >>> infra.create_serving_cluster(min_replicas=2)
+        >>> infra.generate_terraform()
+    """
+
+    def __init__(self, project_name: str, output_path: str = "./terraform"):
+        """
+        Initialize infrastructure manager.
+
+        Args:
+            project_name: Project identifier
+            output_path: Where to write Terraform files
+        """
+        self.project_name = project_name
+        self.output_path = Path(output_path)
+
+        # Infrastructure components
+        self.resources: List[Dict] = []
+
+        logger.info(f"Initialized infrastructure manager: {project_name}")
+
+    def create_training_cluster(
+        self,
+        instance_type: str = "n1-standard-8",
+        min_nodes: int = 1,
+        max_nodes: int = 10
+    ):
+        """
+        Add training cluster configuration.
+
+        Args:
+            instance_type: VM instance type
+            min_nodes: Minimum cluster nodes
+            max_nodes: Maximum cluster nodes
+        """
+        resource = {
+            'type': 'google_container_cluster',
+            'name': f'{self.project_name}-training',
+            'config': {
+                'name': f'{self.project_name}-training-cluster',
+                'initial_node_count': min_nodes,
+                'node_config': {
+                    'machine_type': instance_type,
+                    'disk_size_gb': 100,
+                    'oauth_scopes': [
+                        'https://www.googleapis.com/auth/cloud-platform'
+                    ]
+                },
+                'autoscaling': {
+                    'min_node_count': min_nodes,
+                    'max_node_count': max_nodes
+                }
+            }
+        }
+
+        self.resources.append(resource)
+
+    def create_serving_cluster(
+        self,
+        instance_type: str = "n1-standard-4",
+        min_replicas: int = 2,
+        max_replicas: int = 20
+    ):
+        """Add serving cluster configuration."""
+        resource = {
+            'type': 'google_container_cluster',
+            'name': f'{self.project_name}-serving',
+            'config': {
+                'name': f'{self.project_name}-serving-cluster',
+                'initial_node_count': min_replicas,
+                'node_config': {
+                    'machine_type': instance_type,
+                    'disk_size_gb': 50
+                },
+                'autoscaling': {
+                    'min_node_count': min_replicas,
+                    'max_node_count': max_replicas
+                }
+            }
+        }
+
+        self.resources.append(resource)
+
+    def create_feature_store(
+        self,
+        instance_type: str = "db-n1-standard-2"
+    ):
+        """Add feature store (database) configuration."""
+        resource = {
+            'type': 'google_sql_database_instance',
+            'name': f'{self.project_name}-feature-store',
+            'config': {
+                'name': f'{self.project_name}-features',
+                'database_version': 'POSTGRES_13',
+                'tier': instance_type,
+                'settings': {
+                    'backup_configuration': {
+                        'enabled': True,
+                        'point_in_time_recovery_enabled': True
+                    }
+                }
+            }
+        }
+
+        self.resources.append(resource)
+
+    def generate_terraform(self):
+        """Generate Terraform configuration files."""
+        self.output_path.mkdir(parents=True, exist_ok=True)
+
+        # Main configuration
+        main_tf = self._generate_main_config()
+        with open(self.output_path / "main.tf", 'w') as f:
+            f.write(main_tf)
+
+        # Variables
+        variables_tf = self._generate_variables()
+        with open(self.output_path / "variables.tf", 'w') as f:
+            f.write(variables_tf)
+
+        # Outputs
+        outputs_tf = self._generate_outputs()
+        with open(self.output_path / "outputs.tf", 'w') as f:
+            f.write(outputs_tf)
+
+        logger.info(f"Generated Terraform config in {self.output_path}")
+
+    def _generate_main_config(self) -> str:
+        """Generate main Terraform configuration."""
+        lines = [
+            'terraform {',
+            '  required_version = ">= 1.0"',
+            '  required_providers {',
+            '    google = {',
+            '      source  = "hashicorp/google"',
+            '      version = "~> 4.0"',
+            '    }',
+            '  }',
+            '}',
+            '',
+            'provider "google" {',
+            '  project = var.project_id',
+            '  region  = var.region',
+            '}',
+            ''
+        ]
+
+        # Add resources
+        for resource in self.resources:
+            lines.append(
+                f'resource "{resource["type"]}" "{resource["name"]}" {{'
+            )
+
+            config = resource['config']
+            for key, value in config.items():
+                if isinstance(value, dict):
+                    lines.append(f'  {key} {{')
+                    for k2, v2 in value.items():
+                        lines.append(f'    {k2} = {self._format_value(v2)}')
+                    lines.append('  }')
+                else:
+                    lines.append(f'  {key} = {self._format_value(value)}')
+
+            lines.append('}')
+            lines.append('')
+
+        return '\n'.join(lines)
+
+    def _generate_variables(self) -> str:
+        """Generate variables configuration."""
+        return '''
+variable "project_id" {
+  description = "GCP project ID"
+  type        = string
+}
+
+variable "region" {
+  description = "GCP region"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "environment" {
+  description = "Environment (dev, staging, prod)"
+  type        = string
+}
+'''
+
+    def _generate_outputs(self) -> str:
+        """Generate outputs configuration."""
+        lines = []
+
+        for resource in self.resources:
+            name = resource['name']
+            lines.append(f'output "{name}_id" {{')
+            lines.append(f'  value = {resource["type"]}.{name}.id')
+            lines.append('}')
+            lines.append('')
+
+        return '\n'.join(lines)
+
+    def _format_value(self, value) -> str:
+        """Format value for Terraform syntax."""
+        if isinstance(value, str):
+            return f'"{value}"'
+        elif isinstance(value, list):
+            items = [self._format_value(v) for v in value]
+            return f'[{", ".join(items)}]'
+        else:
+            return str(value)
+\end{lstlisting}
+
+\section{Configuration Management}
+
+Centralized configuration enables environment-specific settings without code changes.
+
+\subsection{ConfigurationManager}
+
+\begin{lstlisting}[language=Python, caption={Environment Configuration Management}]
+from typing import Dict, Any, Optional
+from pathlib import Path
+from enum import Enum
+import yaml
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+class Environment(Enum):
+    """Deployment environments."""
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
+
+class ConfigurationManager:
+    """
+    Manage environment-specific configurations.
+
+    Loads configs from YAML files and environment variables.
+
+    Example:
+        >>> config_mgr = ConfigurationManager()
+        >>> config = config_mgr.get_config(Environment.PRODUCTION)
+        >>> model_path = config['model']['path']
+    """
+
+    def __init__(self, config_dir: str = "./config"):
+        """
+        Initialize configuration manager.
+
+        Args:
+            config_dir: Directory containing config files
+        """
+        self.config_dir = Path(config_dir)
+        self.configs: Dict[Environment, Dict] = {}
+
+        # Load all configs
+        self._load_configs()
+
+        logger.info("Initialized configuration manager")
+
+    def _load_configs(self):
+        """Load configuration files for all environments."""
+        for env in Environment:
+            config_file = self.config_dir / f"{env.value}.yaml"
+
+            if config_file.exists():
+                with open(config_file) as f:
+                    config = yaml.safe_load(f)
+
+                self.configs[env] = config
+                logger.info(f"Loaded config for {env.value}")
+            else:
+                logger.warning(f"Config file not found: {config_file}")
+
+    def get_config(
+        self,
+        environment: Optional[Environment] = None
+    ) -> Dict[str, Any]:
+        """
+        Get configuration for environment.
+
+        Args:
+            environment: Target environment (auto-detect if None)
+
+        Returns:
+            Configuration dictionary
+        """
+        if environment is None:
+            environment = self._detect_environment()
+
+        config = self.configs.get(environment, {})
+
+        # Overlay environment variables
+        config = self._apply_env_overrides(config)
+
+        return config
+
+    def _detect_environment(self) -> Environment:
+        """Auto-detect current environment."""
+        env_var = os.getenv('ENVIRONMENT', 'development')
+
+        try:
+            return Environment(env_var.lower())
+        except ValueError:
+            logger.warning(
+                f"Unknown environment {env_var}, defaulting to development"
+            )
+            return Environment.DEVELOPMENT
+
+    def _apply_env_overrides(self, config: Dict) -> Dict:
+        """Apply environment variable overrides."""
+        # Check for environment-specific overrides
+        # Format: APP_MODEL_PATH=/path/to/model
+
+        import copy
+        config = copy.deepcopy(config)
+
+        prefix = "APP_"
+
+        for key, value in os.environ.items():
+            if not key.startswith(prefix):
+                continue
+
+            # Convert APP_MODEL_PATH to ['model', 'path']
+            parts = key[len(prefix):].lower().split('_')
+
+            # Set nested value
+            current = config
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+                current = current[part]
+
+            current[parts[-1]] = value
+
+        return config
+\end{lstlisting}
+
+\subsection{Example Configuration Files}
+
+\begin{lstlisting}[caption={config/production.yaml}]
+# Production configuration
+
+model:
+  name: "fraud-detector"
+  version: "v2.1"
+  path: "gs://models-prod/fraud-detector/v2.1"
+
+serving:
+  replicas: 5
+  instance_type: "n1-standard-4"
+  max_latency_ms: 100
+  timeout_seconds: 30
+
+database:
+  host: "prod-db.example.com"
+  port: 5432
+  name: "ml_features"
+  connection_pool_size: 20
+
+feature_store:
+  type: "feast"
+  url: "feast-prod.example.com:443"
+
+monitoring:
+  enabled: true
+  prometheus_endpoint: "http://prometheus-prod:9090"
+  alert_webhook: "https://hooks.slack.com/services/XXX"
+
+security:
+  tls_enabled: true
+  mtls_enabled: true
+  api_key_required: true
+\end{lstlisting}
+
+\section{Real-World Scenario: Automation Preventing Disaster}
+
+\subsection{The Problem}
+
+A fintech company manually deployed ML models for loan approval. Their process:
+
+\begin{enumerate}
+    \item Data scientist trains model locally
+    \item Emails model file (.pkl) to ops team
+    \item Ops copies file to production server via SCP
+    \item Ops manually restarts service
+    \item No testing in staging
+    \item No validation of model performance
+    \item No rollback plan
+\end{enumerate}
+
+On a Friday deployment:
+\begin{itemize}
+    \item New model accidentally trained on 3-month-old data (stale features)
+    \item Model approved 92\% of loans (baseline: 78\%)
+    \item Weekend processing approved \$45M in loans, 40\% high-risk
+    \item Monday morning: fraud alerts spike
+    \item Tuesday: Model rolled back after 4-day impact
+\end{itemize}
+
+\textbf{Cost}: \$18M in bad loans, regulatory investigation, 2-month development freeze.
+
+\subsection{The Solution}
+
+Implementing full MLOps automation:
+
+\begin{lstlisting}[language=Python, caption={Complete MLOps Automation}]
+# 1. CI/CD Pipeline Configuration
+pipeline_config = PipelineConfig(
+    name="loan-approval-ml",
+    trigger_branch="main",
+    stages=[
+        PipelineStage.LINT,
+        PipelineStage.TEST,
+        PipelineStage.BUILD,
+        PipelineStage.SECURITY_SCAN,
+        PipelineStage.DEPLOY_STAGING,
+        PipelineStage.VALIDATE,
+        PipelineStage.DEPLOY_PROD
+    ],
+    auto_deploy_staging=True,
+    auto_deploy_prod=False,  # Requires approval
+    rollback_on_failure=True
+)
+
+cicd = CICDManager(pipeline_config, repo_path=".")
+
+# 2. Automated Training Pipeline
+training_config = TrainingConfig(
+    model_name="loan-approval",
+    training_schedule="0 2 * * 0",  # Weekly Sunday 2 AM
+    performance_threshold=0.82,
+    drift_threshold=0.10,
+    min_training_samples=50000,
+    validation_split=0.2,
+    hyperparameters={
+        'max_depth': 8,
+        'n_estimators': 200,
+        'min_samples_split': 100
+    }
+)
+
+ml_pipeline = MLPipeline(
+    config=training_config,
+    data_loader=load_loan_data,
+    model_factory=create_loan_model
+)
+
+# 3. Automated Validation
+class LoanModelValidator:
+    """Validate loan approval models."""
+
+    def validate(self, model, test_data) -> bool:
+        """Run comprehensive validation."""
+        X_test, y_test = test_data
+
+        # Predictions
+        y_pred = model.predict(X_test)
+        y_prob = model.predict_proba(X_test)[:, 1]
+
+        # Compute metrics
+        from sklearn.metrics import roc_auc_score, precision_score
+
+        auc = roc_auc_score(y_test, y_prob)
+        precision = precision_score(y_test, y_pred)
+
+        # Validation checks
+        checks = []
+
+        # 1. Minimum performance
+        checks.append({
+            'name': 'minimum_auc',
+            'passed': auc >= 0.82,
+            'value': auc,
+            'threshold': 0.82
+        })
+
+        # 2. Precision (avoid approving bad loans)
+        checks.append({
+            'name': 'minimum_precision',
+            'passed': precision >= 0.80,
+            'value': precision,
+            'threshold': 0.80
+        })
+
+        # 3. Approval rate check (catch data issues)
+        approval_rate = y_pred.mean()
+        checks.append({
+            'name': 'approval_rate',
+            'passed': 0.70 <= approval_rate <= 0.85,
+            'value': approval_rate,
+            'range': [0.70, 0.85]
+        })
+
+        # 4. Data freshness
+        from datetime import datetime, timedelta
+        max_age = datetime.now() - timedelta(days=7)
+
+        data_timestamp = test_data.attrs.get('timestamp', datetime.now())
+        checks.append({
+            'name': 'data_freshness',
+            'passed': data_timestamp >= max_age,
+            'value': data_timestamp.isoformat(),
+            'threshold': max_age.isoformat()
+        })
+
+        # Log results
+        for check in checks:
+            status = "PASS" if check['passed'] else "FAIL"
+            logger.info(f"[{status}] {check['name']}: {check}")
+
+        # Overall pass
+        all_passed = all(c['passed'] for c in checks)
+
+        if not all_passed:
+            logger.error("Model validation failed")
+            failed = [c['name'] for c in checks if not c['passed']]
+            logger.error(f"Failed checks: {failed}")
+
+        return all_passed
+
+# 4. Automated Deployment Workflow
+def automated_deployment_workflow():
+    """Complete automated deployment workflow."""
+
+    # Check training triggers
+    triggers = ml_pipeline.check_triggers()
+
+    if triggers:
+        logger.info(f"Training triggered by: {triggers}")
+
+        # Train model
+        run = ml_pipeline.train(trigger=triggers[0])
+
+        if run.status != "success":
+            logger.error("Training failed, aborting deployment")
+            return
+
+        # Validate model
+        validator = LoanModelValidator()
+        model = joblib.load(run.model_path)
+
+        test_data = load_test_data()
+        if not validator.validate(model, test_data):
+            logger.error("Validation failed, model not promoted")
+            return
+
+        # Promote to staging
+        ml_pipeline.promote_to_production(run.run_id)
+
+        # Trigger CI/CD for deployment
+        cicd.run_pipeline()
+
+        logger.info("Automated deployment completed")
+
+# 5. Monitoring and Auto-Rollback
+from monitoring import ModelMonitor, AlertSeverity
+
+monitor = ModelMonitor("loan-approval-prod")
+
+# Register key metrics
+monitor.register_metric(MetricConfig(
+    name="approval_rate",
+    metric_type=MetricType.GAUGE,
+    description="Rate of loan approvals",
+    thresholds={
+        AlertSeverity.WARNING: 0.85,  # Above 85% is suspicious
+        AlertSeverity.CRITICAL: 0.90
+    }
+))
+
+monitor.register_metric(MetricConfig(
+    name="avg_confidence",
+    metric_type=MetricType.GAUGE,
+    description="Average prediction confidence",
+    thresholds={
+        AlertSeverity.WARNING: 0.60,  # Below 60% confidence
+        AlertSeverity.CRITICAL: 0.50
+    }
+))
+
+# Auto-rollback on critical alerts
+def alert_handler(alert):
+    """Handle monitoring alerts."""
+    if alert.severity == AlertSeverity.CRITICAL:
+        logger.critical(f"Critical alert: {alert.message}")
+
+        # Trigger automatic rollback
+        cicd._rollback_deployment("production")
+
+        # Notify team
+        notify_team(alert)
+
+monitor.alert_callback = alert_handler
+
+# 6. Scheduled Execution
+import schedule
+
+schedule.every().sunday.at("02:00").do(automated_deployment_workflow)
+schedule.every(10).minutes.do(lambda: monitor.check_alerts())
+
+# Run scheduler
+while True:
+    schedule.run_pending()
+    time.sleep(60)
+\end{lstlisting}
+
+\subsection{Outcome}
+
+With MLOps automation:
+\begin{itemize}
+    \item \textbf{Week 1}: Stale data model caught by freshness check in CI/CD
+    \item \textbf{Week 2}: Model with 91\% approval rate failed validation
+    \item \textbf{Week 3}: Deployed model triggered alert for 86\% approvals, auto-rollback in 2 minutes
+    \item \textbf{6 Months}: Zero production incidents, 24 successful deployments
+    \item \textbf{Impact}: Prevented \$18M+ in potential losses, reduced deployment time from 6 hours to 45 minutes
+\end{itemize}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Build CI/CD Pipeline}
+
+Implement complete CI/CD pipeline:
+\begin{itemize}
+    \item Lint, test, build, security scan stages
+    \item Automated deployment to staging
+    \item Smoke tests and validation
+    \item Manual approval gate for production
+    \item Slack notifications on success/failure
+\end{itemize}
+
+\subsection{Exercise 2: Training Automation}
+
+Create automated training system:
+\begin{itemize}
+    \item Scheduled weekly retraining
+    \item Performance degradation triggers
+    \item Data drift detection triggers
+    \item Minimum data threshold checks
+    \item Automated hyperparameter tuning
+\end{itemize}
+
+\subsection{Exercise 3: Infrastructure as Code}
+
+Generate Terraform configuration for:
+\begin{itemize}
+    \item Kubernetes cluster for training (autoscaling 1-10 nodes)
+    \item Kubernetes cluster for serving (autoscaling 2-20 nodes)
+    \item PostgreSQL feature store with backups
+    \item Object storage for models
+    \item Monitoring stack (Prometheus + Grafana)
+\end{itemize}
+
+\subsection{Exercise 4: Model Validation Framework}
+
+Build comprehensive validation:
+\begin{itemize}
+    \item Performance metrics (accuracy, precision, recall, AUC)
+    \item Fairness checks across demographics
+    \item Prediction distribution validation
+    \item Data quality checks
+    \item Business rule validation
+\end{itemize}
+
+\subsection{Exercise 5: Configuration Management}
+
+Implement config system:
+\begin{itemize}
+    \item YAML configs for dev, staging, prod
+    \item Environment variable overrides
+    \item Secret management integration (Vault/KMS)
+    \item Config validation on startup
+    \item Hot-reload capability
+\end{itemize}
+
+\subsection{Exercise 6: Rollback Automation}
+
+Create automated rollback:
+\begin{itemize}
+    \item Detect performance degradation in production
+    \item Automatically revert to previous version
+    \item Health check before completing rollback
+    \item Notify team with rollback details
+    \item Prevent re-deployment of bad version
+\end{itemize}
+
+\subsection{Exercise 7: GitOps Workflow}
+
+Implement GitOps:
+\begin{itemize}
+    \item Git as single source of truth
+    \item Pull-based deployment (ArgoCD/Flux)
+    \item Automatic sync on Git changes
+    \item Drift detection and correction
+    \item Audit trail of all deployments
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+    \item \textbf{Automate Everything}: Manual steps introduce errors and delays—automate testing, validation, deployment
+    \item \textbf{Fail Fast}: Catch issues in CI/CD before production through comprehensive testing
+    \item \textbf{Version Everything}: Code, data, models, configurations must be versioned together
+    \item \textbf{Validate Rigorously}: Automated validation prevents bad models from reaching production
+    \item \textbf{Infrastructure as Code}: Version-controlled infrastructure ensures consistency
+    \item \textbf{Enable Rollback}: Every deployment must have instant rollback capability
+    \item \textbf{Monitor Continuously}: Detect issues immediately and trigger automatic responses
+\end{itemize}
+
+MLOps automation transforms ML from a research project into a reliable production system. Investing in automation infrastructure pays dividends through faster iteration, fewer incidents, and confident deployments.

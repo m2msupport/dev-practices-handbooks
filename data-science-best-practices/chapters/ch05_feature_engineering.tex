@@ -1,0 +1,2020 @@
+\chapter{Systematic Feature Engineering and Selection}
+
+\section{Introduction}
+
+Feature engineering is often the difference between a mediocre model and a breakthrough solution. While modern machine learning algorithms can learn complex patterns, the quality and relevance of input features fundamentally determines model performance. This chapter presents a systematic approach to feature engineering that transforms raw data into predictive signals through domain knowledge, statistical rigor, and production-ready engineering practices.
+
+\subsection{The Feature Engineering Challenge}
+
+Raw data rarely arrives in an optimal format for machine learning. Consider a timestamp: as a Unix epoch, it offers little direct predictive value. However, extracted features like hour-of-day, day-of-week, or days-since-last-event can reveal crucial patterns. The challenge lies in systematically discovering, creating, validating, and maintaining such transformations at scale.
+
+\subsection{Why Feature Engineering Matters}
+
+Studies show that feature engineering can improve model performance by 20-50\% or more, often exceeding gains from hyperparameter tuning or algorithm selection. Yet many teams approach it ad-hoc, creating features without validation, monitoring, or versioning. This leads to:
+
+\begin{itemize}
+    \item \textbf{Inconsistent transformations} between training and production
+    \item \textbf{Data leakage} through improper temporal ordering
+    \item \textbf{Feature drift} going undetected in production
+    \item \textbf{Irreproducible results} from undocumented transformations
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides a complete framework for systematic feature engineering:
+
+\begin{enumerate}
+    \item \textbf{Feature Engineering Pipeline}: Type-safe transformation framework with validation
+    \item \textbf{Domain-Driven Feature Creation}: Temporal, categorical, and numerical transformations
+    \item \textbf{Feature Selection}: Statistical tests, importance measures, and recursive elimination
+    \item \textbf{Feature Validation}: Cross-validation stability and production readiness testing
+    \item \textbf{Production Monitoring}: Drift detection and alerting for deployed features
+    \item \textbf{Feature Store Integration}: Versioning and serving architecture
+\end{enumerate}
+
+\section{Feature Engineering Pipeline Framework}
+
+A robust feature engineering pipeline must ensure transformations are reproducible, validated, and production-ready. We'll build a framework that tracks every transformation, validates feature quality, and prevents common pitfalls like data leakage.
+
+\subsection{Core Pipeline Architecture}
+
+\begin{lstlisting}[language=Python, caption={Feature Engineering Pipeline Framework}]
+from dataclasses import dataclass, field
+from typing import Protocol, List, Dict, Any, Optional, Callable
+from enum import Enum
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import logging
+from pathlib import Path
+import json
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+class FeatureType(Enum):
+    """Types of features for tracking and validation."""
+    NUMERICAL = "numerical"
+    CATEGORICAL = "categorical"
+    TEMPORAL = "temporal"
+    BOOLEAN = "boolean"
+    TEXT = "text"
+    EMBEDDING = "embedding"
+
+class TransformationScope(Enum):
+    """Scope of feature transformation."""
+    ROW_LEVEL = "row_level"  # Operates on individual rows
+    GROUP_LEVEL = "group_level"  # Requires grouping (e.g., mean by category)
+    GLOBAL_LEVEL = "global_level"  # Requires full dataset (e.g., normalization)
+
+@dataclass
+class FeatureMetadata:
+    """Metadata about a generated feature."""
+    name: str
+    feature_type: FeatureType
+    source_columns: List[str]
+    transformation: str
+    scope: TransformationScope
+    created_at: datetime
+    version: str
+    importance: Optional[float] = None
+    description: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "name": self.name,
+            "feature_type": self.feature_type.value,
+            "source_columns": self.source_columns,
+            "transformation": self.transformation,
+            "scope": self.scope.value,
+            "created_at": self.created_at.isoformat(),
+            "version": self.version,
+            "importance": self.importance,
+            "description": self.description
+        }
+
+@dataclass
+class FeatureValidationResult:
+    """Results from feature validation checks."""
+    feature_name: str
+    is_valid: bool
+    checks_passed: List[str]
+    checks_failed: List[str]
+    warnings: List[str]
+    quality_score: float  # 0-100
+
+    def __str__(self) -> str:
+        status = "VALID" if self.is_valid else "INVALID"
+        return (f"Feature '{self.feature_name}': {status} "
+                f"(Quality: {self.quality_score:.1f}/100)")
+
+class FeatureTransformer(Protocol):
+    """Protocol for feature transformation functions."""
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Transform dataframe to create new features."""
+        ...
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        """Return metadata for created features."""
+        ...
+
+@dataclass
+class TransformationStep:
+    """A single step in the feature engineering pipeline."""
+    name: str
+    transformer: FeatureTransformer
+    enabled: bool = True
+    metadata: List[FeatureMetadata] = field(default_factory=list)
+
+    def execute(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Execute transformation if enabled."""
+        if not self.enabled:
+            logger.info(f"Skipping disabled transformation: {self.name}")
+            return df
+
+        logger.info(f"Executing transformation: {self.name}")
+        try:
+            result = self.transformer.transform(df)
+            self.metadata = self.transformer.get_metadata()
+            return result
+        except Exception as e:
+            logger.error(f"Transformation '{self.name}' failed: {e}")
+            raise
+
+class FeatureEngineeringPipeline:
+    """
+    Comprehensive feature engineering pipeline with validation,
+    versioning, and production-ready transformations.
+    """
+
+    def __init__(self, name: str, version: str = "1.0.0"):
+        self.name = name
+        self.version = version
+        self.steps: List[TransformationStep] = []
+        self.feature_metadata: Dict[str, FeatureMetadata] = {}
+        self.execution_history: List[Dict[str, Any]] = []
+
+    def add_step(self, name: str, transformer: FeatureTransformer) -> None:
+        """Add a transformation step to the pipeline."""
+        step = TransformationStep(name=name, transformer=transformer)
+        self.steps.append(step)
+        logger.info(f"Added transformation step: {name}")
+
+    def fit_transform(self, df: pd.DataFrame,
+                      validate: bool = True) -> pd.DataFrame:
+        """
+        Execute all transformation steps and optionally validate.
+
+        Args:
+            df: Input dataframe
+            validate: Whether to validate features after creation
+
+        Returns:
+            Transformed dataframe with new features
+        """
+        result = df.copy()
+        start_time = datetime.now()
+
+        logger.info(f"Starting pipeline '{self.name}' v{self.version}")
+        logger.info(f"Input shape: {result.shape}")
+
+        for step in self.steps:
+            step_start = datetime.now()
+            result = step.execute(result)
+            step_duration = (datetime.now() - step_start).total_seconds()
+
+            # Update feature metadata
+            for metadata in step.metadata:
+                self.feature_metadata[metadata.name] = metadata
+
+            logger.info(f"Step '{step.name}' completed in {step_duration:.2f}s")
+            logger.info(f"Output shape: {result.shape}")
+
+        duration = (datetime.now() - start_time).total_seconds()
+
+        # Record execution
+        self.execution_history.append({
+            "timestamp": start_time.isoformat(),
+            "duration_seconds": duration,
+            "input_shape": df.shape,
+            "output_shape": result.shape,
+            "features_created": len(self.feature_metadata)
+        })
+
+        logger.info(f"Pipeline completed in {duration:.2f}s")
+        logger.info(f"Created {len(self.feature_metadata)} features")
+
+        if validate:
+            validation_results = self.validate_features(result)
+            self._log_validation_results(validation_results)
+
+        return result
+
+    def validate_features(self, df: pd.DataFrame) -> List[FeatureValidationResult]:
+        """
+        Validate all created features for quality and correctness.
+
+        Checks:
+        - No constant features (zero variance)
+        - No features with excessive missing values (>50%)
+        - Numerical features have reasonable distributions
+        - No infinite or NaN values after transformation
+        """
+        results = []
+
+        for feature_name, metadata in self.feature_metadata.items():
+            if feature_name not in df.columns:
+                results.append(FeatureValidationResult(
+                    feature_name=feature_name,
+                    is_valid=False,
+                    checks_passed=[],
+                    checks_failed=["Feature not found in dataframe"],
+                    warnings=[],
+                    quality_score=0.0
+                ))
+                continue
+
+            series = df[feature_name]
+            checks_passed = []
+            checks_failed = []
+            warnings = []
+
+            # Check 1: Missing values
+            missing_pct = series.isna().sum() / len(series) * 100
+            if missing_pct <= 50:
+                checks_passed.append(f"Missing values: {missing_pct:.1f}%")
+            else:
+                checks_failed.append(f"Excessive missing values: {missing_pct:.1f}%")
+
+            if 20 < missing_pct <= 50:
+                warnings.append(f"High missing rate: {missing_pct:.1f}%")
+
+            # Check 2: Constant features
+            if metadata.feature_type == FeatureType.NUMERICAL:
+                variance = series.var()
+                if variance > 0:
+                    checks_passed.append(f"Non-constant (var={variance:.4f})")
+                else:
+                    checks_failed.append("Zero variance (constant feature)")
+
+            # Check 3: Infinite values
+            if metadata.feature_type == FeatureType.NUMERICAL:
+                inf_count = np.isinf(series).sum()
+                if inf_count == 0:
+                    checks_passed.append("No infinite values")
+                else:
+                    checks_failed.append(f"Contains {inf_count} infinite values")
+
+            # Check 4: Cardinality (for categorical)
+            if metadata.feature_type == FeatureType.CATEGORICAL:
+                cardinality = series.nunique()
+                if cardinality < len(series) * 0.95:
+                    checks_passed.append(f"Reasonable cardinality: {cardinality}")
+                else:
+                    warnings.append(f"High cardinality: {cardinality}")
+
+            # Calculate quality score
+            total_checks = len(checks_passed) + len(checks_failed)
+            quality_score = (len(checks_passed) / total_checks * 100) if total_checks > 0 else 0
+
+            is_valid = len(checks_failed) == 0
+
+            results.append(FeatureValidationResult(
+                feature_name=feature_name,
+                is_valid=is_valid,
+                checks_passed=checks_passed,
+                checks_failed=checks_failed,
+                warnings=warnings,
+                quality_score=quality_score
+            ))
+
+        return results
+
+    def _log_validation_results(self, results: List[FeatureValidationResult]) -> None:
+        """Log validation results."""
+        valid_count = sum(1 for r in results if r.is_valid)
+        logger.info(f"Validation: {valid_count}/{len(results)} features valid")
+
+        for result in results:
+            if not result.is_valid:
+                logger.warning(f"Invalid feature: {result}")
+                for failure in result.checks_failed:
+                    logger.warning(f"  - {failure}")
+
+    def get_feature_lineage(self, feature_name: str) -> Optional[Dict[str, Any]]:
+        """Get the lineage (source and transformations) of a feature."""
+        if feature_name not in self.feature_metadata:
+            return None
+
+        metadata = self.feature_metadata[feature_name]
+        return {
+            "feature": feature_name,
+            "source_columns": metadata.source_columns,
+            "transformation": metadata.transformation,
+            "scope": metadata.scope.value,
+            "created_at": metadata.created_at.isoformat(),
+            "version": metadata.version
+        }
+
+    def export_metadata(self, output_path: Path) -> None:
+        """Export all feature metadata to JSON."""
+        metadata_dict = {
+            "pipeline_name": self.name,
+            "pipeline_version": self.version,
+            "features": {
+                name: meta.to_dict()
+                for name, meta in self.feature_metadata.items()
+            },
+            "execution_history": self.execution_history
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(metadata_dict, f, indent=2)
+
+        logger.info(f"Exported metadata to {output_path}")
+
+    def compute_pipeline_hash(self) -> str:
+        """Compute hash of pipeline configuration for versioning."""
+        config = {
+            "name": self.name,
+            "version": self.version,
+            "steps": [
+                {
+                    "name": step.name,
+                    "enabled": step.enabled,
+                    "transformer": step.transformer.__class__.__name__
+                }
+                for step in self.steps
+            ]
+        }
+
+        config_str = json.dumps(config, sort_keys=True)
+        return hashlib.sha256(config_str.encode()).hexdigest()[:16]
+\end{lstlisting}
+
+\subsection{Pipeline Usage Example}
+
+\begin{lstlisting}[language=Python, caption={Using the Feature Engineering Pipeline}]
+# Example: Create a pipeline for customer churn prediction
+pipeline = FeatureEngineeringPipeline(
+    name="customer_churn_features",
+    version="1.0.0"
+)
+
+# Add transformation steps (transformers defined in next sections)
+pipeline.add_step("temporal_features", TemporalFeatureExtractor())
+pipeline.add_step("categorical_encoding", CategoricalEncoder())
+pipeline.add_step("numerical_transformations", NumericalTransformer())
+
+# Execute pipeline with validation
+df_transformed = pipeline.fit_transform(df_raw, validate=True)
+
+# Export metadata for reproducibility
+pipeline.export_metadata(Path("feature_metadata.json"))
+
+# Check specific feature lineage
+lineage = pipeline.get_feature_lineage("days_since_last_purchase")
+print(lineage)
+# Output: {
+#   'feature': 'days_since_last_purchase',
+#   'source_columns': ['last_purchase_date'],
+#   'transformation': 'days_since',
+#   'scope': 'row_level',
+#   ...
+# }
+\end{lstlisting}
+
+\section{Domain-Driven Feature Creation}
+
+Feature engineering should be driven by domain knowledge and statistical principles. This section presents systematic approaches for temporal, categorical, and numerical feature extraction.
+
+\subsection{Temporal Feature Extraction}
+
+Time-based features often provide strong predictive signals. We'll extract cyclic patterns, trends, and event-based features.
+
+\begin{lstlisting}[language=Python, caption={Temporal Feature Extraction}]
+from typing import List
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+class TemporalFeatureExtractor:
+    """Extract temporal features from datetime columns."""
+
+    def __init__(self, datetime_columns: List[str],
+                 reference_date: Optional[datetime] = None):
+        self.datetime_columns = datetime_columns
+        self.reference_date = reference_date or datetime.now()
+        self.metadata: List[FeatureMetadata] = []
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Extract temporal features."""
+        result = df.copy()
+        self.metadata = []
+
+        for col in self.datetime_columns:
+            if col not in df.columns:
+                logger.warning(f"Column '{col}' not found, skipping")
+                continue
+
+            # Ensure datetime type
+            dt_series = pd.to_datetime(result[col], errors='coerce')
+
+            # Cyclic features: hour, day of week, month
+            result[f"{col}_hour"] = dt_series.dt.hour
+            result[f"{col}_hour_sin"] = np.sin(2 * np.pi * result[f"{col}_hour"] / 24)
+            result[f"{col}_hour_cos"] = np.cos(2 * np.pi * result[f"{col}_hour"] / 24)
+
+            self._add_metadata(
+                name=f"{col}_hour_sin",
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[col],
+                transformation="sin(2*pi*hour/24) - cyclic hour encoding"
+            )
+
+            result[f"{col}_dayofweek"] = dt_series.dt.dayofweek
+            result[f"{col}_dayofweek_sin"] = np.sin(
+                2 * np.pi * result[f"{col}_dayofweek"] / 7
+            )
+            result[f"{col}_dayofweek_cos"] = np.cos(
+                2 * np.pi * result[f"{col}_dayofweek"] / 7
+            )
+
+            self._add_metadata(
+                name=f"{col}_dayofweek_sin",
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[col],
+                transformation="sin(2*pi*dayofweek/7) - cyclic day encoding"
+            )
+
+            result[f"{col}_month"] = dt_series.dt.month
+            result[f"{col}_month_sin"] = np.sin(2 * np.pi * result[f"{col}_month"] / 12)
+            result[f"{col}_month_cos"] = np.cos(2 * np.pi * result[f"{col}_month"] / 12)
+
+            # Boolean flags
+            result[f"{col}_is_weekend"] = dt_series.dt.dayofweek.isin([5, 6]).astype(int)
+            result[f"{col}_is_month_start"] = dt_series.dt.is_month_start.astype(int)
+            result[f"{col}_is_month_end"] = dt_series.dt.is_month_end.astype(int)
+
+            self._add_metadata(
+                name=f"{col}_is_weekend",
+                feature_type=FeatureType.BOOLEAN,
+                source_columns=[col],
+                transformation="is_weekend flag (Saturday/Sunday)"
+            )
+
+            # Days since reference date
+            days_since = (self.reference_date - dt_series).dt.days
+            result[f"{col}_days_since"] = days_since
+
+            self._add_metadata(
+                name=f"{col}_days_since",
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[col],
+                transformation=f"days since {self.reference_date.date()}"
+            )
+
+            # Quarter
+            result[f"{col}_quarter"] = dt_series.dt.quarter
+
+        return result
+
+    def _add_metadata(self, name: str, feature_type: FeatureType,
+                     source_columns: List[str], transformation: str) -> None:
+        """Add metadata for a created feature."""
+        self.metadata.append(FeatureMetadata(
+            name=name,
+            feature_type=feature_type,
+            source_columns=source_columns,
+            transformation=transformation,
+            scope=TransformationScope.ROW_LEVEL,
+            created_at=datetime.now(),
+            version="1.0.0"
+        ))
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        """Return metadata for all created features."""
+        return self.metadata
+
+
+class LagFeatureCreator:
+    """Create lag features for time series data."""
+
+    def __init__(self, columns: List[str], lags: List[int],
+                 group_by: Optional[List[str]] = None):
+        self.columns = columns
+        self.lags = lags
+        self.group_by = group_by
+        self.metadata: List[FeatureMetadata] = []
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create lag features."""
+        result = df.copy()
+        self.metadata = []
+
+        for col in self.columns:
+            if col not in df.columns:
+                continue
+
+            for lag in self.lags:
+                if self.group_by:
+                    # Group-wise lags (e.g., per customer)
+                    lag_col = f"{col}_lag_{lag}"
+                    result[lag_col] = result.groupby(self.group_by)[col].shift(lag)
+                    scope = TransformationScope.GROUP_LEVEL
+                else:
+                    # Global lags
+                    lag_col = f"{col}_lag_{lag}"
+                    result[lag_col] = result[col].shift(lag)
+                    scope = TransformationScope.ROW_LEVEL
+
+                self.metadata.append(FeatureMetadata(
+                    name=lag_col,
+                    feature_type=FeatureType.NUMERICAL,
+                    source_columns=[col] + (self.group_by or []),
+                    transformation=f"lag {lag} periods",
+                    scope=scope,
+                    created_at=datetime.now(),
+                    version="1.0.0"
+                ))
+
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+
+
+class RollingFeatureCreator:
+    """Create rolling window statistics."""
+
+    def __init__(self, columns: List[str], windows: List[int],
+                 statistics: List[str] = ['mean', 'std', 'min', 'max'],
+                 group_by: Optional[List[str]] = None):
+        self.columns = columns
+        self.windows = windows
+        self.statistics = statistics
+        self.group_by = group_by
+        self.metadata: List[FeatureMetadata] = []
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create rolling window features."""
+        result = df.copy()
+        self.metadata = []
+
+        for col in self.columns:
+            if col not in df.columns:
+                continue
+
+            for window in self.windows:
+                for stat in self.statistics:
+                    feature_name = f"{col}_rolling_{window}_{stat}"
+
+                    if self.group_by:
+                        # Group-wise rolling (e.g., per customer)
+                        result[feature_name] = (
+                            result.groupby(self.group_by)[col]
+                            .transform(lambda x: x.rolling(window, min_periods=1)
+                                      .agg(stat))
+                        )
+                        scope = TransformationScope.GROUP_LEVEL
+                    else:
+                        # Global rolling
+                        result[feature_name] = (
+                            result[col].rolling(window, min_periods=1).agg(stat)
+                        )
+                        scope = TransformationScope.GLOBAL_LEVEL
+
+                    self.metadata.append(FeatureMetadata(
+                        name=feature_name,
+                        feature_type=FeatureType.NUMERICAL,
+                        source_columns=[col] + (self.group_by or []),
+                        transformation=f"rolling {stat} over {window} periods",
+                        scope=scope,
+                        created_at=datetime.now(),
+                        version="1.0.0"
+                    ))
+
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\subsection{Categorical Feature Encoding}
+
+Categorical variables require special handling, especially high-cardinality features. We'll implement multiple encoding strategies with automatic cardinality detection.
+
+\begin{lstlisting}[language=Python, caption={Categorical Feature Encoding with High-Cardinality Handling}]
+from sklearn.preprocessing import LabelEncoder
+from typing import Dict, Optional
+import category_encoders as ce  # pip install category-encoders
+
+class EncodingStrategy(Enum):
+    """Encoding strategies for categorical variables."""
+    ONE_HOT = "one_hot"
+    LABEL = "label"
+    TARGET = "target"  # Mean target encoding
+    FREQUENCY = "frequency"
+    ORDINAL = "ordinal"
+
+class CategoricalEncoder:
+    """
+    Encode categorical features with automatic strategy selection
+    based on cardinality.
+    """
+
+    def __init__(self,
+                 target_column: Optional[str] = None,
+                 max_cardinality_onehot: int = 10,
+                 min_samples_target_encode: int = 5):
+        """
+        Args:
+            target_column: Target for target encoding
+            max_cardinality_onehot: Max unique values for one-hot encoding
+            min_samples_target_encode: Min samples per category for target encoding
+        """
+        self.target_column = target_column
+        self.max_cardinality_onehot = max_cardinality_onehot
+        self.min_samples_target_encode = min_samples_target_encode
+        self.metadata: List[FeatureMetadata] = []
+        self.encoders: Dict[str, Any] = {}
+        self.strategies: Dict[str, EncodingStrategy] = {}
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Encode categorical columns."""
+        result = df.copy()
+        self.metadata = []
+
+        # Identify categorical columns
+        categorical_cols = result.select_dtypes(
+            include=['object', 'category']
+        ).columns.tolist()
+
+        # Remove target from encoding
+        if self.target_column and self.target_column in categorical_cols:
+            categorical_cols.remove(self.target_column)
+
+        for col in categorical_cols:
+            cardinality = result[col].nunique()
+
+            # Choose encoding strategy
+            if cardinality <= self.max_cardinality_onehot:
+                strategy = EncodingStrategy.ONE_HOT
+                result = self._one_hot_encode(result, col)
+            elif cardinality > 100:
+                # High cardinality: use target or frequency encoding
+                if self.target_column and self.target_column in result.columns:
+                    strategy = EncodingStrategy.TARGET
+                    result = self._target_encode(result, col)
+                else:
+                    strategy = EncodingStrategy.FREQUENCY
+                    result = self._frequency_encode(result, col)
+            else:
+                # Medium cardinality: label encoding
+                strategy = EncodingStrategy.LABEL
+                result = self._label_encode(result, col)
+
+            self.strategies[col] = strategy
+            logger.info(f"Encoded '{col}' (cardinality={cardinality}) "
+                       f"using {strategy.value}")
+
+        return result
+
+    def _one_hot_encode(self, df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """One-hot encode a categorical column."""
+        dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
+
+        for dummy_col in dummies.columns:
+            self.metadata.append(FeatureMetadata(
+                name=dummy_col,
+                feature_type=FeatureType.BOOLEAN,
+                source_columns=[col],
+                transformation=f"one-hot encoding of {col}",
+                scope=TransformationScope.ROW_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0"
+            ))
+
+        result = pd.concat([df.drop(columns=[col]), dummies], axis=1)
+        return result
+
+    def _label_encode(self, df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """Label encode a categorical column."""
+        encoder = LabelEncoder()
+        encoded_col = f"{col}_label"
+
+        df[encoded_col] = encoder.fit_transform(df[col].astype(str))
+        self.encoders[col] = encoder
+
+        self.metadata.append(FeatureMetadata(
+            name=encoded_col,
+            feature_type=FeatureType.NUMERICAL,
+            source_columns=[col],
+            transformation=f"label encoding of {col}",
+            scope=TransformationScope.GLOBAL_LEVEL,
+            created_at=datetime.now(),
+            version="1.0.0",
+            description=f"Mapping: {dict(enumerate(encoder.classes_))}"
+        ))
+
+        return df.drop(columns=[col])
+
+    def _target_encode(self, df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """
+        Target encode using mean of target variable.
+        Includes smoothing to handle low-frequency categories.
+        """
+        if not self.target_column or self.target_column not in df.columns:
+            logger.warning(f"Target column not available, using frequency encoding")
+            return self._frequency_encode(df, col)
+
+        # Calculate global mean
+        global_mean = df[self.target_column].mean()
+
+        # Calculate category means with counts
+        stats = df.groupby(col)[self.target_column].agg(['mean', 'count'])
+
+        # Smoothing: blend category mean with global mean based on count
+        # More samples = more weight on category mean
+        alpha = 1 / (1 + np.exp(-(stats['count'] - self.min_samples_target_encode)))
+        stats['smoothed_mean'] = alpha * stats['mean'] + (1 - alpha) * global_mean
+
+        # Map to dataframe
+        encoded_col = f"{col}_target"
+        df[encoded_col] = df[col].map(stats['smoothed_mean'])
+
+        # Handle unseen categories
+        df[encoded_col].fillna(global_mean, inplace=True)
+
+        self.encoders[col] = stats['smoothed_mean'].to_dict()
+
+        self.metadata.append(FeatureMetadata(
+            name=encoded_col,
+            feature_type=FeatureType.NUMERICAL,
+            source_columns=[col, self.target_column],
+            transformation=f"target encoding with smoothing (alpha-based)",
+            scope=TransformationScope.GLOBAL_LEVEL,
+            created_at=datetime.now(),
+            version="1.0.0",
+            description=f"Smoothed mean of {self.target_column} by {col}"
+        ))
+
+        return df.drop(columns=[col])
+
+    def _frequency_encode(self, df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """Encode by frequency of occurrence."""
+        freq = df[col].value_counts(normalize=True).to_dict()
+
+        encoded_col = f"{col}_freq"
+        df[encoded_col] = df[col].map(freq)
+
+        self.encoders[col] = freq
+
+        self.metadata.append(FeatureMetadata(
+            name=encoded_col,
+            feature_type=FeatureType.NUMERICAL,
+            source_columns=[col],
+            transformation=f"frequency encoding of {col}",
+            scope=TransformationScope.GLOBAL_LEVEL,
+            created_at=datetime.now(),
+            version="1.0.0",
+            description=f"Normalized frequency of occurrence"
+        ))
+
+        return df.drop(columns=[col])
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\subsection{Numerical Feature Transformations}
+
+Numerical features often benefit from transformations to handle skewness, outliers, and scale.
+
+\begin{lstlisting}[language=Python, caption={Numerical Feature Transformations}]
+from sklearn.preprocessing import StandardScaler, RobustScaler, PowerTransformer
+from scipy import stats
+
+class NumericalTransformer:
+    """Transform numerical features for better model performance."""
+
+    def __init__(self,
+                 columns: Optional[List[str]] = None,
+                 auto_transform: bool = True,
+                 skew_threshold: float = 1.0):
+        """
+        Args:
+            columns: Specific columns to transform (None = all numerical)
+            auto_transform: Automatically apply transformations based on distribution
+            skew_threshold: Skewness threshold for log/power transforms
+        """
+        self.columns = columns
+        self.auto_transform = auto_transform
+        self.skew_threshold = skew_threshold
+        self.metadata: List[FeatureMetadata] = []
+        self.scalers: Dict[str, Any] = {}
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Transform numerical features."""
+        result = df.copy()
+        self.metadata = []
+
+        # Identify numerical columns
+        if self.columns is None:
+            numerical_cols = result.select_dtypes(
+                include=[np.number]
+            ).columns.tolist()
+        else:
+            numerical_cols = self.columns
+
+        for col in numerical_cols:
+            if col not in result.columns:
+                continue
+
+            series = result[col]
+
+            # Skip if all NaN
+            if series.isna().all():
+                continue
+
+            # Calculate skewness
+            skewness = stats.skew(series.dropna())
+
+            if self.auto_transform and abs(skewness) > self.skew_threshold:
+                # Apply log transform for positive skewed data
+                if skewness > self.skew_threshold and (series > 0).all():
+                    result[f"{col}_log"] = np.log1p(series)
+                    self.metadata.append(FeatureMetadata(
+                        name=f"{col}_log",
+                        feature_type=FeatureType.NUMERICAL,
+                        source_columns=[col],
+                        transformation=f"log1p transform (original skew={skewness:.2f})",
+                        scope=TransformationScope.ROW_LEVEL,
+                        created_at=datetime.now(),
+                        version="1.0.0"
+                    ))
+
+                # Square root for moderate positive skew
+                elif 0 < skewness <= self.skew_threshold and (series >= 0).all():
+                    result[f"{col}_sqrt"] = np.sqrt(series)
+                    self.metadata.append(FeatureMetadata(
+                        name=f"{col}_sqrt",
+                        feature_type=FeatureType.NUMERICAL,
+                        source_columns=[col],
+                        transformation=f"sqrt transform (original skew={skewness:.2f})",
+                        scope=TransformationScope.ROW_LEVEL,
+                        created_at=datetime.now(),
+                        version="1.0.0"
+                    ))
+
+            # Robust scaling (median and IQR, resistant to outliers)
+            scaler = RobustScaler()
+            result[f"{col}_robust_scaled"] = scaler.fit_transform(
+                series.values.reshape(-1, 1)
+            )
+            self.scalers[col] = scaler
+
+            self.metadata.append(FeatureMetadata(
+                name=f"{col}_robust_scaled",
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[col],
+                transformation="robust scaling (median, IQR)",
+                scope=TransformationScope.GLOBAL_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0"
+            ))
+
+            # Create binned version for categorical interactions
+            result[f"{col}_binned"] = pd.qcut(
+                series, q=5, labels=['very_low', 'low', 'medium', 'high', 'very_high'],
+                duplicates='drop'
+            )
+
+            self.metadata.append(FeatureMetadata(
+                name=f"{col}_binned",
+                feature_type=FeatureType.CATEGORICAL,
+                source_columns=[col],
+                transformation="quintile binning (5 bins)",
+                scope=TransformationScope.GLOBAL_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0"
+            ))
+
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+
+
+class InteractionFeatureCreator:
+    """Create interaction features between numerical columns."""
+
+    def __init__(self, column_pairs: List[tuple]):
+        """
+        Args:
+            column_pairs: List of (col1, col2) tuples to create interactions
+        """
+        self.column_pairs = column_pairs
+        self.metadata: List[FeatureMetadata] = []
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create interaction features."""
+        result = df.copy()
+        self.metadata = []
+
+        for col1, col2 in self.column_pairs:
+            if col1 not in df.columns or col2 not in df.columns:
+                logger.warning(f"Columns '{col1}' or '{col2}' not found")
+                continue
+
+            # Multiplicative interaction
+            mult_col = f"{col1}_x_{col2}"
+            result[mult_col] = result[col1] * result[col2]
+
+            self.metadata.append(FeatureMetadata(
+                name=mult_col,
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[col1, col2],
+                transformation="multiplicative interaction",
+                scope=TransformationScope.ROW_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0"
+            ))
+
+            # Ratio (if col2 non-zero)
+            if (result[col2] != 0).all():
+                ratio_col = f"{col1}_div_{col2}"
+                result[ratio_col] = result[col1] / result[col2]
+
+                self.metadata.append(FeatureMetadata(
+                    name=ratio_col,
+                    feature_type=FeatureType.NUMERICAL,
+                    source_columns=[col1, col2],
+                    transformation="ratio feature",
+                    scope=TransformationScope.ROW_LEVEL,
+                    created_at=datetime.now(),
+                    version="1.0.0"
+                ))
+
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\section{Feature Selection}
+
+Not all engineered features improve model performance. Systematic feature selection identifies the most predictive features while removing redundant or noisy ones.
+
+\subsection{Statistical Feature Selection}
+
+\begin{lstlisting}[language=Python, caption={Statistical Feature Selection Methods}]
+from sklearn.feature_selection import (
+    SelectKBest, f_classif, f_regression, mutual_info_classif,
+    mutual_info_regression, RFE
+)
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from typing import Union
+
+@dataclass
+class FeatureSelectionResult:
+    """Results from feature selection."""
+    selected_features: List[str]
+    feature_scores: Dict[str, float]
+    method: str
+    threshold: Optional[float] = None
+
+    def get_top_k(self, k: int) -> List[str]:
+        """Get top k features by score."""
+        sorted_features = sorted(
+            self.feature_scores.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return [f for f, _ in sorted_features[:k]]
+
+class FeatureSelector:
+    """
+    Comprehensive feature selection using multiple methods:
+    - Statistical tests (ANOVA F-test, chi-squared)
+    - Information theory (mutual information)
+    - Model-based importance (Random Forest)
+    - Recursive feature elimination (RFE)
+    """
+
+    def __init__(self, task_type: str = "classification"):
+        """
+        Args:
+            task_type: 'classification' or 'regression'
+        """
+        if task_type not in ["classification", "regression"]:
+            raise ValueError("task_type must be 'classification' or 'regression'")
+
+        self.task_type = task_type
+        self.selection_results: Dict[str, FeatureSelectionResult] = {}
+
+    def select_by_statistical_test(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        k: int = 10
+    ) -> FeatureSelectionResult:
+        """
+        Select features using statistical tests.
+        - Classification: ANOVA F-test
+        - Regression: F-test for regression
+        """
+        if self.task_type == "classification":
+            selector = SelectKBest(score_func=f_classif, k=min(k, X.shape[1]))
+        else:
+            selector = SelectKBest(score_func=f_regression, k=min(k, X.shape[1]))
+
+        selector.fit(X, y)
+
+        # Get scores for all features
+        scores = dict(zip(X.columns, selector.scores_))
+
+        # Get selected features
+        selected_mask = selector.get_support()
+        selected_features = X.columns[selected_mask].tolist()
+
+        result = FeatureSelectionResult(
+            selected_features=selected_features,
+            feature_scores=scores,
+            method=f"statistical_test_{self.task_type}"
+        )
+
+        self.selection_results['statistical_test'] = result
+        logger.info(f"Statistical test selected {len(selected_features)} features")
+
+        return result
+
+    def select_by_mutual_information(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        k: int = 10
+    ) -> FeatureSelectionResult:
+        """
+        Select features using mutual information.
+        Captures both linear and non-linear relationships.
+        """
+        if self.task_type == "classification":
+            score_func = mutual_info_classif
+        else:
+            score_func = mutual_info_regression
+
+        selector = SelectKBest(score_func=score_func, k=min(k, X.shape[1]))
+        selector.fit(X, y)
+
+        scores = dict(zip(X.columns, selector.scores_))
+        selected_mask = selector.get_support()
+        selected_features = X.columns[selected_mask].tolist()
+
+        result = FeatureSelectionResult(
+            selected_features=selected_features,
+            feature_scores=scores,
+            method=f"mutual_information_{self.task_type}"
+        )
+
+        self.selection_results['mutual_information'] = result
+        logger.info(f"Mutual information selected {len(selected_features)} features")
+
+        return result
+
+    def select_by_model_importance(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        threshold: float = 0.01
+    ) -> FeatureSelectionResult:
+        """
+        Select features using Random Forest feature importance.
+
+        Args:
+            threshold: Minimum importance score (0-1)
+        """
+        if self.task_type == "classification":
+            model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        else:
+            model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+
+        model.fit(X, y)
+
+        # Get feature importances
+        importances = dict(zip(X.columns, model.feature_importances_))
+
+        # Select features above threshold
+        selected_features = [
+            feature for feature, importance in importances.items()
+            if importance >= threshold
+        ]
+
+        result = FeatureSelectionResult(
+            selected_features=selected_features,
+            feature_scores=importances,
+            method=f"random_forest_{self.task_type}",
+            threshold=threshold
+        )
+
+        self.selection_results['model_importance'] = result
+        logger.info(f"Model importance selected {len(selected_features)} features "
+                   f"(threshold={threshold})")
+
+        return result
+
+    def select_by_rfe(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        n_features: int = 10,
+        step: int = 1
+    ) -> FeatureSelectionResult:
+        """
+        Recursive Feature Elimination (RFE).
+        Iteratively removes least important features.
+
+        Args:
+            n_features: Number of features to select
+            step: Number of features to remove at each iteration
+        """
+        if self.task_type == "classification":
+            estimator = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
+        else:
+            estimator = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
+
+        rfe = RFE(estimator=estimator, n_features_to_select=n_features, step=step)
+        rfe.fit(X, y)
+
+        # Get ranking (1 = selected, higher = eliminated earlier)
+        rankings = dict(zip(X.columns, rfe.ranking_))
+
+        # Convert ranking to scores (inverse ranking)
+        max_rank = max(rankings.values())
+        scores = {
+            feature: (max_rank - rank + 1) / max_rank
+            for feature, rank in rankings.items()
+        }
+
+        # Get selected features
+        selected_mask = rfe.get_support()
+        selected_features = X.columns[selected_mask].tolist()
+
+        result = FeatureSelectionResult(
+            selected_features=selected_features,
+            feature_scores=scores,
+            method=f"rfe_{self.task_type}"
+        )
+
+        self.selection_results['rfe'] = result
+        logger.info(f"RFE selected {len(selected_features)} features")
+
+        return result
+
+    def get_consensus_features(
+        self,
+        min_methods: int = 2
+    ) -> List[str]:
+        """
+        Get features selected by at least min_methods different methods.
+        Provides robust feature selection through consensus.
+        """
+        if not self.selection_results:
+            logger.warning("No selection results available")
+            return []
+
+        # Count how many methods selected each feature
+        feature_counts: Dict[str, int] = {}
+
+        for result in self.selection_results.values():
+            for feature in result.selected_features:
+                feature_counts[feature] = feature_counts.get(feature, 0) + 1
+
+        # Filter by minimum methods
+        consensus_features = [
+            feature for feature, count in feature_counts.items()
+            if count >= min_methods
+        ]
+
+        logger.info(f"Consensus: {len(consensus_features)} features selected by "
+                   f">={min_methods} methods")
+
+        return consensus_features
+
+    def get_feature_selection_report(self) -> pd.DataFrame:
+        """Generate a report comparing all selection methods."""
+        if not self.selection_results:
+            return pd.DataFrame()
+
+        # Create report dataframe
+        all_features = set()
+        for result in self.selection_results.values():
+            all_features.update(result.feature_scores.keys())
+
+        report_data = []
+        for feature in sorted(all_features):
+            row = {"feature": feature}
+
+            for method, result in self.selection_results.items():
+                row[f"{method}_score"] = result.feature_scores.get(feature, 0.0)
+                row[f"{method}_selected"] = feature in result.selected_features
+
+            # Count selections
+            row["num_selections"] = sum(
+                1 for result in self.selection_results.values()
+                if feature in result.selected_features
+            )
+
+            report_data.append(row)
+
+        df = pd.DataFrame(report_data)
+        df = df.sort_values("num_selections", ascending=False)
+
+        return df
+\end{lstlisting}
+
+\section{Feature Validation}
+
+Selected features must be validated for stability, robustness, and production readiness.
+
+\begin{lstlisting}[language=Python, caption={Feature Validation Framework}]
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.linear_model import LogisticRegression, Ridge
+from typing import List, Dict
+import warnings
+
+@dataclass
+class FeatureStabilityResult:
+    """Results from feature stability analysis."""
+    feature_name: str
+    stability_score: float  # 0-1, higher is more stable
+    cv_scores: List[float]
+    mean_cv_score: float
+    std_cv_score: float
+    is_stable: bool  # True if std/mean < threshold
+
+    def __str__(self) -> str:
+        return (f"Feature '{self.feature_name}': "
+                f"Stability={self.stability_score:.3f}, "
+                f"CV={self.mean_cv_score:.3f} +/- {self.std_cv_score:.3f}")
+
+class FeatureValidator:
+    """
+    Validate features for production readiness:
+    - Cross-validation stability
+    - Correlation with target
+    - Redundancy detection
+    - Production compatibility checks
+    """
+
+    def __init__(self, task_type: str = "classification", n_folds: int = 5):
+        self.task_type = task_type
+        self.n_folds = n_folds
+
+    def validate_feature_stability(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        features: Optional[List[str]] = None,
+        stability_threshold: float = 0.2
+    ) -> List[FeatureStabilityResult]:
+        """
+        Validate feature stability across cross-validation folds.
+
+        A stable feature maintains consistent importance across different
+        data subsets, indicating robustness.
+
+        Args:
+            stability_threshold: Max coefficient of variation (std/mean)
+        """
+        if features is None:
+            features = X.columns.tolist()
+
+        results = []
+        kfold = KFold(n_splits=self.n_folds, shuffle=True, random_state=42)
+
+        if self.task_type == "classification":
+            base_model = LogisticRegression(max_iter=1000, random_state=42)
+        else:
+            base_model = Ridge(random_state=42)
+
+        for feature in features:
+            if feature not in X.columns:
+                continue
+
+            X_feature = X[[feature]].values
+
+            # Get cross-validation scores
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                cv_scores = cross_val_score(
+                    base_model, X_feature, y,
+                    cv=kfold,
+                    scoring='accuracy' if self.task_type == 'classification' else 'r2',
+                    n_jobs=-1
+                )
+
+            mean_score = np.mean(cv_scores)
+            std_score = np.std(cv_scores)
+
+            # Calculate stability (inverse of coefficient of variation)
+            if mean_score != 0:
+                cv_coefficient = std_score / abs(mean_score)
+                stability_score = 1 / (1 + cv_coefficient)
+            else:
+                stability_score = 0.0
+
+            is_stable = cv_coefficient < stability_threshold if mean_score != 0 else False
+
+            results.append(FeatureStabilityResult(
+                feature_name=feature,
+                stability_score=stability_score,
+                cv_scores=cv_scores.tolist(),
+                mean_cv_score=mean_score,
+                std_cv_score=std_score,
+                is_stable=is_stable
+            ))
+
+        # Sort by stability score
+        results.sort(key=lambda x: x.stability_score, reverse=True)
+
+        stable_count = sum(1 for r in results if r.is_stable)
+        logger.info(f"Feature stability: {stable_count}/{len(results)} features stable")
+
+        return results
+
+    def detect_redundant_features(
+        self,
+        X: pd.DataFrame,
+        correlation_threshold: float = 0.95
+    ) -> List[tuple]:
+        """
+        Detect highly correlated (redundant) feature pairs.
+
+        Returns:
+            List of (feature1, feature2, correlation) tuples
+        """
+        # Calculate correlation matrix
+        corr_matrix = X.corr().abs()
+
+        # Find feature pairs with correlation above threshold
+        redundant_pairs = []
+
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i + 1, len(corr_matrix.columns)):
+                if corr_matrix.iloc[i, j] >= correlation_threshold:
+                    redundant_pairs.append((
+                        corr_matrix.columns[i],
+                        corr_matrix.columns[j],
+                        corr_matrix.iloc[i, j]
+                    ))
+
+        logger.info(f"Found {len(redundant_pairs)} redundant feature pairs "
+                   f"(threshold={correlation_threshold})")
+
+        return redundant_pairs
+
+    def check_production_readiness(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> Dict[str, List[str]]:
+        """
+        Check if features are ready for production deployment.
+
+        Checks:
+        - No NaN or Inf values
+        - Reasonable value ranges
+        - Consistent dtypes
+        """
+        issues = {
+            "nan_features": [],
+            "inf_features": [],
+            "constant_features": [],
+            "warnings": []
+        }
+
+        for feature in features:
+            if feature not in df.columns:
+                issues["warnings"].append(f"Feature '{feature}' not found")
+                continue
+
+            series = df[feature]
+
+            # Check for NaN
+            if series.isna().any():
+                nan_pct = series.isna().sum() / len(series) * 100
+                issues["nan_features"].append(f"{feature} ({nan_pct:.1f}% NaN)")
+
+            # Check for Inf
+            if pd.api.types.is_numeric_dtype(series):
+                if np.isinf(series).any():
+                    issues["inf_features"].append(feature)
+
+                # Check for constant
+                if series.nunique() == 1:
+                    issues["constant_features"].append(feature)
+
+        # Log summary
+        total_issues = (len(issues["nan_features"]) +
+                       len(issues["inf_features"]) +
+                       len(issues["constant_features"]))
+
+        if total_issues == 0:
+            logger.info(f"All {len(features)} features are production-ready")
+        else:
+            logger.warning(f"Found {total_issues} production readiness issues")
+            for issue_type, issue_list in issues.items():
+                if issue_list:
+                    logger.warning(f"{issue_type}: {issue_list}")
+
+        return issues
+\end{lstlisting}
+
+\section{Production Feature Monitoring}
+
+Features can drift in production due to changing data distributions, upstream pipeline changes, or real-world concept drift. Continuous monitoring is essential.
+
+\begin{lstlisting}[language=Python, caption={Production Feature Monitoring with Drift Detection}]
+from scipy.stats import ks_2samp, chi2_contingency
+from datetime import datetime, timedelta
+import sqlite3
+
+@dataclass
+class FeatureDriftAlert:
+    """Alert for detected feature drift."""
+    feature_name: str
+    drift_score: float
+    p_value: float
+    test_method: str
+    timestamp: datetime
+    severity: str  # 'low', 'medium', 'high'
+    reference_stats: Dict[str, float]
+    current_stats: Dict[str, float]
+
+    def __str__(self) -> str:
+        return (f"DRIFT ALERT [{self.severity.upper()}]: {self.feature_name} - "
+                f"Score={self.drift_score:.3f}, p={self.p_value:.4f} ({self.test_method})")
+
+class FeatureMonitor:
+    """
+    Monitor features in production for drift and anomalies.
+
+    Tracks:
+    - Distribution drift (KS test for numerical, chi-squared for categorical)
+    - Statistical moments (mean, std, skewness, kurtosis)
+    - Value range changes
+    - Missing value patterns
+    """
+
+    def __init__(self, db_path: Path, p_value_threshold: float = 0.05):
+        """
+        Args:
+            db_path: Path to SQLite database for storing metrics
+            p_value_threshold: P-value threshold for drift detection
+        """
+        self.db_path = db_path
+        self.p_value_threshold = p_value_threshold
+        self.reference_distributions: Dict[str, pd.Series] = {}
+        self._init_database()
+
+    def _init_database(self) -> None:
+        """Initialize SQLite database schema."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Feature metrics table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feature_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_name TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                mean REAL,
+                std REAL,
+                min REAL,
+                max REAL,
+                missing_pct REAL,
+                skewness REAL,
+                kurtosis REAL
+            )
+        ''')
+
+        # Drift alerts table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS drift_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_name TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                drift_score REAL NOT NULL,
+                p_value REAL NOT NULL,
+                test_method TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                reference_stats TEXT,
+                current_stats TEXT
+            )
+        ''')
+
+        # Create indices
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_feature_metrics_name_time
+            ON feature_metrics(feature_name, timestamp)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_drift_alerts_name_time
+            ON drift_alerts(feature_name, timestamp)
+        ''')
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"Initialized feature monitoring database: {self.db_path}")
+
+    def set_reference_distribution(self, feature_name: str,
+                                   reference_data: pd.Series) -> None:
+        """Set reference distribution for a feature (baseline)."""
+        self.reference_distributions[feature_name] = reference_data.copy()
+        logger.info(f"Set reference distribution for '{feature_name}' "
+                   f"(n={len(reference_data)})")
+
+    def monitor_batch(self, df: pd.DataFrame,
+                     timestamp: Optional[datetime] = None) -> List[FeatureDriftAlert]:
+        """
+        Monitor a batch of production data for drift.
+
+        Args:
+            df: Production data batch
+            timestamp: Timestamp for this batch (default: now)
+
+        Returns:
+            List of drift alerts
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+
+        alerts = []
+
+        for feature_name in df.columns:
+            # Record metrics
+            self._record_feature_metrics(df[feature_name], feature_name, timestamp)
+
+            # Check for drift if reference exists
+            if feature_name in self.reference_distributions:
+                alert = self._check_drift(
+                    reference=self.reference_distributions[feature_name],
+                    current=df[feature_name],
+                    feature_name=feature_name,
+                    timestamp=timestamp
+                )
+
+                if alert:
+                    alerts.append(alert)
+                    self._record_drift_alert(alert)
+
+        if alerts:
+            logger.warning(f"Detected {len(alerts)} drift alerts")
+            for alert in alerts:
+                logger.warning(str(alert))
+        else:
+            logger.info(f"No drift detected in {len(df.columns)} features")
+
+        return alerts
+
+    def _record_feature_metrics(self, series: pd.Series,
+                               feature_name: str, timestamp: datetime) -> None:
+        """Record feature statistics to database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Calculate statistics (only for numerical features)
+        if pd.api.types.is_numeric_dtype(series):
+            stats = {
+                "mean": series.mean(),
+                "std": series.std(),
+                "min": series.min(),
+                "max": series.max(),
+                "missing_pct": series.isna().sum() / len(series) * 100,
+                "skewness": stats.skew(series.dropna()) if len(series.dropna()) > 0 else None,
+                "kurtosis": stats.kurtosis(series.dropna()) if len(series.dropna()) > 0 else None
+            }
+        else:
+            stats = {
+                "mean": None,
+                "std": None,
+                "min": None,
+                "max": None,
+                "missing_pct": series.isna().sum() / len(series) * 100,
+                "skewness": None,
+                "kurtosis": None
+            }
+
+        cursor.execute('''
+            INSERT INTO feature_metrics
+            (feature_name, timestamp, mean, std, min, max, missing_pct, skewness, kurtosis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            feature_name,
+            timestamp.isoformat(),
+            stats["mean"],
+            stats["std"],
+            stats["min"],
+            stats["max"],
+            stats["missing_pct"],
+            stats["skewness"],
+            stats["kurtosis"]
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def _check_drift(self, reference: pd.Series, current: pd.Series,
+                    feature_name: str, timestamp: datetime) -> Optional[FeatureDriftAlert]:
+        """Check for distribution drift using statistical tests."""
+        # Remove NaN values
+        ref_clean = reference.dropna()
+        curr_clean = current.dropna()
+
+        if len(ref_clean) == 0 or len(curr_clean) == 0:
+            return None
+
+        # Choose test based on data type
+        if pd.api.types.is_numeric_dtype(reference):
+            # Kolmogorov-Smirnov test for numerical features
+            statistic, p_value = ks_2samp(ref_clean, curr_clean)
+            test_method = "ks_test"
+
+            ref_stats = {
+                "mean": float(ref_clean.mean()),
+                "std": float(ref_clean.std())
+            }
+            curr_stats = {
+                "mean": float(curr_clean.mean()),
+                "std": float(curr_clean.std())
+            }
+        else:
+            # Chi-squared test for categorical features
+            # Create contingency table
+            ref_counts = reference.value_counts()
+            curr_counts = current.value_counts()
+
+            # Align categories
+            all_categories = set(ref_counts.index) | set(curr_counts.index)
+            ref_aligned = [ref_counts.get(cat, 0) for cat in all_categories]
+            curr_aligned = [curr_counts.get(cat, 0) for cat in all_categories]
+
+            contingency_table = np.array([ref_aligned, curr_aligned])
+            statistic, p_value, _, _ = chi2_contingency(contingency_table)
+            test_method = "chi2_test"
+
+            ref_stats = {"top_categories": ref_counts.head(5).to_dict()}
+            curr_stats = {"top_categories": curr_counts.head(5).to_dict()}
+
+        # Determine if drift detected
+        if p_value < self.p_value_threshold:
+            # Determine severity based on p-value
+            if p_value < 0.001:
+                severity = "high"
+            elif p_value < 0.01:
+                severity = "medium"
+            else:
+                severity = "low"
+
+            return FeatureDriftAlert(
+                feature_name=feature_name,
+                drift_score=float(statistic),
+                p_value=float(p_value),
+                test_method=test_method,
+                timestamp=timestamp,
+                severity=severity,
+                reference_stats=ref_stats,
+                current_stats=curr_stats
+            )
+
+        return None
+
+    def _record_drift_alert(self, alert: FeatureDriftAlert) -> None:
+        """Record drift alert to database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT INTO drift_alerts
+            (feature_name, timestamp, drift_score, p_value, test_method,
+             severity, reference_stats, current_stats)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            alert.feature_name,
+            alert.timestamp.isoformat(),
+            alert.drift_score,
+            alert.p_value,
+            alert.test_method,
+            alert.severity,
+            json.dumps(alert.reference_stats),
+            json.dumps(alert.current_stats)
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def get_drift_history(self, feature_name: str,
+                         days: int = 30) -> pd.DataFrame:
+        """Get drift alert history for a feature."""
+        conn = sqlite3.connect(self.db_path)
+
+        cutoff_date = datetime.now() - timedelta(days=days)
+
+        query = '''
+            SELECT * FROM drift_alerts
+            WHERE feature_name = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+        '''
+
+        df = pd.read_sql_query(query, conn, params=(feature_name, cutoff_date.isoformat()))
+        conn.close()
+
+        return df
+
+    def get_metrics_history(self, feature_name: str,
+                           days: int = 30) -> pd.DataFrame:
+        """Get metrics history for a feature."""
+        conn = sqlite3.connect(self.db_path)
+
+        cutoff_date = datetime.now() - timedelta(days=days)
+
+        query = '''
+            SELECT * FROM feature_metrics
+            WHERE feature_name = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+        '''
+
+        df = pd.read_sql_query(query, conn, params=(feature_name, cutoff_date.isoformat()))
+        conn.close()
+
+        return df
+\end{lstlisting}
+
+\section{Real-World Scenario: Feature Engineering Impact}
+
+\subsection{The TechVentures Recommendation Engine}
+
+TechVentures, a fast-growing e-commerce platform, struggled with poor click-through rates (CTR) on their product recommendations. Their baseline model used only 5 simple features: user age, product price, category, time of day, and previous purchase count. CTR hovered at 2.1\%, well below the industry benchmark of 4-5\%.
+
+\subsection{The Feature Engineering Initiative}
+
+The data science team, led by Maya Chen, launched a systematic feature engineering initiative following the framework from this chapter.
+
+\textbf{Week 1-2: Feature Discovery}
+
+Maya's team implemented the FeatureEngineeringPipeline and created 47 new features:
+
+\begin{itemize}
+    \item \textbf{Temporal features}: Time since last purchase, hour-of-day cyclic encoding, day-of-week patterns, month seasonality
+    \item \textbf{Behavioral features}: 7-day/30-day rolling purchase frequency, category affinity scores, price sensitivity (ratio features)
+    \item \textbf{Contextual features}: Product popularity (frequency encoding), user-product category interaction features
+    \item \textbf{Engagement features}: Session duration binned, pages viewed (log-transformed due to right skew)
+\end{itemize}
+
+\textbf{Week 3: Feature Selection}
+
+Using the FeatureSelector with four methods (statistical tests, mutual information, Random Forest importance, and RFE), the team identified 18 consensus features that all methods ranked highly. These included:
+
+\begin{itemize}
+    \item Days since last purchase (ranked \#1 by 3/4 methods)
+    \item Category affinity score (ranked \#2)
+    \item Price ratio to user's average purchase
+    \item 30-day rolling purchase frequency
+    \item Hour-of-day cyclic features
+\end{itemize}
+
+\textbf{Week 4: Validation}
+
+The FeatureValidator revealed stability issues with 3 features that showed high variance across cross-validation folds. These were removed. The remaining 15 features passed all production readiness checks.
+
+\subsection{The Results}
+
+After deploying the new model with engineered features:
+
+\begin{itemize}
+    \item \textbf{CTR improved from 2.1\% to 4.8\%} (129\% relative improvement)
+    \item \textbf{Revenue per user increased by 34\%}
+    \item \textbf{Model AUC improved from 0.72 to 0.86}
+\end{itemize}
+
+\subsection{Production Monitoring Saves the Day}
+
+Two months post-deployment, the FeatureMonitor detected drift in the "days\_since\_last\_purchase" feature (p-value = 0.003, KS statistic = 0.21). Investigation revealed that a marketing campaign had significantly changed purchase frequency patterns.
+
+The team retrained the model with updated reference distributions and prevented a potential 15\% drop in CTR that would have occurred if the drift had gone undetected.
+
+\subsection{Key Lessons}
+
+\begin{enumerate}
+    \item \textbf{Systematic > Ad-hoc}: The structured pipeline prevented common pitfalls like data leakage and ensured reproducibility
+    \item \textbf{Selection matters}: Of 47 created features, only 15 were stable and valuable. Without rigorous selection, model complexity would have increased with no benefit
+    \item \textbf{Monitoring is essential}: Production drift is inevitable; automated monitoring enabled proactive response
+    \item \textbf{Documentation pays off}: The FeatureMetadata system made it trivial to understand feature lineage when debugging issues
+\end{enumerate}
+
+\section{Feature Store Integration}
+
+For organizations with multiple ML systems, a feature store provides centralized feature management, versioning, and serving.
+
+\subsection{Feature Store Concepts}
+
+\begin{lstlisting}[language=Python, caption={Feature Store Integration Pattern}]
+from typing import Protocol
+from datetime import datetime
+
+class FeatureStore(Protocol):
+    """Protocol for feature store implementations (e.g., Feast, Tecton)."""
+
+    def register_features(self, feature_metadata: List[FeatureMetadata]) -> None:
+        """Register features in the feature store."""
+        ...
+
+    def get_online_features(self, entity_ids: List[str],
+                           feature_names: List[str]) -> pd.DataFrame:
+        """Retrieve features for online serving (low latency)."""
+        ...
+
+    def get_historical_features(self, entity_df: pd.DataFrame,
+                               feature_names: List[str]) -> pd.DataFrame:
+        """Retrieve features for training (point-in-time correct)."""
+        ...
+
+@dataclass
+class FeatureVersion:
+    """Version information for features."""
+    version_id: str
+    pipeline_hash: str
+    created_at: datetime
+    features: List[FeatureMetadata]
+    performance_metrics: Optional[Dict[str, float]] = None
+
+    def is_compatible_with(self, other: 'FeatureVersion') -> bool:
+        """Check if two feature versions are compatible."""
+        self_features = set(f.name for f in self.features)
+        other_features = set(f.name for f in other.features)
+        return self_features == other_features
+
+class FeatureVersionManager:
+    """Manage feature versions for reproducibility."""
+
+    def __init__(self, storage_path: Path):
+        self.storage_path = storage_path
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+
+    def save_version(self, pipeline: FeatureEngineeringPipeline,
+                    performance_metrics: Optional[Dict[str, float]] = None) -> FeatureVersion:
+        """Save a feature version."""
+        version_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pipeline_hash = pipeline.compute_pipeline_hash()
+
+        version = FeatureVersion(
+            version_id=version_id,
+            pipeline_hash=pipeline_hash,
+            created_at=datetime.now(),
+            features=list(pipeline.feature_metadata.values()),
+            performance_metrics=performance_metrics
+        )
+
+        # Save to disk
+        version_file = self.storage_path / f"feature_version_{version_id}.json"
+        with open(version_file, 'w') as f:
+            json.dump({
+                "version_id": version.version_id,
+                "pipeline_hash": version.pipeline_hash,
+                "created_at": version.created_at.isoformat(),
+                "features": [f.to_dict() for f in version.features],
+                "performance_metrics": version.performance_metrics
+            }, f, indent=2)
+
+        logger.info(f"Saved feature version: {version_id}")
+        return version
+
+    def load_version(self, version_id: str) -> FeatureVersion:
+        """Load a feature version."""
+        version_file = self.storage_path / f"feature_version_{version_id}.json"
+
+        with open(version_file, 'r') as f:
+            data = json.load(f)
+
+        return FeatureVersion(
+            version_id=data["version_id"],
+            pipeline_hash=data["pipeline_hash"],
+            created_at=datetime.fromisoformat(data["created_at"]),
+            features=[FeatureMetadata(**f) for f in data["features"]],
+            performance_metrics=data.get("performance_metrics")
+        )
+
+    def list_versions(self) -> List[str]:
+        """List all available versions."""
+        version_files = self.storage_path.glob("feature_version_*.json")
+        return sorted([f.stem.replace("feature_version_", "") for f in version_files])
+\end{lstlisting}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Basic Feature Engineering Pipeline (Easy)}
+
+Create a feature engineering pipeline for a dataset with customer purchase history. Implement:
+\begin{itemize}
+    \item Temporal features from purchase dates
+    \item Frequency encoding for product categories
+    \item Basic validation checks
+\end{itemize}
+
+Test with sample data and verify all features pass validation.
+
+\subsection{Exercise 2: Cyclic Feature Encoding (Easy)}
+
+Implement cyclic encoding for time-based features (hour, day-of-week, month). Create visualizations showing why cyclic encoding is superior to linear encoding for capturing temporal patterns.
+
+Compare model performance (simple logistic regression) using linear vs. cyclic encoding on a time-sensitive classification task.
+
+\subsection{Exercise 3: High-Cardinality Categorical Encoding (Medium)}
+
+You have a user\_id feature with 100,000 unique values and a binary target (clicked/not clicked). Implement and compare:
+\begin{itemize}
+    \item Frequency encoding
+    \item Target encoding with smoothing
+    \item Hash encoding
+\end{itemize}
+
+Evaluate which encoding strategy provides the best model performance and explain why.
+
+\subsection{Exercise 4: Feature Selection Consensus (Medium)}
+
+Create a synthetic dataset with:
+\begin{itemize}
+    \item 10 truly predictive features
+    \item 20 random noise features
+    \item 5 redundant features (copies with small noise)
+\end{itemize}
+
+Apply all four feature selection methods from the chapter. Analyze:
+\begin{itemize}
+    \item Which methods successfully identify the true features?
+    \item How many methods are needed in consensus to filter out noise?
+    \item How does correlation threshold affect redundancy detection?
+\end{itemize}
+
+\subsection{Exercise 5: Feature Stability Analysis (Medium)}
+
+Implement a feature stability checker that compares feature importance across different train/test splits. For an unstable feature, investigate:
+\begin{itemize}
+    \item Why does it show high variance across folds?
+    \item How does sample size affect stability?
+    \item Can transformation (e.g., binning, smoothing) improve stability?
+\end{itemize}
+
+Create a visualization showing stability scores for all features.
+
+\subsection{Exercise 6: Production Drift Detection (Advanced)}
+
+Simulate production drift by:
+\begin{enumerate}
+    \item Training a model on 2023 e-commerce data
+    \item Creating synthetic 2024 data with gradual drift (changing customer behavior)
+    \item Implementing the FeatureMonitor to detect drift
+\end{enumerate}
+
+Set up alerting thresholds and create a dashboard showing:
+\begin{itemize}
+    \item Feature drift over time
+    \item Model performance degradation
+    \item Triggered alerts and their severity
+\end{itemize}
+
+\subsection{Exercise 7: End-to-End Feature Engineering System (Advanced)}
+
+Build a complete feature engineering system for a real-world problem (e.g., credit risk, customer churn):
+
+\begin{enumerate}
+    \item Design domain-driven features based on problem understanding
+    \item Implement a multi-stage pipeline with validation
+    \item Apply multiple feature selection methods
+    \item Validate stability and production readiness
+    \item Set up monitoring with drift detection
+    \item Version features using FeatureVersionManager
+    \item Compare model performance: baseline vs. engineered features
+\end{enumerate}
+
+Document the impact of each stage on model performance and create a feature engineering report suitable for stakeholders.
+
+\section{Summary}
+
+This chapter presented a systematic, production-ready approach to feature engineering:
+
+\begin{itemize}
+    \item \textbf{Feature Engineering Pipeline}: Type-safe framework with validation, metadata tracking, and reproducibility
+    \item \textbf{Domain-Driven Features}: Temporal extraction (cyclic encoding, lags, rolling), categorical encoding (automatic strategy selection), numerical transformations (distribution-aware)
+    \item \textbf{Feature Selection}: Statistical tests, mutual information, model-based importance, RFE, and consensus methods
+    \item \textbf{Feature Validation}: Stability analysis across CV folds, redundancy detection, production readiness checks
+    \item \textbf{Production Monitoring}: Drift detection using KS tests (numerical) and chi-squared (categorical), automated alerting, historical tracking
+    \item \textbf{Feature Store Integration}: Versioning, compatibility checking, and centralized feature management
+\end{itemize}
+
+Feature engineering is both an art and a science. While domain knowledge drives creativity, systematic engineering practices ensure reliability, reproducibility, and maintainability. By combining statistical rigor with production-ready tooling, teams can build features that not only improve model performance but remain stable and observable in production environments.

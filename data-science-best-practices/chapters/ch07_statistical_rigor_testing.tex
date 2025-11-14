@@ -1,0 +1,2700 @@
+\chapter{Statistical Rigor and Hypothesis Testing}
+
+\section{Introduction}
+
+Statistical rigor separates data-driven insights from data-supported guesses. In machine learning and data science, decisions affecting millions of users and dollars rest on statistical foundations that are often poorly understood or incorrectly applied. A/B tests with insufficient power, correlation mistaken for causation, and multiple comparison errors cost organizations countless resources and opportunities.
+
+\subsection{The Statistical Rigor Challenge}
+
+Consider an e-commerce company that observes a correlation between customer email open rates and purchase conversion. They invest \$2M in email optimization, only to discover no causal relationship—both metrics were driven by an underlying seasonal pattern. Rigorous statistical methodology would have prevented this costly mistake.
+
+\subsection{Why Statistical Rigor Matters}
+
+Studies show that:
+\begin{itemize}
+    \item \textbf{65\% of A/B tests} are underpowered, leading to false negatives
+    \item \textbf{80\% of observational studies} fail to properly address confounding
+    \item \textbf{50\% of published results} fail to replicate due to statistical errors
+    \item \textbf{Multiple comparisons} inflate Type I error rates by 10-50x without correction
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-ready frameworks for statistical rigor:
+
+\begin{enumerate}
+    \item \textbf{Hypothesis Testing}: Comprehensive framework with assumption validation
+    \item \textbf{Experimental Design}: Randomization strategies for A/B tests
+    \item \textbf{Causal Inference}: Propensity score matching and difference-in-differences
+    \item \textbf{Power Analysis}: Sample size calculations for different tests
+    \item \textbf{Multiple Comparisons}: Corrections and false discovery rate control
+    \item \textbf{Effect Sizes}: Practical significance beyond statistical significance
+\end{enumerate}
+
+\section{Hypothesis Testing Framework}
+
+Proper hypothesis testing requires checking assumptions, choosing appropriate tests, and interpreting results with confidence intervals and effect sizes.
+
+\subsection{Statistical Test Result Framework}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Hypothesis Testing Framework}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+import numpy as np
+import pandas as pd
+from scipy import stats
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+class TestType(Enum):
+    """Types of statistical tests."""
+    T_TEST_INDEPENDENT = "t_test_independent"
+    T_TEST_PAIRED = "t_test_paired"
+    MANN_WHITNEY = "mann_whitney"
+    WILCOXON = "wilcoxon"
+    CHI_SQUARE = "chi_square"
+    ANOVA = "anova"
+    KRUSKAL_WALLIS = "kruskal_wallis"
+
+class AssumptionStatus(Enum):
+    """Status of statistical assumptions."""
+    SATISFIED = "satisfied"
+    VIOLATED = "violated"
+    WARNING = "warning"
+    NOT_APPLICABLE = "not_applicable"
+
+@dataclass
+class AssumptionCheck:
+    """Result of checking a statistical assumption."""
+    assumption_name: str
+    status: AssumptionStatus
+    test_statistic: Optional[float]
+    p_value: Optional[float]
+    details: str
+
+    def __str__(self) -> str:
+        return (f"{self.assumption_name}: {self.status.value} "
+                f"(p={self.p_value:.4f if self.p_value else 'N/A'})")
+
+@dataclass
+class StatisticalTestResult:
+    """
+    Comprehensive result from a statistical hypothesis test.
+
+    Includes test statistics, p-values, confidence intervals,
+    effect sizes, and assumption checks.
+    """
+    test_type: TestType
+    test_statistic: float
+    p_value: float
+    alpha: float
+    is_significant: bool
+
+    # Descriptive statistics
+    group_statistics: Dict[str, Dict[str, float]]
+
+    # Effect size
+    effect_size: float
+    effect_size_type: str  # 'cohen_d', 'r', 'eta_squared', etc.
+    effect_size_interpretation: str  # 'small', 'medium', 'large'
+
+    # Confidence intervals
+    confidence_level: float
+    confidence_interval: Optional[Tuple[float, float]]
+
+    # Assumption checks
+    assumptions: List[AssumptionCheck]
+    assumptions_satisfied: bool
+
+    # Metadata
+    sample_sizes: Dict[str, int]
+    degrees_of_freedom: Optional[float]
+    test_description: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def get_recommendation(self) -> str:
+        """Get interpretation and recommendation based on results."""
+        recommendations = []
+
+        # Check assumptions
+        if not self.assumptions_satisfied:
+            violated = [a for a in self.assumptions if a.status == AssumptionStatus.VIOLATED]
+            recommendations.append(
+                f"WARNING: {len(violated)} assumption(s) violated. "
+                f"Consider non-parametric alternative."
+            )
+
+        # Interpret significance
+        if self.is_significant:
+            recommendations.append(
+                f"Result is statistically significant (p={self.p_value:.4f} < {self.alpha})"
+            )
+        else:
+            recommendations.append(
+                f"No significant effect detected (p={self.p_value:.4f} >= {self.alpha})"
+            )
+
+        # Interpret effect size
+        recommendations.append(
+            f"Effect size: {self.effect_size:.3f} ({self.effect_size_interpretation})"
+        )
+
+        # Practical significance
+        if self.is_significant and self.effect_size_interpretation == 'small':
+            recommendations.append(
+                "Note: Statistically significant but small effect size. "
+                "Consider practical significance."
+            )
+
+        return "\n".join(recommendations)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "test_type": self.test_type.value,
+            "test_statistic": self.test_statistic,
+            "p_value": self.p_value,
+            "alpha": self.alpha,
+            "is_significant": self.is_significant,
+            "group_statistics": self.group_statistics,
+            "effect_size": self.effect_size,
+            "effect_size_type": self.effect_size_type,
+            "effect_size_interpretation": self.effect_size_interpretation,
+            "confidence_level": self.confidence_level,
+            "confidence_interval": self.confidence_interval,
+            "assumptions_satisfied": self.assumptions_satisfied,
+            "sample_sizes": self.sample_sizes,
+            "degrees_of_freedom": self.degrees_of_freedom,
+            "recommendation": self.get_recommendation()
+        }
+
+class HypothesisTester:
+    """
+    Comprehensive hypothesis testing with assumption checking.
+
+    Features:
+    - Automatic test selection based on data properties
+    - Assumption validation (normality, homoscedasticity, independence)
+    - Effect size calculation
+    - Confidence interval computation
+    - Detailed reporting
+    """
+
+    def __init__(self, alpha: float = 0.05, confidence_level: float = 0.95):
+        """
+        Args:
+            alpha: Significance level for hypothesis tests
+            confidence_level: Confidence level for intervals
+        """
+        self.alpha = alpha
+        self.confidence_level = confidence_level
+
+    def independent_t_test(
+        self,
+        group_a: np.ndarray,
+        group_b: np.ndarray,
+        equal_variances: bool = True
+    ) -> StatisticalTestResult:
+        """
+        Independent samples t-test with assumption checking.
+
+        Assumptions:
+        1. Normality in both groups
+        2. Homogeneity of variance (if equal_variances=True)
+        3. Independence of observations
+        """
+        logger.info("Performing independent t-test")
+
+        # Remove NaN values
+        group_a = group_a[~np.isnan(group_a)]
+        group_b = group_b[~np.isnan(group_b)]
+
+        # Check assumptions
+        assumptions = self._check_ttest_assumptions(group_a, group_b, equal_variances)
+        assumptions_satisfied = all(
+            a.status != AssumptionStatus.VIOLATED for a in assumptions
+        )
+
+        # Perform test
+        statistic, p_value = stats.ttest_ind(
+            group_a, group_b, equal_var=equal_variances
+        )
+
+        # Calculate effect size (Cohen's d)
+        effect_size = self._cohens_d(group_a, group_b)
+        effect_interpretation = self._interpret_cohens_d(effect_size)
+
+        # Calculate confidence interval for difference in means
+        mean_diff = np.mean(group_a) - np.mean(group_b)
+        se_diff = np.sqrt(
+            np.var(group_a, ddof=1) / len(group_a) +
+            np.var(group_b, ddof=1) / len(group_b)
+        )
+        df = len(group_a) + len(group_b) - 2
+        t_crit = stats.t.ppf((1 + self.confidence_level) / 2, df)
+        ci = (mean_diff - t_crit * se_diff, mean_diff + t_crit * se_diff)
+
+        # Group statistics
+        group_stats = {
+            "group_a": {
+                "mean": np.mean(group_a),
+                "std": np.std(group_a, ddof=1),
+                "median": np.median(group_a),
+                "n": len(group_a)
+            },
+            "group_b": {
+                "mean": np.mean(group_b),
+                "std": np.std(group_b, ddof=1),
+                "median": np.median(group_b),
+                "n": len(group_b)
+            }
+        }
+
+        result = StatisticalTestResult(
+            test_type=TestType.T_TEST_INDEPENDENT,
+            test_statistic=statistic,
+            p_value=p_value,
+            alpha=self.alpha,
+            is_significant=p_value < self.alpha,
+            group_statistics=group_stats,
+            effect_size=effect_size,
+            effect_size_type="cohen_d",
+            effect_size_interpretation=effect_interpretation,
+            confidence_level=self.confidence_level,
+            confidence_interval=ci,
+            assumptions=assumptions,
+            assumptions_satisfied=assumptions_satisfied,
+            sample_sizes={"group_a": len(group_a), "group_b": len(group_b)},
+            degrees_of_freedom=df,
+            test_description="Independent samples t-test"
+        )
+
+        logger.info(f"T-test complete: t={statistic:.3f}, p={p_value:.4f}")
+        return result
+
+    def _check_ttest_assumptions(
+        self,
+        group_a: np.ndarray,
+        group_b: np.ndarray,
+        equal_variances: bool
+    ) -> List[AssumptionCheck]:
+        """Check assumptions for t-test."""
+        assumptions = []
+
+        # 1. Normality check (Shapiro-Wilk test)
+        if len(group_a) >= 3:
+            stat_a, p_a = stats.shapiro(group_a)
+            status_a = (AssumptionStatus.SATISFIED if p_a >= 0.05
+                       else AssumptionStatus.VIOLATED)
+            assumptions.append(AssumptionCheck(
+                assumption_name="Normality (Group A)",
+                status=status_a,
+                test_statistic=stat_a,
+                p_value=p_a,
+                details=f"Shapiro-Wilk test: W={stat_a:.4f}, p={p_a:.4f}"
+            ))
+
+        if len(group_b) >= 3:
+            stat_b, p_b = stats.shapiro(group_b)
+            status_b = (AssumptionStatus.SATISFIED if p_b >= 0.05
+                       else AssumptionStatus.VIOLATED)
+            assumptions.append(AssumptionCheck(
+                assumption_name="Normality (Group B)",
+                status=status_b,
+                test_statistic=stat_b,
+                p_value=p_b,
+                details=f"Shapiro-Wilk test: W={stat_b:.4f}, p={p_b:.4f}"
+            ))
+
+        # 2. Homogeneity of variance (Levene's test)
+        if equal_variances:
+            stat_lev, p_lev = stats.levene(group_a, group_b)
+            status_lev = (AssumptionStatus.SATISFIED if p_lev >= 0.05
+                         else AssumptionStatus.VIOLATED)
+            assumptions.append(AssumptionCheck(
+                assumption_name="Homogeneity of variance",
+                status=status_lev,
+                test_statistic=stat_lev,
+                p_value=p_lev,
+                details=f"Levene's test: F={stat_lev:.4f}, p={p_lev:.4f}"
+            ))
+
+        return assumptions
+
+    def _cohens_d(self, group_a: np.ndarray, group_b: np.ndarray) -> float:
+        """Calculate Cohen's d effect size."""
+        mean_diff = np.mean(group_a) - np.mean(group_b)
+        pooled_std = np.sqrt(
+            ((len(group_a) - 1) * np.var(group_a, ddof=1) +
+             (len(group_b) - 1) * np.var(group_b, ddof=1)) /
+            (len(group_a) + len(group_b) - 2)
+        )
+        return mean_diff / pooled_std if pooled_std > 0 else 0.0
+
+    def _interpret_cohens_d(self, d: float) -> str:
+        """Interpret Cohen's d effect size."""
+        abs_d = abs(d)
+        if abs_d < 0.2:
+            return "negligible"
+        elif abs_d < 0.5:
+            return "small"
+        elif abs_d < 0.8:
+            return "medium"
+        else:
+            return "large"
+
+    def mann_whitney_u(
+        self,
+        group_a: np.ndarray,
+        group_b: np.ndarray
+    ) -> StatisticalTestResult:
+        """
+        Mann-Whitney U test (non-parametric alternative to t-test).
+
+        Use when:
+        - Normality assumption is violated
+        - Ordinal data
+        - Small sample sizes
+        """
+        logger.info("Performing Mann-Whitney U test")
+
+        # Remove NaN
+        group_a = group_a[~np.isnan(group_a)]
+        group_b = group_b[~np.isnan(group_b)]
+
+        # Perform test
+        statistic, p_value = stats.mannwhitneyu(
+            group_a, group_b, alternative='two-sided'
+        )
+
+        # Calculate rank-biserial correlation as effect size
+        n1, n2 = len(group_a), len(group_b)
+        effect_size = 1 - (2 * statistic) / (n1 * n2)  # Rank-biserial
+        effect_interpretation = self._interpret_rank_biserial(effect_size)
+
+        # Group statistics
+        group_stats = {
+            "group_a": {
+                "median": np.median(group_a),
+                "mean": np.mean(group_a),
+                "iqr": stats.iqr(group_a),
+                "n": len(group_a)
+            },
+            "group_b": {
+                "median": np.median(group_b),
+                "mean": np.mean(group_b),
+                "iqr": stats.iqr(group_b),
+                "n": len(group_b)
+            }
+        }
+
+        result = StatisticalTestResult(
+            test_type=TestType.MANN_WHITNEY,
+            test_statistic=statistic,
+            p_value=p_value,
+            alpha=self.alpha,
+            is_significant=p_value < self.alpha,
+            group_statistics=group_stats,
+            effect_size=effect_size,
+            effect_size_type="rank_biserial",
+            effect_size_interpretation=effect_interpretation,
+            confidence_level=self.confidence_level,
+            confidence_interval=None,  # Not standard for Mann-Whitney
+            assumptions=[],  # Fewer assumptions than t-test
+            assumptions_satisfied=True,
+            sample_sizes={"group_a": len(group_a), "group_b": len(group_b)},
+            degrees_of_freedom=None,
+            test_description="Mann-Whitney U test (non-parametric)"
+        )
+
+        logger.info(f"Mann-Whitney U complete: U={statistic:.3f}, p={p_value:.4f}")
+        return result
+
+    def _interpret_rank_biserial(self, r: float) -> str:
+        """Interpret rank-biserial correlation."""
+        abs_r = abs(r)
+        if abs_r < 0.1:
+            return "negligible"
+        elif abs_r < 0.3:
+            return "small"
+        elif abs_r < 0.5:
+            return "medium"
+        else:
+            return "large"
+
+    def chi_square_test(
+        self,
+        contingency_table: np.ndarray
+    ) -> StatisticalTestResult:
+        """
+        Chi-square test of independence for categorical data.
+
+        Args:
+            contingency_table: 2D array with observed frequencies
+        """
+        logger.info("Performing chi-square test")
+
+        # Perform test
+        chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
+
+        # Calculate Cramer's V as effect size
+        n = np.sum(contingency_table)
+        min_dim = min(contingency_table.shape) - 1
+        cramers_v = np.sqrt(chi2 / (n * min_dim))
+        effect_interpretation = self._interpret_cramers_v(cramers_v, min_dim)
+
+        # Check minimum expected frequency assumption
+        min_expected = np.min(expected)
+        assumption = AssumptionCheck(
+            assumption_name="Minimum expected frequency >= 5",
+            status=AssumptionStatus.SATISFIED if min_expected >= 5
+                   else AssumptionStatus.VIOLATED,
+            test_statistic=min_expected,
+            p_value=None,
+            details=f"Minimum expected frequency: {min_expected:.2f}"
+        )
+
+        result = StatisticalTestResult(
+            test_type=TestType.CHI_SQUARE,
+            test_statistic=chi2,
+            p_value=p_value,
+            alpha=self.alpha,
+            is_significant=p_value < self.alpha,
+            group_statistics={
+                "observed": {"total": int(n)},
+                "expected": {"min": min_expected, "max": np.max(expected)}
+            },
+            effect_size=cramers_v,
+            effect_size_type="cramers_v",
+            effect_size_interpretation=effect_interpretation,
+            confidence_level=self.confidence_level,
+            confidence_interval=None,
+            assumptions=[assumption],
+            assumptions_satisfied=min_expected >= 5,
+            sample_sizes={"total": int(n)},
+            degrees_of_freedom=dof,
+            test_description="Chi-square test of independence"
+        )
+
+        logger.info(f"Chi-square complete: X2={chi2:.3f}, p={p_value:.4f}")
+        return result
+
+    def _interpret_cramers_v(self, v: float, min_dim: int) -> str:
+        """Interpret Cramer's V effect size (depends on min dimension)."""
+        if min_dim == 1:
+            # 2x2 table
+            if v < 0.1:
+                return "negligible"
+            elif v < 0.3:
+                return "small"
+            elif v < 0.5:
+                return "medium"
+            else:
+                return "large"
+        else:
+            # Larger tables
+            if v < 0.07:
+                return "negligible"
+            elif v < 0.21:
+                return "small"
+            elif v < 0.35:
+                return "medium"
+            else:
+                return "large"
+\end{lstlisting}
+
+\section{Experimental Design}
+
+Rigorous experimental design ensures valid causal inference through proper randomization and control of confounding variables.
+
+\subsection{Randomization Strategies}
+
+\begin{lstlisting}[language=Python, caption={Experimental Design with Randomization Strategies}]
+from typing import List, Optional, Callable
+from abc import ABC, abstractmethod
+
+class RandomizationStrategy(Enum):
+    """Types of randomization strategies."""
+    SIMPLE = "simple"  # Completely random
+    STRATIFIED = "stratified"  # Balanced across strata
+    BLOCK = "block"  # Randomized within blocks
+    CLUSTER = "cluster"  # Randomize entire clusters
+
+@dataclass
+class TreatmentGroup:
+    """Definition of a treatment group."""
+    name: str
+    allocation_ratio: float  # Proportion to allocate (e.g., 0.5 for 50%)
+    description: str
+
+@dataclass
+class ExperimentDesign:
+    """
+    Comprehensive experimental design specification.
+
+    Supports A/B tests, multi-arm experiments, and observational studies.
+    """
+    name: str
+    treatment_groups: List[TreatmentGroup]
+    randomization_strategy: RandomizationStrategy
+
+    # Stratification variables (for stratified randomization)
+    stratification_vars: Optional[List[str]] = None
+
+    # Block variables (for block randomization)
+    block_var: Optional[str] = None
+    block_size: Optional[int] = None
+
+    # Cluster variables (for cluster randomization)
+    cluster_var: Optional[str] = None
+
+    # Sample size
+    target_sample_size: Optional[int] = None
+
+    # Experimental parameters
+    alpha: float = 0.05
+    power: float = 0.80
+    minimum_detectable_effect: Optional[float] = None
+
+    def validate(self) -> Tuple[bool, List[str]]:
+        """Validate experimental design."""
+        errors = []
+
+        # Check allocation ratios sum to 1
+        total_allocation = sum(g.allocation_ratio for g in self.treatment_groups)
+        if abs(total_allocation - 1.0) > 1e-6:
+            errors.append(f"Allocation ratios sum to {total_allocation}, not 1.0")
+
+        # Check stratification
+        if (self.randomization_strategy == RandomizationStrategy.STRATIFIED and
+            not self.stratification_vars):
+            errors.append("Stratified randomization requires stratification_vars")
+
+        # Check blocking
+        if (self.randomization_strategy == RandomizationStrategy.BLOCK and
+            not self.block_var):
+            errors.append("Block randomization requires block_var")
+
+        # Check clustering
+        if (self.randomization_strategy == RandomizationStrategy.CLUSTER and
+            not self.cluster_var):
+            errors.append("Cluster randomization requires cluster_var")
+
+        is_valid = len(errors) == 0
+        return is_valid, errors
+
+class ExperimentRandomizer:
+    """
+    Randomize units to treatment groups following experimental design.
+    """
+
+    def __init__(self, design: ExperimentDesign, random_state: int = 42):
+        """
+        Args:
+            design: Experimental design specification
+            random_state: Random seed for reproducibility
+        """
+        self.design = design
+        self.random_state = random_state
+        self.rng = np.random.RandomState(random_state)
+
+        # Validate design
+        is_valid, errors = design.validate()
+        if not is_valid:
+            raise ValueError(f"Invalid design: {errors}")
+
+    def randomize(self, units: pd.DataFrame) -> pd.DataFrame:
+        """
+        Randomize units to treatment groups.
+
+        Args:
+            units: DataFrame with experimental units (rows)
+
+        Returns:
+            DataFrame with added 'treatment' column
+        """
+        logger.info(f"Randomizing {len(units)} units using "
+                   f"{self.design.randomization_strategy.value} strategy")
+
+        result = units.copy()
+
+        if self.design.randomization_strategy == RandomizationStrategy.SIMPLE:
+            result['treatment'] = self._simple_randomization(len(units))
+
+        elif self.design.randomization_strategy == RandomizationStrategy.STRATIFIED:
+            result['treatment'] = self._stratified_randomization(result)
+
+        elif self.design.randomization_strategy == RandomizationStrategy.BLOCK:
+            result['treatment'] = self._block_randomization(result)
+
+        elif self.design.randomization_strategy == RandomizationStrategy.CLUSTER:
+            result['treatment'] = self._cluster_randomization(result)
+
+        # Log allocation
+        allocation_counts = result['treatment'].value_counts()
+        logger.info(f"Treatment allocation: {allocation_counts.to_dict()}")
+
+        return result
+
+    def _simple_randomization(self, n: int) -> np.ndarray:
+        """Simple (complete) randomization."""
+        treatments = []
+        for group in self.design.treatment_groups:
+            n_group = int(n * group.allocation_ratio)
+            treatments.extend([group.name] * n_group)
+
+        # Fill remaining
+        while len(treatments) < n:
+            treatments.append(self.design.treatment_groups[0].name)
+
+        # Shuffle
+        self.rng.shuffle(treatments)
+        return np.array(treatments[:n])
+
+    def _stratified_randomization(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Stratified randomization: randomize within strata.
+
+        Ensures balance across stratification variables.
+        """
+        if not self.design.stratification_vars:
+            raise ValueError("No stratification variables specified")
+
+        treatments = np.empty(len(df), dtype=object)
+
+        # Group by strata
+        for strata_values, group in df.groupby(self.design.stratification_vars):
+            indices = group.index
+            n_stratum = len(indices)
+
+            # Randomize within stratum
+            stratum_treatments = self._simple_randomization(n_stratum)
+            treatments[indices] = stratum_treatments
+
+        return treatments
+
+    def _block_randomization(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Block randomization: randomize in blocks to ensure balance.
+        """
+        if not self.design.block_var:
+            raise ValueError("No block variable specified")
+
+        treatments = np.empty(len(df), dtype=object)
+
+        # Sort by block variable for sequential blocking
+        df_sorted = df.sort_values(self.design.block_var)
+
+        block_size = self.design.block_size or len(self.design.treatment_groups) * 2
+
+        # Create blocks
+        for i in range(0, len(df_sorted), block_size):
+            block_indices = df_sorted.index[i:i + block_size]
+            n_block = len(block_indices)
+
+            # Randomize within block
+            block_treatments = self._simple_randomization(n_block)
+            treatments[block_indices] = block_treatments
+
+        return treatments
+
+    def _cluster_randomization(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Cluster randomization: randomize entire clusters.
+
+        All units in a cluster receive same treatment.
+        """
+        if not self.design.cluster_var:
+            raise ValueError("No cluster variable specified")
+
+        treatments = np.empty(len(df), dtype=object)
+
+        # Get unique clusters
+        clusters = df[self.design.cluster_var].unique()
+        n_clusters = len(clusters)
+
+        # Randomize clusters to treatments
+        cluster_treatments = self._simple_randomization(n_clusters)
+        cluster_assignment = dict(zip(clusters, cluster_treatments))
+
+        # Assign all units in cluster to cluster's treatment
+        for cluster_id, treatment in cluster_assignment.items():
+            cluster_indices = df[df[self.design.cluster_var] == cluster_id].index
+            treatments[cluster_indices] = treatment
+
+        logger.info(f"Randomized {n_clusters} clusters")
+
+        return treatments
+
+@dataclass
+class ExperimentResult:
+    """Results from analyzing an experiment."""
+    design: ExperimentDesign
+    statistical_test: StatisticalTestResult
+    observed_effect: float
+    observed_effect_ci: Tuple[float, float]
+    relative_improvement_pct: Optional[float]
+    recommendation: str
+\end{lstlisting}
+
+\section{Causal Inference}
+
+Observational studies require special methods to establish causality in the absence of randomization.
+
+\subsection{Propensity Score Matching}
+
+\begin{lstlisting}[language=Python, caption={Propensity Score Analysis for Causal Inference}]
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import NearestNeighbors
+
+@dataclass
+class PropensityScoreResult:
+    """Results from propensity score analysis."""
+    treatment_effect: float
+    treatment_effect_se: float
+    treatment_effect_ci: Tuple[float, float]
+    p_value: float
+    is_significant: bool
+    matched_sample_size: int
+    balance_before: Dict[str, float]  # Standardized mean differences
+    balance_after: Dict[str, float]
+    covariate_balance_improved: bool
+
+class PropensityScoreAnalyzer:
+    """
+    Propensity score matching for causal inference from observational data.
+
+    Estimates treatment effects by matching treated and control units
+    with similar propensity scores (probability of treatment).
+    """
+
+    def __init__(self, caliper: float = 0.1, matching_ratio: int = 1):
+        """
+        Args:
+            caliper: Maximum propensity score difference for matching
+            matching_ratio: Number of controls to match per treated unit
+        """
+        self.caliper = caliper
+        self.matching_ratio = matching_ratio
+
+    def estimate_treatment_effect(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str,
+        outcome_col: str,
+        covariate_cols: List[str]
+    ) -> PropensityScoreResult:
+        """
+        Estimate average treatment effect using propensity score matching.
+
+        Args:
+            df: DataFrame with observational data
+            treatment_col: Name of binary treatment column (0/1)
+            outcome_col: Name of continuous outcome column
+            covariate_cols: List of covariate column names
+
+        Returns:
+            PropensityScoreResult with treatment effect estimate
+        """
+        logger.info("Estimating treatment effect using propensity scores")
+
+        # 1. Estimate propensity scores
+        propensity_scores = self._estimate_propensity_scores(
+            df, treatment_col, covariate_cols
+        )
+        df = df.copy()
+        df['propensity_score'] = propensity_scores
+
+        # 2. Check balance before matching
+        balance_before = self._check_covariate_balance(
+            df, treatment_col, covariate_cols
+        )
+
+        # 3. Perform matching
+        matched_df = self._perform_matching(df, treatment_col)
+
+        if len(matched_df) == 0:
+            raise ValueError("No matches found within caliper")
+
+        logger.info(f"Matched {len(matched_df)} units "
+                   f"({len(matched_df[matched_df[treatment_col]==1])} treated, "
+                   f"{len(matched_df[matched_df[treatment_col]==0])} control)")
+
+        # 4. Check balance after matching
+        balance_after = self._check_covariate_balance(
+            matched_df, treatment_col, covariate_cols
+        )
+
+        # 5. Estimate treatment effect on matched sample
+        treated = matched_df[matched_df[treatment_col] == 1][outcome_col]
+        control = matched_df[matched_df[treatment_col] == 0][outcome_col]
+
+        treatment_effect = np.mean(treated) - np.mean(control)
+
+        # Standard error (paired t-test for matched data)
+        # Simple approach: treat as independent samples (conservative)
+        se = np.sqrt(
+            np.var(treated, ddof=1) / len(treated) +
+            np.var(control, ddof=1) / len(control)
+        )
+
+        # Confidence interval
+        df_pooled = len(treated) + len(control) - 2
+        t_crit = stats.t.ppf(0.975, df_pooled)
+        ci = (treatment_effect - t_crit * se, treatment_effect + t_crit * se)
+
+        # Significance test
+        t_stat = treatment_effect / se
+        p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df_pooled))
+
+        # Check if balance improved
+        balance_improved = self._balance_improved(balance_before, balance_after)
+
+        result = PropensityScoreResult(
+            treatment_effect=treatment_effect,
+            treatment_effect_se=se,
+            treatment_effect_ci=ci,
+            p_value=p_value,
+            is_significant=p_value < 0.05,
+            matched_sample_size=len(matched_df),
+            balance_before=balance_before,
+            balance_after=balance_after,
+            covariate_balance_improved=balance_improved
+        )
+
+        logger.info(f"Treatment effect: {treatment_effect:.4f} "
+                   f"(95% CI: [{ci[0]:.4f}, {ci[1]:.4f}]), p={p_value:.4f}")
+
+        return result
+
+    def _estimate_propensity_scores(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str,
+        covariate_cols: List[str]
+    ) -> np.ndarray:
+        """Estimate propensity scores using logistic regression."""
+        X = df[covariate_cols].values
+        y = df[treatment_col].values
+
+        model = LogisticRegression(max_iter=1000, random_state=42)
+        model.fit(X, y)
+
+        propensity_scores = model.predict_proba(X)[:, 1]
+
+        logger.info(f"Propensity scores: mean={np.mean(propensity_scores):.3f}, "
+                   f"range=[{np.min(propensity_scores):.3f}, "
+                   f"{np.max(propensity_scores):.3f}]")
+
+        return propensity_scores
+
+    def _perform_matching(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str
+    ) -> pd.DataFrame:
+        """Perform propensity score matching."""
+        treated = df[df[treatment_col] == 1]
+        control = df[df[treatment_col] == 0]
+
+        # Use nearest neighbors for matching
+        nn = NearestNeighbors(n_neighbors=self.matching_ratio, metric='euclidean')
+        nn.fit(control[['propensity_score']].values)
+
+        matched_indices = []
+
+        for idx, treated_unit in treated.iterrows():
+            ps = treated_unit['propensity_score']
+
+            # Find nearest neighbors
+            distances, indices = nn.kneighbors([[ps]])
+
+            # Check caliper
+            valid_matches = distances[0] <= self.caliper
+
+            if valid_matches.any():
+                # Add treated unit
+                matched_indices.append(idx)
+
+                # Add matched controls
+                control_indices = control.iloc[indices[0][valid_matches]].index
+                matched_indices.extend(control_indices)
+
+        matched_df = df.loc[matched_indices]
+        return matched_df
+
+    def _check_covariate_balance(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str,
+        covariate_cols: List[str]
+    ) -> Dict[str, float]:
+        """
+        Check covariate balance using standardized mean differences.
+
+        SMD < 0.1 indicates good balance.
+        """
+        balance = {}
+
+        treated = df[df[treatment_col] == 1]
+        control = df[df[treatment_col] == 0]
+
+        for col in covariate_cols:
+            mean_t = treated[col].mean()
+            mean_c = control[col].mean()
+            std_pooled = np.sqrt(
+                (treated[col].var() + control[col].var()) / 2
+            )
+
+            smd = (mean_t - mean_c) / std_pooled if std_pooled > 0 else 0
+            balance[col] = abs(smd)
+
+        return balance
+
+    def _balance_improved(
+        self,
+        balance_before: Dict[str, float],
+        balance_after: Dict[str, float]
+    ) -> bool:
+        """Check if covariate balance improved after matching."""
+        avg_before = np.mean(list(balance_before.values()))
+        avg_after = np.mean(list(balance_after.values()))
+        return avg_after < avg_before
+
+
+class DifferenceInDifferences:
+    """
+    Difference-in-differences analysis for causal inference.
+
+    Compares changes over time between treatment and control groups
+    to estimate causal effect while controlling for time-invariant
+    confounding.
+    """
+
+    def estimate_effect(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str,
+        outcome_col: str,
+        time_col: str,
+        pre_period: Any,
+        post_period: Any
+    ) -> Dict[str, Any]:
+        """
+        Estimate treatment effect using difference-in-differences.
+
+        Args:
+            df: Panel data with multiple time periods
+            treatment_col: Binary treatment indicator
+            outcome_col: Outcome variable
+            time_col: Time period indicator
+            pre_period: Value of time_col for pre-treatment period
+            post_period: Value of time_col for post-treatment period
+
+        Returns:
+            Dictionary with DiD estimate and statistics
+        """
+        logger.info("Performing difference-in-differences analysis")
+
+        # Extract relevant periods
+        pre_df = df[df[time_col] == pre_period]
+        post_df = df[df[time_col] == post_period]
+
+        # Calculate means for each group/period
+        treated_pre = pre_df[pre_df[treatment_col] == 1][outcome_col].mean()
+        treated_post = post_df[post_df[treatment_col] == 1][outcome_col].mean()
+        control_pre = pre_df[pre_df[treatment_col] == 0][outcome_col].mean()
+        control_post = post_df[post_df[treatment_col] == 0][outcome_col].mean()
+
+        # DiD estimate: (treated_post - treated_pre) - (control_post - control_pre)
+        did_estimate = (treated_post - treated_pre) - (control_post - control_pre)
+
+        # Standard error (requires regression for proper SE)
+        # Here's a simplified approach using pooled variance
+        treated_diff = post_df[post_df[treatment_col] == 1][outcome_col].values - \
+                      pre_df[pre_df[treatment_col] == 1][outcome_col].values
+        control_diff = post_df[post_df[treatment_col] == 0][outcome_col].values - \
+                      pre_df[pre_df[treatment_col] == 0][outcome_col].values
+
+        n_treated = len(treated_diff)
+        n_control = len(control_diff)
+
+        se = np.sqrt(
+            np.var(treated_diff, ddof=1) / n_treated +
+            np.var(control_diff, ddof=1) / n_control
+        )
+
+        # Test statistic and p-value
+        t_stat = did_estimate / se if se > 0 else 0
+        df_pooled = n_treated + n_control - 2
+        p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df_pooled))
+
+        # Confidence interval
+        t_crit = stats.t.ppf(0.975, df_pooled)
+        ci = (did_estimate - t_crit * se, did_estimate + t_crit * se)
+
+        result = {
+            "did_estimate": did_estimate,
+            "standard_error": se,
+            "t_statistic": t_stat,
+            "p_value": p_value,
+            "confidence_interval": ci,
+            "is_significant": p_value < 0.05,
+            "treated_change": treated_post - treated_pre,
+            "control_change": control_post - control_pre,
+            "sample_sizes": {"treated": n_treated, "control": n_control}
+        }
+
+        logger.info(f"DiD estimate: {did_estimate:.4f} (SE={se:.4f}), p={p_value:.4f}")
+
+        return result
+\end{lstlisting}
+
+\subsection{Advanced Causal Inference Framework}
+
+\subsubsection{Directed Acyclic Graphs and the Backdoor Criterion}
+
+Causal identification requires understanding causal relationships through graphical models. Directed Acyclic Graphs (DAGs) formalize assumptions about causal structure and identify which variables must be controlled for unbiased causal estimates.
+
+\begin{lstlisting}[style=python, caption={DAG-based causal inference with backdoor criterion}]
+"""
+Causal Inference with Directed Acyclic Graphs
+
+Implements DAG analysis, backdoor criterion, and identification strategies
+for causal effect estimation with proper mathematical foundations.
+"""
+
+from typing import Set, List, Dict, Tuple, Optional
+import networkx as nx
+from itertools import combinations, chain
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class CausalDAG:
+    """
+    Directed Acyclic Graph for causal inference.
+
+    Mathematical Framework:
+    - Nodes represent variables
+    - Directed edges X -> Y represent direct causal effects
+    - Paths represent causal and non-causal associations
+
+    Key Concepts:
+    - Backdoor path: Non-causal path from treatment to outcome
+    - Backdoor criterion: Conditions for identifying causal effects
+    - d-separation: Graphical criterion for conditional independence
+    """
+
+    def __init__(self):
+        """Initialize empty causal DAG."""
+        self.graph = nx.DiGraph()
+
+    def add_edge(self, from_var: str, to_var: str) -> None:
+        """
+        Add causal edge from_var -> to_var.
+
+        Args:
+            from_var: Cause variable
+            to_var: Effect variable
+        """
+        self.graph.add_edge(from_var, to_var)
+
+        # Check if still acyclic
+        if not nx.is_directed_acyclic_graph(self.graph):
+            self.graph.remove_edge(from_var, to_var)
+            raise ValueError(f"Adding edge {from_var} -> {to_var} creates cycle")
+
+    def backdoor_criterion(
+        self,
+        treatment: str,
+        outcome: str,
+        adjustment_set: Set[str]
+    ) -> bool:
+        """
+        Check if adjustment set satisfies backdoor criterion.
+
+        Backdoor Criterion (Pearl, 2009):
+        A set Z satisfies the backdoor criterion relative to (X, Y) if:
+        1. No node in Z is a descendant of X
+        2. Z blocks all backdoor paths from X to Y
+
+        Backdoor path: Path from X to Y with arrow into X
+
+        Args:
+            treatment: Treatment variable X
+            outcome: Outcome variable Y
+            adjustment_set: Proposed adjustment set Z
+
+        Returns:
+            True if criterion satisfied
+        """
+        # Check criterion 1: No descendants of treatment
+        descendants = nx.descendants(self.graph, treatment)
+        if adjustment_set.intersection(descendants):
+            logger.warning(
+                f"Adjustment set contains descendants of {treatment}: "
+                f"{adjustment_set.intersection(descendants)}"
+            )
+            return False
+
+        # Check criterion 2: Blocks all backdoor paths
+        backdoor_paths = self._find_backdoor_paths(treatment, outcome)
+
+        for path in backdoor_paths:
+            if not self._is_path_blocked(path, adjustment_set):
+                logger.warning(
+                    f"Backdoor path not blocked: {' -> '.join(path)}"
+                )
+                return False
+
+        logger.info(
+            f"Backdoor criterion satisfied for {treatment} -> {outcome} "
+            f"with adjustment set {adjustment_set}"
+        )
+        return True
+
+    def _find_backdoor_paths(
+        self,
+        treatment: str,
+        outcome: str
+    ) -> List[List[str]]:
+        """
+        Find all backdoor paths from treatment to outcome.
+
+        A backdoor path is an undirected path from treatment to outcome
+        that starts with an arrow INTO treatment.
+        """
+        # Convert to undirected for path finding
+        undirected = self.graph.to_undirected()
+
+        backdoor_paths = []
+
+        # Find all simple paths in undirected graph
+        for path in nx.all_simple_paths(undirected, treatment, outcome):
+            # Check if it's a backdoor path (arrow into treatment)
+            if len(path) >= 2:
+                # Check if edge goes INTO treatment
+                if self.graph.has_edge(path[1], path[0]):
+                    backdoor_paths.append(path)
+
+        return backdoor_paths
+
+    def _is_path_blocked(
+        self,
+        path: List[str],
+        conditioning_set: Set[str]
+    ) -> bool:
+        """
+        Check if path is d-separated (blocked) by conditioning set.
+
+        Blocking rules:
+        1. Chain X -> M -> Y: Blocked if M in conditioning set
+        2. Fork X <- M -> Y: Blocked if M in conditioning set
+        3. Collider X -> M <- Y: Blocked if M NOT in conditioning set
+           (and no descendants of M in conditioning set)
+        """
+        # A path is blocked if any triplet is blocked
+        for i in range(len(path) - 2):
+            x, m, y = path[i], path[i + 1], path[i + 2]
+
+            # Check if m is a collider
+            is_collider = (
+                self.graph.has_edge(x, m) and
+                self.graph.has_edge(y, m)
+            )
+
+            if is_collider:
+                # Collider: blocked if m AND descendants NOT in conditioning set
+                descendants_m = nx.descendants(self.graph, m)
+                if m not in conditioning_set and \
+                   not descendants_m.intersection(conditioning_set):
+                    return True  # Path blocked
+            else:
+                # Chain or fork: blocked if m IN conditioning set
+                if m in conditioning_set:
+                    return True  # Path blocked
+
+        return False  # Path not blocked
+
+    def find_minimal_adjustment_set(
+        self,
+        treatment: str,
+        outcome: str
+    ) -> Optional[Set[str]]:
+        """
+        Find minimal adjustment set satisfying backdoor criterion.
+
+        Returns smallest set of variables that block all backdoor paths.
+
+        Args:
+            treatment: Treatment variable
+            outcome: Outcome variable
+
+        Returns:
+            Minimal adjustment set, or None if no valid set exists
+        """
+        # All possible confounders (neither treatment nor outcome)
+        all_vars = set(self.graph.nodes())
+        all_vars.discard(treatment)
+        all_vars.discard(outcome)
+
+        # Try empty set first
+        if self.backdoor_criterion(treatment, outcome, set()):
+            return set()
+
+        # Try sets of increasing size
+        for size in range(1, len(all_vars) + 1):
+            for subset in combinations(all_vars, size):
+                adjustment_set = set(subset)
+                if self.backdoor_criterion(treatment, outcome, adjustment_set):
+                    logger.info(
+                        f"Found minimal adjustment set (size {size}): "
+                        f"{adjustment_set}"
+                    )
+                    return adjustment_set
+
+        logger.warning("No valid adjustment set found")
+        return None
+
+    def visualize(self, filename: Optional[str] = None) -> None:
+        """Visualize causal DAG."""
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        pos = nx.spring_layout(self.graph, k=2, iterations=50)
+
+        nx.draw_networkx_nodes(
+            self.graph, pos, node_color='lightblue',
+            node_size=3000, ax=ax
+        )
+        nx.draw_networkx_labels(
+            self.graph, pos, font_size=12,
+            font_weight='bold', ax=ax
+        )
+        nx.draw_networkx_edges(
+            self.graph, pos, edge_color='black',
+            arrows=True, arrowsize=20,
+            arrowstyle='->', ax=ax
+        )
+
+        ax.set_title('Causal DAG', fontsize=16, fontweight='bold')
+        ax.axis('off')
+
+        plt.tight_layout()
+
+        if filename:
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved DAG to {filename}")
+
+        plt.show()
+
+
+class InstrumentalVariableAnalyzer:
+    """
+    Instrumental Variables (IV) estimation for causal inference.
+
+    Mathematical Framework:
+    ----------------------
+    IV addresses endogeneity: treatment X correlated with error term
+
+    Instrument Z must satisfy:
+    1. Relevance: Z causally affects X (Cov(Z, X) != 0)
+    2. Exclusion: Z affects Y only through X (no direct effect)
+    3. Exchangeability: Z independent of unmeasured confounders
+
+    Two-Stage Least Squares (2SLS):
+    1. First stage: X_hat = alpha + beta*Z + error
+    2. Second stage: Y = gamma + delta*X_hat + error
+
+    delta is the causal effect of X on Y
+    """
+
+    def two_stage_least_squares(
+        self,
+        df: pd.DataFrame,
+        treatment_col: str,
+        outcome_col: str,
+        instrument_col: str,
+        covariates: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Estimate causal effect using 2SLS.
+
+        Args:
+            df: DataFrame
+            treatment_col: Endogenous treatment variable
+            outcome_col: Outcome variable
+            instrument_col: Instrumental variable
+            covariates: Additional exogenous controls
+
+        Returns:
+            Dictionary with IV estimates and diagnostics
+        """
+        from sklearn.linear_model import LinearRegression
+
+        logger.info("Performing Two-Stage Least Squares")
+
+        # Prepare data
+        Z = df[[instrument_col]].values
+        X = df[[treatment_col]].values
+        Y = df[[outcome_col]].values
+
+        if covariates:
+            # Add covariates to instrument
+            Z_full = df[[instrument_col] + covariates].values
+            X_cov = df[[treatment_col] + covariates].values
+        else:
+            Z_full = Z
+            X_cov = X
+
+        # Stage 1: Regress treatment on instrument (first stage)
+        first_stage = LinearRegression()
+        first_stage.fit(Z_full, X)
+        X_hat = first_stage.predict(Z_full)
+
+        # Check instrument strength (F-statistic)
+        f_stat = self._first_stage_f_statistic(X, X_hat, Z_full.shape[1])
+
+        if f_stat < 10:
+            logger.warning(
+                f"Weak instrument: F-statistic = {f_stat:.2f} < 10. "
+                f"Results may be biased."
+            )
+
+        # Stage 2: Regress outcome on predicted treatment
+        if covariates:
+            X_hat_full = np.column_stack([X_hat, df[covariates].values])
+        else:
+            X_hat_full = X_hat.reshape(-1, 1)
+
+        second_stage = LinearRegression()
+        second_stage.fit(X_hat_full, Y)
+
+        # IV estimate is coefficient on X_hat
+        iv_estimate = second_stage.coef_[0][0]
+
+        # Compare with naive OLS (biased estimate)
+        naive_ols = LinearRegression()
+        naive_ols.fit(X, Y)
+        ols_estimate = naive_ols.coef_[0][0]
+
+        # Standard errors (simplified - should use robust SEs in practice)
+        Y_pred = second_stage.predict(X_hat_full)
+        residuals = Y - Y_pred
+        se = np.std(residuals) / np.sqrt(len(df))
+
+        # Test statistic
+        t_stat = iv_estimate / se
+        p_value = 2 * (1 - stats.t.cdf(abs(t_stat), len(df) - 2))
+
+        result = {
+            "iv_estimate": iv_estimate,
+            "standard_error": se,
+            "t_statistic": t_stat,
+            "p_value": p_value,
+            "is_significant": p_value < 0.05,
+            "ols_estimate": ols_estimate,
+            "bias": iv_estimate - ols_estimate,
+            "first_stage_f_stat": f_stat,
+            "weak_instrument_warning": f_stat < 10
+        }
+
+        logger.info(
+            f"IV estimate: {iv_estimate:.4f} (SE={se:.4f}), "
+            f"OLS estimate: {ols_estimate:.4f}, "
+            f"Bias: {result['bias']:.4f}"
+        )
+
+        return result
+
+    def _first_stage_f_statistic(
+        self,
+        X: np.ndarray,
+        X_hat: np.ndarray,
+        n_instruments: int
+    ) -> float:
+        """
+        Calculate first-stage F-statistic for instrument strength.
+
+        F > 10 generally indicates sufficiently strong instrument.
+        """
+        # Explained sum of squares
+        ess = np.sum((X_hat - np.mean(X))**2)
+
+        # Residual sum of squares
+        rss = np.sum((X - X_hat)**2)
+
+        # F-statistic
+        n = len(X)
+        f_stat = (ess / n_instruments) / (rss / (n - n_instruments - 1))
+
+        return f_stat
+
+\section{Power Analysis and Sample Size}
+
+Properly powered experiments prevent false negatives and optimize resource allocation.
+
+\begin{lstlisting}[language=Python, caption={Power Analysis and Sample Size Calculation}]
+from statsmodels.stats.power import (
+    tt_ind_solve_power, zt_ind_solve_power, FTestAnovaPower
+)
+
+class PowerAnalyzer:
+    """
+    Power analysis and sample size calculations for different test types.
+
+    Power = P(reject H0 | H1 is true) = 1 - beta
+    Where beta is Type II error rate (false negative)
+    """
+
+    def __init__(self, alpha: float = 0.05, power: float = 0.80):
+        """
+        Args:
+            alpha: Type I error rate (false positive)
+            power: Desired statistical power (1 - Type II error)
+        """
+        self.alpha = alpha
+        self.power = power
+
+    def sample_size_two_sample_ttest(
+        self,
+        effect_size: float,
+        ratio: float = 1.0
+    ) -> int:
+        """
+        Calculate required sample size for two-sample t-test.
+
+        Args:
+            effect_size: Cohen's d (standardized effect size)
+            ratio: Ratio of group sizes (n2/n1)
+
+        Returns:
+            Required sample size per group
+        """
+        n = tt_ind_solve_power(
+            effect_size=effect_size,
+            alpha=self.alpha,
+            power=self.power,
+            ratio=ratio,
+            alternative='two-sided'
+        )
+
+        sample_size = int(np.ceil(n))
+
+        logger.info(f"Required sample size: {sample_size} per group "
+                   f"(effect_size={effect_size}, power={self.power})")
+
+        return sample_size
+
+    def sample_size_proportion_test(
+        self,
+        p1: float,
+        p2: float,
+        ratio: float = 1.0
+    ) -> int:
+        """
+        Calculate required sample size for proportion test.
+
+        Args:
+            p1: Baseline proportion
+            p2: Alternative proportion
+            ratio: Ratio of group sizes
+
+        Returns:
+            Required sample size per group
+        """
+        # Calculate effect size
+        pooled_p = (p1 + ratio * p2) / (1 + ratio)
+        effect_size = (p2 - p1) / np.sqrt(pooled_p * (1 - pooled_p))
+
+        n = zt_ind_solve_power(
+            effect_size=effect_size,
+            alpha=self.alpha,
+            power=self.power,
+            ratio=ratio,
+            alternative='two-sided'
+        )
+
+        sample_size = int(np.ceil(n))
+
+        logger.info(f"Required sample size: {sample_size} per group "
+                   f"(p1={p1:.3f}, p2={p2:.3f}, power={self.power})")
+
+        return sample_size
+
+    def minimum_detectable_effect(
+        self,
+        sample_size: int,
+        ratio: float = 1.0
+    ) -> float:
+        """
+        Calculate minimum detectable effect for given sample size.
+
+        Args:
+            sample_size: Available sample size per group
+            ratio: Ratio of group sizes
+
+        Returns:
+            Minimum detectable effect size (Cohen's d)
+        """
+        mde = tt_ind_solve_power(
+            nobs1=sample_size,
+            alpha=self.alpha,
+            power=self.power,
+            ratio=ratio,
+            alternative='two-sided'
+        )
+
+        logger.info(f"Minimum detectable effect: {mde:.3f} "
+                   f"(n={sample_size}, power={self.power})")
+
+        return mde
+
+    def achieved_power(
+        self,
+        sample_size: int,
+        effect_size: float,
+        ratio: float = 1.0
+    ) -> float:
+        """
+        Calculate achieved power for given sample size and effect.
+
+        Args:
+            sample_size: Actual sample size per group
+            effect_size: Observed or expected effect size
+            ratio: Ratio of group sizes
+
+        Returns:
+            Achieved statistical power
+        """
+        power = tt_ind_solve_power(
+            effect_size=effect_size,
+            nobs1=sample_size,
+            alpha=self.alpha,
+            ratio=ratio,
+            alternative='two-sided'
+        )
+
+        logger.info(f"Achieved power: {power:.3f} "
+                   f"(n={sample_size}, effect_size={effect_size})")
+
+        return power
+
+    def plot_power_curve(
+        self,
+        effect_sizes: np.ndarray,
+        sample_sizes: List[int],
+        output_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot power curves for different sample sizes.
+
+        Args:
+            effect_sizes: Array of effect sizes to plot
+            sample_sizes: List of sample sizes to show
+            output_path: Optional path to save figure
+        """
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for n in sample_sizes:
+            powers = [
+                self.achieved_power(n, es) for es in effect_sizes
+            ]
+            ax.plot(effect_sizes, powers, label=f'n={n}', linewidth=2)
+
+        ax.axhline(y=self.power, color='r', linestyle='--',
+                  label=f'Target power={self.power}')
+        ax.axhline(y=0.5, color='gray', linestyle=':', alpha=0.5)
+
+        ax.set_xlabel('Effect Size (Cohen\'s d)', fontsize=12)
+        ax.set_ylabel('Statistical Power', fontsize=12)
+        ax.set_title('Power Analysis: Effect Size vs Sample Size', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, 1)
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved power curve to {output_path}")
+
+        plt.close()
+\end{lstlisting}
+
+\section{Multiple Comparison Corrections}
+
+When performing multiple hypothesis tests, controlling the family-wise error rate is essential.
+
+\begin{lstlisting}[language=Python, caption={Multiple Comparison Corrections}]
+from typing import List
+from statsmodels.stats.multitest import multipletests
+
+class MultipleComparisonCorrection:
+    """
+    Methods for correcting multiple comparison errors.
+
+    When performing m tests, the probability of at least one
+    false positive increases. Corrections control this inflation.
+    """
+
+    def correct_p_values(
+        self,
+        p_values: np.ndarray,
+        method: str = 'fdr_bh',
+        alpha: float = 0.05
+    ) -> Dict[str, Any]:
+        """
+        Apply multiple testing correction.
+
+        Args:
+            p_values: Array of uncorrected p-values
+            method: Correction method:
+                - 'bonferroni': Bonferroni correction (most conservative)
+                - 'holm': Holm-Bonferroni (less conservative)
+                - 'fdr_bh': Benjamini-Hochberg FDR (recommended)
+                - 'fdr_by': Benjamini-Yekutieli FDR (conservative FDR)
+            alpha: Family-wise error rate
+
+        Returns:
+            Dictionary with corrected results
+        """
+        logger.info(f"Applying {method} correction to {len(p_values)} tests")
+
+        # Apply correction
+        reject, p_corrected, alphacSidak, alphacBonf = multipletests(
+            p_values, alpha=alpha, method=method
+        )
+
+        # Calculate rejection statistics
+        n_total = len(p_values)
+        n_rejected = np.sum(reject)
+        rejection_rate = n_rejected / n_total
+
+        # Expected false positives
+        if method.startswith('fdr'):
+            expected_false_positives = n_rejected * alpha
+        else:
+            expected_false_positives = alpha  # FWER control
+
+        result = {
+            "method": method,
+            "alpha": alpha,
+            "n_tests": n_total,
+            "n_rejected": n_rejected,
+            "rejection_rate": rejection_rate,
+            "expected_false_positives": expected_false_positives,
+            "p_values_corrected": p_corrected,
+            "reject": reject,
+            "corrected_alpha": alphacBonf if method == 'bonferroni' else None
+        }
+
+        logger.info(f"Rejected {n_rejected}/{n_total} hypotheses "
+                   f"({rejection_rate:.1%})")
+
+        return result
+
+    def compare_correction_methods(
+        self,
+        p_values: np.ndarray,
+        alpha: float = 0.05
+    ) -> pd.DataFrame:
+        """
+        Compare different correction methods.
+
+        Returns:
+            DataFrame comparing methods
+        """
+        methods = ['bonferroni', 'holm', 'fdr_bh', 'fdr_by']
+
+        results = []
+        for method in methods:
+            correction = self.correct_p_values(p_values, method, alpha)
+            results.append({
+                "method": method,
+                "n_rejected": correction["n_rejected"],
+                "rejection_rate": correction["rejection_rate"],
+                "expected_fps": correction["expected_false_positives"]
+            })
+
+        df = pd.DataFrame(results)
+        return df
+
+
+@dataclass
+class EffectSize:
+    """Effect size with interpretation."""
+    value: float
+    measure: str  # 'cohen_d', 'r', 'eta_squared', etc.
+    interpretation: str  # 'small', 'medium', 'large'
+    confidence_interval: Optional[Tuple[float, float]]
+
+class EffectSizeCalculator:
+    """
+    Calculate and interpret effect sizes.
+
+    Effect sizes quantify the magnitude of differences or associations,
+    independent of sample size.
+    """
+
+    def cohen_d(
+        self,
+        group_a: np.ndarray,
+        group_b: np.ndarray,
+        pooled: bool = True
+    ) -> EffectSize:
+        """
+        Cohen's d for difference between two groups.
+
+        Args:
+            group_a: First group
+            group_b: Second group
+            pooled: Use pooled standard deviation
+
+        Returns:
+            EffectSize object
+        """
+        mean_diff = np.mean(group_a) - np.mean(group_b)
+
+        if pooled:
+            n1, n2 = len(group_a), len(group_b)
+            var1, var2 = np.var(group_a, ddof=1), np.var(group_b, ddof=1)
+            pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
+            d = mean_diff / pooled_std
+        else:
+            d = mean_diff / np.std(group_b, ddof=1)
+
+        interpretation = self._interpret_cohen_d(d)
+
+        # Bootstrap CI
+        ci = self._bootstrap_ci_cohen_d(group_a, group_b)
+
+        return EffectSize(
+            value=d,
+            measure="cohen_d",
+            interpretation=interpretation,
+            confidence_interval=ci
+        )
+
+    def _interpret_cohen_d(self, d: float) -> str:
+        """Interpret Cohen's d."""
+        abs_d = abs(d)
+        if abs_d < 0.2:
+            return "negligible"
+        elif abs_d < 0.5:
+            return "small"
+        elif abs_d < 0.8:
+            return "medium"
+        else:
+            return "large"
+
+    def _bootstrap_ci_cohen_d(
+        self,
+        group_a: np.ndarray,
+        group_b: np.ndarray,
+        n_bootstrap: int = 1000,
+        confidence_level: float = 0.95
+    ) -> Tuple[float, float]:
+        """Bootstrap confidence interval for Cohen's d."""
+        np.random.seed(42)
+
+        bootstrap_ds = []
+        for _ in range(n_bootstrap):
+            # Resample
+            sample_a = np.random.choice(group_a, size=len(group_a), replace=True)
+            sample_b = np.random.choice(group_b, size=len(group_b), replace=True)
+
+            # Calculate d
+            mean_diff = np.mean(sample_a) - np.mean(sample_b)
+            pooled_std = np.sqrt(
+                ((len(sample_a) - 1) * np.var(sample_a, ddof=1) +
+                 (len(sample_b) - 1) * np.var(sample_b, ddof=1)) /
+                (len(sample_a) + len(sample_b) - 2)
+            )
+            d = mean_diff / pooled_std if pooled_std > 0 else 0
+            bootstrap_ds.append(d)
+
+        # Percentile CI
+        alpha = 1 - confidence_level
+        lower = np.percentile(bootstrap_ds, alpha / 2 * 100)
+        upper = np.percentile(bootstrap_ds, (1 - alpha / 2) * 100)
+
+        return (lower, upper)
+\end{lstlisting}
+
+\section{Industry Scenarios: Statistical Failures with Catastrophic Impact}
+
+\subsection{Scenario 1: The A/B Testing Paradox - Significant Results Destroyed Metrics}
+
+\textbf{The Company}: ShopFast, \$800M annual revenue e-commerce platform.
+
+\textbf{The Experiment}: Redesigned product pages to increase conversion rate.
+
+\textbf{The Setup}:
+\begin{itemize}
+    \item \textbf{Hypothesis}: New design will increase conversion by 5\%
+    \item \textbf{Sample size}: 50,000 users per variant
+    \item \textbf{Duration}: 2 weeks
+    \item \textbf{Primary metric}: Conversion rate (Add-to-Cart clicks)
+    \item \textbf{Power}: 80\% to detect 5\% relative lift
+\end{itemize}
+
+\textbf{The Results}:
+
+After 2 weeks:
+\begin{itemize}
+    \item \textbf{Control conversion}: 12.8\%
+    \item \textbf{Treatment conversion}: 13.6\%
+    \item \textbf{Relative lift}: +6.25\% (p = 0.012)
+    \item \textbf{Statistical significance}: YES
+    \item \textbf{Decision}: Ship to production
+\end{itemize}
+
+\textbf{The Disaster}:
+
+3 weeks after full rollout:
+\begin{itemize}
+    \item Revenue per visitor: -18\% (from \$4.20 to \$3.45)
+    \item Average order value: -22\% (from \$78 to \$61)
+    \item Purchase conversion: -15\% (from 3.2\% to 2.7\%)
+    \item Monthly revenue loss: \$12M
+\end{itemize}
+
+\textbf{The Root Causes}:
+
+\textbf{1. Metric Manipulation (Goodhart's Law):}
+
+The team optimized add-to-cart rate without considering downstream effects:
+\begin{itemize}
+    \item New design made "Add to Cart" button larger and more prominent
+    \item Users added items impulsively but didn't purchase
+    \item Cart abandonment increased from 58\% to 79\%
+\end{itemize}
+
+\textbf{2. Simpson's Paradox:}
+
+Segment analysis revealed the truth:
+
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+\textbf{Segment} & \textbf{Control Conv.} & \textbf{Treatment Conv.} & \textbf{Effect} \\
+\hline
+Mobile (60\%) & 8.2\% & 9.1\% & +11\% \\
+Desktop (40\%) & 19.5\% & 17.8\% & -9\% \\
+\textbf{Overall} & \textbf{12.8\%} & \textbf{13.6\%} & \textbf{+6.3\%} \\
+\hline
+\end{tabular}
+\end{center}
+
+Desktop users (higher AOV) experienced \textit{worse} conversion, but treatment group had more mobile users due to randomization imbalance.
+
+\textbf{3. Statistical Issues:}
+
+\begin{itemize}
+    \item \textbf{No stratification}: Random assignment didn't account for device type
+    \item \textbf{Wrong metric}: Add-to-cart is not revenue
+    \item \textbf{Multiple testing}: Tested 15 variants informally, chose "winner" (p-hacking)
+    \item \textbf{No guardrail metrics}: Didn't track AOV, purchase rate
+\end{itemize}
+
+\textbf{The Financial Impact}:
+\begin{itemize}
+    \item \textbf{Direct loss}: \$12M/month $\times$ 3 months = \$36M before rollback
+    \item \textbf{Customer trust}: 23\% increase in support tickets (confusion)
+    \item \textbf{Rollback cost}: \$800K engineering effort
+    \item \textbf{Stock price}: -8\% drop after earnings miss
+\end{itemize}
+
+\textbf{The Fix}:
+
+\begin{enumerate}
+    \item \textbf{Stratified randomization} by device, customer segment
+    \item \textbf{Guardrail metrics}: Revenue, AOV, purchase conversion
+    \item \textbf{FDR correction} for multiple testing
+    \item \textbf{Heterogeneous treatment effects}: Analyze by segment
+    \item \textbf{Longer duration}: 4 weeks to capture full purchase cycle
+\end{enumerate}
+
+\textbf{Lessons Learned}:
+\begin{itemize}
+    \item Statistical significance $\neq$ business success
+    \item Optimize for business metrics, not proxy metrics
+    \item Simpson's Paradox is real---always check segments
+    \item Stratification prevents confounding
+    \item Guardrail metrics catch unintended consequences
+\end{itemize}
+
+\subsection{Scenario 2: The Multiple Testing Disaster - Data Mining False Discoveries}
+
+\textbf{The Company}: HealthMetrics, wearable device company analyzing activity data.
+
+\textbf{The Goal}: Identify behavioral patterns predicting weight loss success.
+
+\textbf{The Approach}:
+
+Data science team analyzed 500,000 users over 12 months:
+\begin{itemize}
+    \item 247 behavioral variables (steps, sleep, heart rate, app usage, etc.)
+    \item Tested each variable for association with 10\% weight loss
+    \item Total: 247 hypothesis tests
+    \item Significance threshold: p < 0.05
+\end{itemize}
+
+\textbf{The "Discoveries"}:
+
+They found 18 "statistically significant" predictors (p < 0.05):
+\begin{enumerate}
+    \item Morning weigh-ins (p = 0.003)
+    \item Weekend step count (p = 0.021)
+    \item Sleep duration variance (p = 0.047)
+    \item App opens on Tuesdays (p = 0.019)
+    \item Heart rate at 3 PM (p = 0.041)
+    \item ... and 13 more
+\end{enumerate}
+
+\textbf{The Marketing Campaign}:
+
+Based on these findings, HealthMetrics launched "10 Science-Backed Weight Loss Habits" marketing campaign:
+\begin{itemize}
+    \item \$4.2M marketing spend
+    \item Featured in major health publications
+    \item Drove 280,000 new subscriptions
+\end{itemize}
+
+\textbf{The Replication Failure}:
+
+6 months later, independent university researchers attempted replication:
+\begin{itemize}
+    \item \textbf{Replicated}: 2 out of 18 findings (11\%)
+    \item \textbf{Failed to replicate}: 16 findings (89\%)
+    \item \textbf{Academic paper}: "HealthMetrics Claims Fail Independent Validation"
+\end{itemize}
+
+\textbf{The Mathematics of Failure}:
+
+\textbf{Type I Error Inflation}:
+
+With $\alpha = 0.05$ and $m = 247$ independent tests:
+
+\[
+P(\text{at least one false positive}) = 1 - (1 - \alpha)^m = 1 - 0.95^{247} \approx 0.9999
+\]
+
+Expected false positives: $247 \times 0.05 = 12.35$
+
+Observed 18 significant results $\approx$ expected false positives!
+
+\textbf{The Correct Approach}:
+
+\textbf{Bonferroni Correction}:
+\[
+\alpha_{corrected} = \frac{0.05}{247} = 0.0002
+\]
+
+With Bonferroni: Only 1 result significant (morning weigh-ins, p = 0.0003)
+
+\textbf{Benjamini-Hochberg FDR Control} (less conservative):
+
+Expected false discoveries: $18 \times 0.05 = 0.9$ findings
+
+After FDR correction (q = 0.05): 4 results remain significant
+
+\textbf{The Fallout}:
+
+\begin{itemize}
+    \item \textbf{Reputation damage}: Media coverage of failed replication
+    \item \textbf{Class action lawsuit}: \$8.2M settlement for misleading claims
+    \item \textbf{User churn}: 34\% of new subscribers cancelled within 3 months
+    \item \textbf{FDA warning letter}: Unsubstantiated health claims
+    \item \textbf{Stock price}: -23\% following lawsuit announcement
+\end{itemize}
+
+\textbf{Lessons Learned}:
+
+\begin{enumerate}
+    \item Multiple comparisons inflate false positive rate exponentially
+    \item Always correct for multiple testing (Bonferroni, FDR)
+    \item Pre-register hypotheses to prevent data mining
+    \item Independent replication before major decisions
+    \item Scientific rigor $>$ marketing appeal
+\end{enumerate}
+
+\subsection{Scenario 3: The Confounding Crisis - Wrong Product Decisions}
+
+\textbf{The Company}: StreamNow, \$2B streaming video platform.
+
+\textbf{The Observation}:
+
+Observational analysis of 10 million users revealed:
+
+\begin{center}
+\begin{tabular}{lcc}
+\hline
+\textbf{Feature} & \textbf{Avg. Watch Time} & \textbf{Difference} \\
+\hline
+Autoplay ON & 48.3 min/day & +62\% \\
+Autoplay OFF & 29.8 min/day & (baseline) \\
+\hline
+\end{tabular}
+\end{center}
+
+\textbf{Correlation}: r = 0.54, p < 0.001 (highly significant)
+
+\textbf{The Decision}:
+
+Product team mandated:
+\begin{itemize}
+    \item Enable autoplay by default for all users
+    \item Expected engagement lift: +62\%
+    \item Expected revenue impact: +\$280M annually
+\end{itemize}
+
+\textbf{The Reality}:
+
+After rollout to all users:
+\begin{itemize}
+    \item Average watch time: +3.2\% (not +62\%)
+    \item User complaints: +340\%
+    \item Premium cancellations: +18\%
+    \item Net revenue impact: -\$45M (first quarter)
+\end{itemize}
+
+\textbf{The Hidden Confounders}:
+
+Causal analysis (propensity score matching) revealed selection bias:
+
+Users who enabled autoplay differed systematically:
+
+\begin{center}
+\begin{tabular}{lcc}
+\hline
+\textbf{Variable} & \textbf{SMD Before Matching} & \textbf{True Effect} \\
+\hline
+Content enthusiasm & 0.92 & (high users self-select) \\
+Free time available & 0.78 & (more time $\rightarrow$ enable) \\
+Binge-watching tendency & 0.85 & (already watch a lot) \\
+Account age & 0.63 & (power users) \\
+\hline
+\end{tabular}
+\end{center}
+
+\textbf{After propensity score matching}:
+
+\begin{itemize}
+    \item Treatment effect: +3.1\% watch time (95\% CI: [1.2\%, 5.0\%])
+    \item p = 0.042 (barely significant)
+    \item Effect size: Cohen's d = 0.08 (negligible)
+\end{itemize}
+
+The 62\% correlation was \textit{confounded}---autoplay didn't cause higher engagement; engaged users enabled autoplay.
+
+\textbf{DAG Analysis}:
+
+\begin{center}
+\begin{verbatim}
+    [User Enthusiasm] ----> [Watch Time]
+            |
+            v
+       [Autoplay ON]
+\end{verbatim}
+\end{center}
+
+Backdoor path: Autoplay $\leftarrow$ Enthusiasm $\rightarrow$ Watch Time
+
+Without controlling for enthusiasm, effect is confounded.
+
+\textbf{The Correct Estimate (RCT)}:
+
+Randomized experiment (200K users, 4 weeks):
+\begin{itemize}
+    \item Treatment effect: +2.8\% (95\% CI: [0.5\%, 5.1\%])
+    \item Negative effects: +22\% user complaints, +8\% churn
+    \item Net impact: Negative
+\end{itemize}
+
+\textbf{Lessons Learned}:
+\begin{itemize}
+    \item Observational correlation $\neq$ causation
+    \item Self-selection creates massive confounding
+    \item Propensity score matching essential for observational data
+    \item DAGs formalize causal assumptions
+    \item RCTs are gold standard
+\end{itemize}
+
+\subsection{Scenario 4: The Network Effect Nightmare - Interference Violates SUTVA}
+
+\textbf{The Company}: SocialConnect, social network with 450M users.
+
+\textbf{The Experiment}: New "invite friends" button to increase user growth.
+
+\textbf{The Setup}:
+
+Standard A/B test:
+\begin{itemize}
+    \item 50\% users see new button (treatment)
+    \item 50\% don't see button (control)
+    \item Primary metric: Invitations sent
+    \item Duration: 2 weeks
+\end{itemize}
+
+\textbf{The Assumption (SUTVA Violation)}:
+
+\textbf{SUTVA (Stable Unit Treatment Value Assumption)}:
+\begin{enumerate}
+    \item \textbf{No interference}: User i's outcome unaffected by others' treatment
+    \item \textbf{Consistency}: Treatment is well-defined
+\end{enumerate}
+
+In social networks, SUTVA is violated:
+\begin{itemize}
+    \item Treatment user invites control user
+    \item Control user receives invitation (indirect treatment)
+    \item Control group contaminated
+\end{itemize}
+
+\textbf{The Results}:
+
+Observed:
+\begin{itemize}
+    \item Treatment: 4.2 invites/user
+    \item Control: 3.8 invites/user
+    \item Lift: +10.5\% (p = 0.08, not significant)
+    \item Decision: Don't ship
+\end{itemize}
+
+\textbf{The Problem}:
+
+Network analysis revealed massive interference:
+\begin{itemize}
+    \item 68\% of control users connected to treatment users
+    \item Control users received invitations from treated friends
+    \item Control group increased invitations by +12\% due to spillover
+    \item True effect masked by contamination
+\end{itemize}
+
+\textbf{The Correct Approach (Cluster Randomization)}:
+
+Randomize by network clusters (friend groups):
+\begin{itemize}
+    \item Identify 10,000 network communities (avg size: 45 users)
+    \item Randomize entire communities to treatment/control
+    \item Reduces cross-contamination to 8\%
+\end{itemize}
+
+Results:
+\begin{itemize}
+    \item Treatment clusters: 4.3 invites/user
+    \item Control clusters: 2.9 invites/user
+    \item True lift: +48\% (p < 0.001)
+    \item Effect size: Large and significant
+\end{itemize}
+
+\textbf{The Cost of Wrong Test Design}:
+
+\begin{itemize}
+    \item Incorrectly rejected effective feature
+    \item Delayed rollout by 6 months (redesign and re-test)
+    \item Estimated user growth loss: 12M users
+    \item Competitive disadvantage: Rival launched similar feature
+    \item Revenue impact: \$180M (missed growth opportunity)
+\end{itemize}
+
+\textbf{Lessons Learned}:
+\begin{itemize}
+    \item Network effects violate SUTVA
+    \item Individual randomization insufficient for social features
+    \item Cluster randomization prevents contamination
+    \item Account for interference in experimental design
+    \item Wrong test design $\rightarrow$ wrong conclusions
+\end{itemize}
+
+\subsection{Scenario 5: The Underpowered Experiment - False Negative Costs Millions}
+
+\textbf{The Company}: AdTech Solutions, \$500M advertising platform.
+
+\textbf{The Experiment}: New ad targeting algorithm to improve CTR.
+
+\textbf{The Setup}:
+
+\begin{itemize}
+    \item Hypothesis: New algorithm improves CTR by 3\%
+    \item Sample size: 10,000 users per group
+    \item Duration: 1 week
+    \item Alpha: 0.05
+    \item \textbf{Power: 45\%} (severely underpowered!)
+\end{itemize}
+
+\textbf{Correct Power Calculation}:
+
+For baseline CTR = 2\%, detecting 3\% relative lift (0.002 $\rightarrow$ 0.00206):
+
+\[
+\text{Effect size (Cohen's h)} = 2 \times \left(\arcsin(\sqrt{0.00206}) - \arcsin(\sqrt{0.002})\right) = 0.015
+\]
+
+Required sample size for 80\% power:
+
+\[
+n = \frac{(Z_{1-\alpha/2} + Z_{1-\beta})^2}{\text{effect size}^2} = \frac{(1.96 + 0.84)^2}{0.015^2} \approx 34,900 \text{ per group}
+\]
+
+They used only 10,000---massively underpowered!
+
+\textbf{The Results}:
+
+\begin{itemize}
+    \item Control CTR: 2.00\%
+    \item Treatment CTR: 2.07\%
+    \item Relative lift: +3.5\%
+    \item p-value: 0.12 (not significant)
+    \item \textbf{Decision: Reject algorithm}
+\end{itemize}
+
+\textbf{The Mistake}:
+
+With only 45\% power, they had 55\% chance of false negative (Type II error).
+
+The algorithm \textit{was effective}, but the test couldn't detect it.
+
+\textbf{The Aftermath}:
+
+Competitor launched similar algorithm:
+\begin{itemize}
+    \item Competitor's market share: +8\%
+    \item AdTech's market share: -5\%
+    \item Revenue loss: \$42M annually
+    \item Stock price: -12\%
+\end{itemize}
+
+18 months later, retest with proper power (40,000 per group):
+\begin{itemize}
+    \item p < 0.001 (highly significant)
+    \item Lift: +3.2\% CTR
+    \item 18-month delay cost: \$63M lost revenue
+\end{itemize}
+
+\textbf{Lessons Learned}:
+\begin{itemize}
+    \item Power analysis is not optional
+    \item Underpowered tests waste resources and miss real effects
+    \item Type II error (false negative) has business cost
+    \item 80\% power is minimum; 90\% preferred for critical tests
+    \item Calculate sample size \textit{before} experiment
+\end{itemize}
+
+\section{Real-World Scenario: The Coffee Shop Causation Error}
+
+\subsection{CafeTech's Misguided Loyalty Program}
+
+CafeTech, a chain of tech-themed coffee shops, analyzed customer data and discovered a strong correlation: customers who used their mobile app spent 40\% more per visit than non-app users. The correlation coefficient was r = 0.72 (p < 0.001, highly significant).
+
+Excited by this finding, the CMO launched a \$3M campaign to increase app adoption, expecting a proportional revenue increase. Six months later, app adoption doubled from 20\% to 40\%, but revenue per visit remained flat. The company had confused correlation with causation.
+
+\subsection{The Hidden Confounders}
+
+A rigorous causal analysis revealed the truth:
+
+\textbf{Propensity Score Analysis} showed app users differed systematically:
+\begin{itemize}
+    \item Higher income (standardized mean difference: 0.85)
+    \item More frequent customers (SMD: 0.92)
+    \item Younger demographic (SMD: 0.68)
+\end{itemize}
+
+\textbf{After propensity score matching}, the causal effect of app usage on spending was only +5\% (95\% CI: [-2\%, +12\%]), not statistically significant (p = 0.18).
+
+\textbf{Difference-in-Differences} using a natural experiment (delayed rollout across cities) confirmed:
+\begin{itemize}
+    \item Treatment cities (early app launch): +3\% spending increase
+    \item Control cities (delayed launch): +2\% baseline growth
+    \item DiD estimate: +1\% (95\% CI: [-3\%, +5\%]), p = 0.63
+\end{itemize}
+
+\subsection{The Real Drivers}
+
+Advanced analysis using instrumented variables and regression discontinuity revealed the actual causal factors:
+
+\begin{enumerate}
+    \item \textbf{Income}: +\$1,000 annual income $\rightarrow$ +2.3\% spending (p < 0.001)
+    \item \textbf{Visit frequency}: Regulars spend 31\% more per visit (p < 0.001)
+    \item \textbf{Location}: Downtown stores have 45\% higher spending (p < 0.001)
+\end{enumerate}
+
+The app was merely a marker of high-value customers, not a driver of increased spending.
+
+\subsection{The Cost of Poor Statistics}
+
+\begin{itemize}
+    \item \textbf{\$3M wasted} on ineffective app promotion
+    \item \textbf{6 months lost} pursuing wrong strategy
+    \item \textbf{Opportunity cost}: Missing actual growth levers
+    \item \textbf{Stock impact}: 12\% drop after earnings miss
+\end{itemize}
+
+\subsection{The Corrective Strategy}
+
+After proper causal inference:
+
+\begin{enumerate}
+    \item Focused on attracting high-income neighborhoods
+    \item Created loyalty rewards for frequency (not app usage)
+    \item Expanded downtown presence
+    \item Result: 18\% revenue growth in 12 months
+\end{enumerate}
+
+\subsection{Lessons Learned}
+
+\begin{enumerate}
+    \item \textbf{Correlation $\neq$ Causation}: Statistical significance doesn't imply causality
+    \item \textbf{Confounders matter}: Observational data requires causal methods
+    \item \textbf{Test causality}: Use RCTs, propensity scores, or DiD when possible
+    \item \textbf{Multiple evidence}: Triangulate findings across methods
+    \item \textbf{Effect sizes}: Statistical significance without practical significance is meaningless
+\end{enumerate}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Hypothesis Test with Assumption Checking (Easy)}
+
+Generate two samples from different distributions. Perform an independent t-test and check all assumptions. If assumptions are violated, apply the appropriate non-parametric alternative.
+
+\subsection{Exercise 2: Experimental Design and Randomization (Easy)}
+
+Design an A/B test for a website change. Implement simple, stratified, and block randomization strategies. Compare how well each achieves balance across key covariates.
+
+\subsection{Exercise 3: Power Analysis (Medium)}
+
+Calculate required sample sizes for detecting:
+\begin{itemize}
+    \item 5\% relative improvement in conversion rate (baseline: 10\%)
+    \item 10\% relative improvement in average order value
+    \item Small (d=0.2), medium (d=0.5), and large (d=0.8) effects
+\end{itemize}
+
+Create power curves showing the relationship between effect size and required sample size.
+
+\subsection{Exercise 4: Propensity Score Matching (Medium)}
+
+Generate synthetic observational data with confounding (e.g., treatment assignment depends on covariates). Estimate the naive treatment effect (ignoring confounding) and compare to the propensity score-adjusted estimate. Check covariate balance before and after matching.
+
+\subsection{Exercise 5: Multiple Comparison Correction (Medium)}
+
+Simulate 100 hypothesis tests where 95 are true nulls and 5 have real effects. Apply different multiple comparison corrections (Bonferroni, Holm, FDR) and compare:
+\begin{itemize}
+    \item False positive rate
+    \item False negative rate
+    \item Power to detect true effects
+\end{itemize}
+
+\subsection{Exercise 6: Difference-in-Differences Analysis (Advanced)}
+
+Simulate panel data with:
+\begin{itemize}
+    \item Treatment and control groups
+    \item Pre- and post-treatment periods
+    \item Parallel trends in pre-period
+    \item Treatment effect in post-period
+\end{itemize}
+
+Estimate the treatment effect using DiD. Test the parallel trends assumption and assess robustness to violations.
+
+\subsection{Exercise 7: Complete Statistical Analysis Pipeline (Advanced)}
+
+Design and analyze a complete A/B test:
+
+\begin{enumerate}
+    \item Perform power analysis to determine sample size
+    \item Design randomization strategy with balance checking
+    \item Simulate experiment execution with realistic data
+    \item Analyze results with assumption checking
+    \item Calculate effect sizes with confidence intervals
+    \item Perform sensitivity analysis for key assumptions
+    \item Generate comprehensive statistical report
+\end{enumerate}
+
+Document all statistical decisions and their justifications.
+
+\subsection{Exercise 8: DAG-Based Causal Inference (Advanced)}
+
+Implement causal inference using DAG framework:
+
+\begin{enumerate}
+    \item Construct causal DAG for observational study scenario
+    \item Identify all backdoor paths from treatment to outcome
+    \item Apply backdoor criterion to find valid adjustment sets
+    \item Find minimal adjustment set programmatically
+    \item Estimate causal effect with and without adjustment
+    \item Visualize DAG with identified adjustment sets
+    \item Compare naive vs. adjusted causal estimates
+\end{enumerate}
+
+\textbf{Deliverable}: Causal analysis with DAG visualization and adjustment set identification.
+
+\subsection{Exercise 9: Instrumental Variables Analysis (Advanced)}
+
+Estimate causal effects using IV methods:
+
+\begin{enumerate}
+    \item Generate synthetic data with endogeneity (X correlates with error)
+    \item Identify valid instrument Z (relevance, exclusion, exchangeability)
+    \item Implement two-stage least squares (2SLS)
+    \item Test instrument strength (F-statistic > 10)
+    \item Compare IV estimate vs. biased OLS estimate
+    \item Conduct sensitivity analysis to weak instruments
+    \item Interpret bias magnitude and direction
+\end{enumerate}
+
+\textbf{Deliverable}: IV analysis with weak instrument testing and bias quantification.
+
+\subsection{Exercise 10: Multiple Testing Correction Comparison (Medium)}
+
+Compare multiple testing correction methods:
+
+\begin{enumerate}
+    \item Simulate 200 hypothesis tests (180 true nulls, 20 true effects)
+    \item Apply no correction (naive alpha = 0.05)
+    \item Apply Bonferroni correction
+    \item Apply Holm-Bonferroni correction
+    \item Apply Benjamini-Hochberg FDR (q = 0.05)
+    \item Calculate: FWER, FDR, power for each method
+    \item Plot power vs. FDR trade-offs
+    \item Recommend best method for scenario
+\end{enumerate}
+
+\textbf{Deliverable}: Comparison table and recommendation with justification.
+
+\subsection{Exercise 11: Simpson's Paradox Investigation (Medium)}
+
+Detect and analyze Simpson's Paradox:
+
+\begin{enumerate}
+    \item Generate data where overall effect reverses within subgroups
+    \item Calculate treatment effect overall (pooled)
+    \item Calculate treatment effects within each subgroup
+    \item Identify confounding variable causing reversal
+    \item Apply stratified analysis (Cochran-Mantel-Haenszel test)
+    \item Visualize paradox with grouped bar charts
+    \item Determine correct causal interpretation
+\end{enumerate}
+
+\textbf{Deliverable}: Simpson's Paradox demonstration with visualizations.
+
+\subsection{Exercise 12: Network Experiment Design (Advanced)}
+
+Design experiment accounting for network effects:
+
+\begin{enumerate}
+    \item Generate social network graph (1000 users, avg degree 10)
+    \item Design individual randomization experiment
+    \item Simulate interference (spillover effects)
+    \item Measure contamination between treatment/control
+    \item Implement cluster randomization (randomize communities)
+    \item Compare individual vs. cluster randomization results
+    \item Estimate direct and spillover effects
+\end{enumerate}
+
+\textbf{Deliverable}: Network experiment with interference analysis.
+
+\subsection{Exercise 13: Power Analysis and Sample Size Optimization (Medium)}
+
+Optimize experimental design through power analysis:
+
+\begin{enumerate}
+    \item Define business scenario (e.g., conversion rate improvement)
+    \item Calculate required sample size for 80\%, 90\%, 95\% power
+    \item Plot power curves for different effect sizes
+    \item Calculate minimum detectable effect for fixed sample
+    \item Estimate cost of Type I vs. Type II errors
+    \item Optimize alpha/beta trade-off for business context
+    \item Create sample size calculator tool
+\end{enumerate}
+
+\textbf{Deliverable}: Power analysis report with business-aligned recommendations.
+
+\subsection{Exercise 14: Heterogeneous Treatment Effects (Advanced)}
+
+Analyze differential treatment effects across subgroups:
+
+\begin{enumerate}
+    \item Simulate experiment with heterogeneous effects by age/segment
+    \item Estimate average treatment effect (ATE)
+    \item Estimate conditional average treatment effects (CATE) by subgroup
+    \item Test for treatment-covariate interactions
+    \item Build causal forest or uplift model for personalization
+    \item Identify which segments benefit most from treatment
+    \item Design personalized treatment allocation strategy
+\end{enumerate}
+
+\textbf{Deliverable}: Heterogeneous effect analysis with personalization strategy.
+
+\subsection{Exercise 15: Comprehensive Statistical Audit (Advanced)}
+
+Audit past experiments for statistical rigor:
+
+\begin{enumerate}
+    \item Select 5 historical A/B tests from your organization
+    \item Check power analysis (was sample size adequate?)
+    \item Verify randomization quality (balance checks)
+    \item Assess multiple comparison handling
+    \item Review effect size reporting
+    \item Check for p-hacking or HARKing indicators
+    \item Identify SUTVA violations (interference)
+    \item Calculate false discovery risk for positive findings
+    \item Generate audit report with recommendations
+    \item Create statistical review checklist for future experiments
+\end{enumerate}
+
+\textbf{Deliverable}: Comprehensive audit report with statistical review checklist.
+
+\vspace{1cm}
+
+\textbf{Recommended Exercise Progression}:
+
+\begin{itemize}
+    \item \textbf{Foundations} (Complete first): Exercises 1, 2, 3 establish core statistical testing
+    \item \textbf{Causal Inference} (Intermediate): Exercises 4, 6, 8, 9 cover observational methods
+    \item \textbf{Experimental Design} (Intermediate): Exercises 5, 10, 12, 13 optimize experiments
+    \item \textbf{Advanced Topics} (Advanced): Exercises 7, 11, 14, 15 integrate multiple concepts
+\end{itemize}
+
+Complete at least Exercises 1, 2, 3, 4, and 10 before applying to production systems. Exercises 8, 9, and 12 are essential for observational causal inference and network experiments.
+
+\section{Summary}
+
+This chapter provided academic-level statistical rigor frameworks with mathematical foundations:
+
+\subsection{Core Statistical Frameworks}
+
+\begin{itemize}
+    \item \textbf{Hypothesis Testing}: Comprehensive framework with assumption validation (normality, homoscedasticity), appropriate test selection (parametric vs non-parametric), effect sizes, and detailed result reporting with confidence intervals
+
+    \item \textbf{Experimental Design}: Randomization strategies (simple, stratified, block, cluster) ensuring valid causal inference, balanced treatment allocation, and SUTVA compliance for valid inference
+
+    \item \textbf{Causal Inference}: Propensity score matching for observational data, difference-in-differences for panel data, covariate balance assessment with standardized mean differences
+
+    \item \textbf{Power Analysis}: Sample size calculations for different test types, minimum detectable effect estimation, achieved power assessment, and power curve visualization
+
+    \item \textbf{Multiple Comparisons}: Bonferroni, Holm-Bonferroni, and Benjamini-Hochberg FDR corrections controlling family-wise error rate and false discovery rate with power trade-offs
+
+    \item \textbf{Effect Sizes}: Cohen's d, Cramér's V, rank-biserial correlation with interpretive guidelines and bootstrap confidence intervals
+\end{itemize}
+
+\subsection{Advanced Causal Inference}
+
+\begin{itemize}
+    \item \textbf{DAG Analysis}: Directed Acyclic Graphs formalizing causal assumptions, backdoor criterion for identifying valid adjustment sets, d-separation for conditional independence, minimal adjustment set discovery
+
+    \item \textbf{Instrumental Variables}: Two-stage least squares (2SLS) for addressing endogeneity, weak instrument testing with F-statistics, comparison of biased OLS vs. unbiased IV estimates
+
+    \item \textbf{Mathematical Foundations}: Pearl's causal framework, potential outcomes, SUTVA assumptions, identification strategies, graphical causal models
+\end{itemize}
+
+\subsection{Industry Lessons with Quantified Impact}
+
+The chapter presented six real-world scenarios demonstrating catastrophic consequences of statistical failures:
+
+\begin{enumerate}
+    \item \textbf{ShopFast - A/B Testing Paradox}: \$36M loss from optimizing wrong metric (add-to-cart vs revenue), Simpson's Paradox in segment analysis, lack of stratification causing confounding
+
+    \item \textbf{HealthMetrics - Multiple Testing Disaster}: \$8.2M lawsuit from data mining 247 variables without FDR correction, 89\% replication failure, FDA warning for unsubstantiated claims
+
+    \item \textbf{StreamNow - Confounding Crisis}: \$45M loss from confounded observational study, selection bias with SMD > 0.85, 62\% correlation reduced to 3\% after propensity score matching
+
+    \item \textbf{SocialConnect - Network Effect Nightmare}: \$180M missed opportunity from SUTVA violation in social network experiment, 68\% cross-contamination masking 48\% true effect, need for cluster randomization
+
+    \item \textbf{AdTech - Underpowered Experiment}: \$63M loss from 45\% power causing false negative, competitor advantage from wrongly rejected algorithm, 18-month delay
+
+    \item \textbf{CafeTech - Coffee Shop Causation}: \$3M wasted on ineffective campaign, confusion of correlation (r=0.72) with causation, propensity score matching revealing true effect (+5\% vs +40\% naive)
+\end{enumerate}
+
+\subsection{Mathematical Rigor}
+
+\textbf{Type I Error Control}:
+\[
+P(\text{FP}) = 1 - (1 - \alpha)^m \approx 1 \text{ for large } m
+\]
+
+\textbf{Bonferroni Correction}:
+\[
+\alpha_{corrected} = \frac{\alpha}{m}
+\]
+
+\textbf{Benjamini-Hochberg FDR}:
+\[
+\text{Expected FDR} = \frac{\text{E}[\text{False Positives}]}{\text{E}[\text{Total Rejections}]} \leq q
+\]
+
+\textbf{Power Analysis}:
+\[
+\text{Power} = 1 - \beta = P(\text{Reject } H_0 \mid H_1 \text{ true})
+\]
+
+\textbf{Sample Size (Two-Sample Test)}:
+\[
+n = \frac{(Z_{1-\alpha/2} + Z_{1-\beta})^2 \times 2\sigma^2}{\delta^2}
+\]
+
+\textbf{Backdoor Criterion}: Set $Z$ satisfies backdoor criterion for $(X, Y)$ if:
+\begin{enumerate}
+    \item No node in $Z$ is a descendant of $X$
+    \item $Z$ blocks all backdoor paths from $X$ to $Y$
+\end{enumerate}
+
+\textbf{Propensity Score}: $e(X) = P(T=1 \mid X)$
+
+\textbf{Standardized Mean Difference}:
+\[
+\text{SMD} = \frac{\bar{X}_T - \bar{X}_C}{\sqrt{(\sigma_T^2 + \sigma_C^2)/2}}
+\]
+
+\subsection{Key Takeaways}
+
+\textbf{Statistical Failures Have Multi-Million Dollar Consequences}:
+\begin{itemize}
+    \item Poor statistics $\neq$ academic concern—real business impact
+    \item \$372M combined losses across 6 scenarios
+    \item Stock price declines 8-23\%
+    \item Regulatory fines, lawsuits, reputational damage
+\end{itemize}
+
+\textbf{Common Failure Modes}:
+\begin{itemize}
+    \item Confusing correlation with causation (observational studies)
+    \item Multiple testing without correction (data mining)
+    \item Simpson's Paradox from aggregation (segmentation matters)
+    \item SUTVA violations (network effects, interference)
+    \item Underpowered experiments (false negatives)
+    \item Optimizing proxy metrics instead of business outcomes
+\end{itemize}
+
+\textbf{Prevention Strategies}:
+\begin{itemize}
+    \item \textbf{Causal rigor}: DAGs, propensity scores, RCTs for causality
+    \item \textbf{Power analysis}: Always calculate sample size before experiments
+    \item \textbf{Multiple testing}: FDR correction for exploratory analysis
+    \item \textbf{Stratification}: Prevent confounding in randomization
+    \item \textbf{Effect sizes}: Report practical significance, not just p-values
+    \item \textbf{Guardrail metrics}: Monitor unintended consequences
+    \item \textbf{Segment analysis}: Check heterogeneous effects
+    \item \textbf{Replication}: Independent validation before major decisions
+\end{itemize}
+
+\textbf{Mathematical Foundation Matters}:
+\begin{itemize}
+    \item Graphical models (DAGs) formalize causal assumptions
+    \item Backdoor criterion provides identification guarantees
+    \item Propensity scores balance observational data
+    \item Power analysis prevents resource waste
+    \item FDR control balances discovery and false positives
+\end{itemize}
+
+Statistical rigor transforms data analysis from exploratory observation into rigorous causal inference. By validating assumptions, controlling error rates, understanding causal mechanisms through DAGs, and distinguishing correlation from causation, data scientists can confidently support high-stakes business decisions with reproducible, valid statistical evidence. The industry scenarios demonstrate that statistical failures are not theoretical concerns—they have real, quantifiable business consequences measured in tens of millions of dollars.

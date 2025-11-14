@@ -1,0 +1,113 @@
+\documentclass[11pt]{book}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage{csquotes}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+\geometry{margin=1in}
+
+\definecolor{shellgray}{gray}{0.95}
+\definecolor{keywordblue}{RGB}{39,92,158}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstdefinestyle{python}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shellgray},
+  frame=single,
+  keywordstyle=\color{keywordblue},
+  stringstyle=\color{codegreen},
+  commentstyle=\color{codepurple},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  captionpos=b
+}
+
+\lstdefinestyle{shell}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shellgray},
+  frame=single,
+  keywordstyle=\color{keywordblue},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  captionpos=b
+}
+
+\lstdefinestyle{yaml}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shellgray},
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  captionpos=b
+}
+
+\lstset{style=python}
+
+\title{Data Science and ML Engineering Best Practices}
+\author{Diogo Ribeiro\\Lead Data Scientist, Mysense.ai\\Researcher \& Instructor, ESMAD - Instituto Politécnico do Porto\\Master's in Mathematics\\\href{https://diogoribeiro7.github.io}{https://diogoribeiro7.github.io}\\\href{https://github.com/DiogoRibeiro7}{https://github.com/DiogoRibeiro7}\\ORCID: \href{https://orcid.org/0009-0001-2022-7072}{0009-0001-2022-7072}}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+\noindent
+\textbf{The Crisis in Machine Learning Engineering.} Despite unprecedented investment in artificial intelligence—with global ML spending exceeding \$500 billion annually—the industry faces a stark reality: 85\% of machine learning projects never reach production deployment. Research from Gartner and VentureBeat consistently demonstrates that the journey from experimental success to operational value remains fraught with failure, with organizations wasting an average of \$1.2 million per failed ML initiative. This crisis stems not from insufficient algorithmic sophistication, but from a fundamental absence of systematic engineering practices. The regulatory landscape is rapidly intensifying: the EU AI Act establishes strict requirements for high-risk AI systems entering force in 2024-2026, corporate liability for algorithmic decisions is expanding globally with C-suite executives increasingly held personally accountable, investors now demand comprehensive AI risk management frameworks during due diligence, and boards of directors face mounting pressure to establish AI governance committees. Simultaneously, the talent shortage crisis intensifies as organizations compete for experienced ML practitioners while the complexity of production systems—evolving from simple models to multi-component architectures spanning data pipelines, model serving, monitoring, and compliance—demands systematic approaches that transcend individual brilliance. The competitive landscape has shifted: first-mover advantages accrue to organizations deploying reliable, scalable ML systems weeks faster than competitors, while the reputational and financial costs of algorithmic failures create existential risks. The gap between experimental accuracy metrics and sustainable business value has become the defining challenge of modern data science.
+
+\textbf{Why Data Science Projects Fail.} The root causes of ML project failure are structural and multifaceted, reflecting the industry's difficult transition from research experimentation to production infrastructure. Technical debt accumulates rapidly when teams prioritize model performance over code quality, leading to unmaintainable systems that collapse under production load—a particularly acute problem as organizations shift from model-centric to data-centric AI development where data quality, lineage, and governance become as critical as algorithmic sophistication. The reproducibility crisis plaguing data science means that experiments succeeding on a data scientist's laptop mysteriously fail in staging environments, with studies showing that fewer than 30\% of ML experiments can be reliably reproduced across different infrastructure—undermining both regulatory compliance and team productivity. Governance gaps expose organizations to expanding corporate liability, as demonstrated by recent \$68 million ECOA settlements for biased credit scoring and \$125 million Title VI penalties for discriminatory healthcare algorithms, with executives facing personal liability under emerging regulatory frameworks. Ethical blind spots, from proxy discrimination through seemingly innocuous features like zip codes to intersectional bias affecting vulnerable subgroups, create legal and reputational risks that destroy customer trust and brand value far exceeding the cost of prevention. Scaling challenges emerge when ad-hoc solutions that worked for pilot projects crumble under production data volumes, team growth, and organizational complexity—a problem exacerbated as MLOps emerges as a distinct engineering discipline requiring specialized expertise. The talent implications are severe: skilled practitioners leave organizations lacking systematic practices for competitors offering modern tooling and clear career progression, while knowledge siloed in individual experts creates catastrophic single-points-of-failure. These failures are not inevitable—they are symptoms of treating ML engineering as an artisanal craft during an era demanding repeatable engineering discipline.
+
+\textbf{A Systematic Solution: The Six Pillars Framework.} This handbook provides a comprehensive methodology organized around six foundational pillars that transform ML development from fragile experimentation to robust engineering, with quantifiable business metrics tied to each pillar enabling ROI measurement and executive justification. \textit{Reproducibility} establishes the foundation through containerized environments, data versioning with DVC, and experiment tracking with MLflow, enabling 95\%+ experiment reproducibility across teams and infrastructure while reducing debugging time by 60\%—quantifiable through mean-time-to-resolution metrics and developer productivity measurements. \textit{Reliability} ensures production systems operate predictably through comprehensive testing frameworks, automated validation pipelines, and statistical rigor in model evaluation, reducing production incidents by 80\% and enabling confident deployment—measured through incident rates, model performance SLAs, and business impact of failures avoided. \textit{Observability} provides visibility into model behavior through monitoring dashboards, drift detection systems, and performance alerting, cutting mean-time-to-detection for model degradation from weeks to hours—quantified through alerting latency, false positive rates, and prevented revenue loss from early detection. \textit{Scalability} addresses growth through distributed training frameworks, efficient data pipelines, and infrastructure-as-code practices that enable seamless scaling from prototypes processing megabytes to production systems handling petabytes—measured through cost-per-prediction reductions, training time improvements, and infrastructure utilization efficiency. \textit{Maintainability} ensures long-term sustainability through modular code architectures, comprehensive documentation, and automation that reduces manual intervention by 70\% and enables 3-5x team growth without proportional increases in coordination overhead—quantified through code quality metrics, onboarding time, and knowledge transfer success rates. \textit{Ethics \& Governance} integrates fairness testing, regulatory compliance frameworks (GDPR, CCPA, HIPAA, FCRA), and interpretability methods from development through deployment, automating 80\% of compliance documentation while preventing the million-dollar settlements that plague organizations with ad-hoc approaches—measured through audit success rates, compliance violation reductions, and risk-adjusted cost savings. Each pillar includes maturity assessment frameworks enabling organizations to measure current state, set improvement targets, and demonstrate progress to stakeholders, with cost-benefit analysis templates justifying engineering investments through quantified risk reduction and efficiency gains.
+
+\textbf{Comprehensive Lifecycle Coverage.} The handbook's fifteen chapters progress systematically from foundational practices through production deployment to advanced governance, directly addressing the industry's maturation from research experimentation to production infrastructure and the emergence of MLOps as a distinct engineering discipline. Early chapters establish reproducible research environments (Chapter 2), enterprise data management with lineage tracking and privacy compliance reflecting the shift to data-centric AI development (Chapter 3), and research-grade experiment tracking with multi-objective optimization (Chapter 4). Mid-stage chapters address feature engineering with automated selection frameworks (Chapter 5), model development combining statistical foundations with practical implementations (Chapter 6), and academic-level statistical rigor including causal inference and instrumental variables addressing reproducibility challenges (Chapter 7). Production-focused chapters cover model deployment with canary releases and A/B testing integration (Chapter 8), comprehensive ML observability with drift detection and automated alerting essential for production reliability (Chapter 9), and rigorous A/B testing frameworks with Bayesian optimization (Chapter 10). Infrastructure chapters detail scalable data pipelines with streaming architectures handling modern data volumes (Chapter 11) and complete MLOps automation including CI/CD and infrastructure-as-code establishing ML engineering as systematic discipline (Chapter 12). The ethics and governance chapter (Chapter 13) provides intersectional fairness analysis, individual fairness with Lipschitz constraints, comprehensive regulatory compliance frameworks addressing EU AI Act and corporate liability requirements, and advanced interpretability methods including LIME stability analysis, attention visualization, and concept-based explanations. Performance optimization (Chapter 14) addresses distributed training, model compression, and GPU optimization enabling cost-effective scaling. Each chapter integrates mathematical foundations with Python implementations using modern tools (MLflow, DVC, Kubernetes, Apache Airflow, Great Expectations), real-world industry scenarios with quantified financial outcomes, and comprehensive exercises ranging from beginner to advanced levels. This breadth distinguishes the handbook from basic ML tutorials focused on algorithmic understanding, theoretical academic texts lacking practical implementation guidance, and point-solution engineering books addressing isolated challenges rather than the complete ML lifecycle—positioning it as the comprehensive resource for organizations navigating the transition from experimental ML to production ML infrastructure.
+
+\textbf{Target Audience and Measurable Outcomes.} This handbook serves multiple critical roles within data-driven organizations. \textit{Data Science Managers and Team Leads} gain frameworks for establishing team standards, reducing onboarding time from 3-6 months to 2-4 weeks, and implementing governance systems that pass regulatory audits while enabling faster iteration. \textit{Senior Data Scientists and ML Engineers} acquire advanced techniques for production-grade system design, achieving 95\%+ model reproducibility, reducing time-to-production from months to weeks, and building systems that scale from pilot to enterprise deployment. \textit{Individual Contributors} transition from experimental coding to engineering discipline, learning to implement fairness testing that prevents discrimination lawsuits, build monitoring systems that detect model degradation before business impact, and document models to satisfy regulatory requirements. \textit{Technical Leadership} (CTOs, VPs of Engineering) obtain evidence-based frameworks for technology selection, risk assessment for AI initiatives, and systematic approaches to building organizational ML capabilities that justify budget allocation and demonstrate ROI. Readers will master concrete skills: implementing automated compliance checking for GDPR Article 22, FCRA adverse action notices, and ECOA disparate impact monitoring; building causal inference frameworks to identify and remove proxy discrimination; designing distributed training pipelines that reduce training time by 10-100x; establishing observability systems that achieve <1 hour mean-time-to-detection for model degradation; and creating interpretability frameworks that satisfy regulatory requirements while remaining computationally efficient. Organizations implementing these practices systematically report 60-80\% reduction in production incidents, 3-5x acceleration in time-to-production, 40-60\% decrease in computational costs through optimization, and successful navigation of regulatory audits that sink unprepared competitors.
+
+The marriage of academic rigor—informed by the author's mathematical background and research in statistical methods—with battle-tested industry practices from deploying production ML systems at Mysense.ai creates a unique resource. This is not a collection of best-practice platitudes, but a systematic engineering discipline with quantifiable metrics, automated tooling, and proven methodologies that transform ML development from artisanal craft to repeatable engineering. In an era where AI governance failures carry eight-figure legal penalties and competitive advantage accrues to organizations that deploy ML systems weeks rather than months faster than competitors, systematic practices are no longer optional luxuries—they are business imperatives. This handbook provides the roadmap.
+
+\tableofcontents
+
+\mainmatter
+
+\include{chapters/ch01_introduction_ds_engineering}
+\include{chapters/ch02_reproducible_research_environments}
+\include{chapters/ch03_data_management_versioning}
+\include{chapters/ch04_experiment_tracking_management}
+\include{chapters/ch05_feature_engineering}
+\include{chapters/ch06_model_development_selection}
+\include{chapters/ch07_statistical_rigor_testing}
+\include{chapters/ch08_model_deployment_serving}
+\include{chapters/ch09_ml_monitoring_observability}
+\include{chapters/ch10_ab_testing_experimentation}
+\include{chapters/ch11_data_pipelines_etl}
+\include{chapters/ch12_mlops_automation}
+\include{chapters/ch13_ethics_governance_interpretability}
+\include{chapters/ch14_performance_optimization}
+
+\appendix
+
+\include{chapters/ch15_checklists_templates_resources}
+
+\end{document}

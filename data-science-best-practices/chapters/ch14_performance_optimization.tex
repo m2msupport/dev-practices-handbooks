@@ -1,0 +1,1526 @@
+\chapter{ML Performance Optimization}
+
+\section{Introduction}
+
+A fraud detection model with 92\% accuracy is worthless if it takes 5 seconds to make a prediction—fraudulent transactions complete in milliseconds. A recommendation engine trained on billions of interactions cannot serve millions of concurrent users if it requires 32GB of memory per instance. ML performance optimization transforms theoretically sound models into practical systems that deliver value at scale.
+
+\subsection{The Performance Problem}
+
+Consider a recommendation system serving 10 million daily active users. The initial deployment uses a 500M parameter neural network requiring:
+\begin{itemize}
+    \item 2GB memory per instance
+    \item 300ms inference latency (p95)
+    \item 8 vCPUs per instance
+    \item Cost: \$12,000/month for 100 instances
+    \item Cannot scale beyond 5M concurrent users
+\end{itemize}
+
+The business requires sub-100ms latency for 20M users during peak hours, but scaling the naive approach would cost \$500,000/month—economically infeasible.
+
+\subsection{Why Performance Optimization Matters}
+
+ML systems must balance multiple constraints:
+
+\begin{itemize}
+    \item \textbf{Latency}: User experience degrades exponentially with response time
+    \item \textbf{Throughput}: System must handle peak load without degradation
+    \item \textbf{Cost}: Cloud infrastructure costs scale with resource usage
+    \item \textbf{Memory}: Models must fit in available RAM for serving
+    \item \textbf{Energy}: Edge devices have strict power budgets
+    \item \textbf{Model Quality}: Optimizations must preserve accuracy
+\end{itemize}
+
+\subsection{The Cost of Poor Performance}
+
+Industry data shows:
+\begin{itemize}
+    \item \textbf{100ms latency increase} causes 7\% conversion rate drop
+    \item \textbf{Unoptimized models} cost 5-10x more in infrastructure
+    \item \textbf{Memory constraints} prevent 40\% of ML models from deployment
+    \item \textbf{Poor scaling} causes 60\% of ML services to fail under peak load
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-grade optimization techniques:
+
+\begin{enumerate}
+    \item \textbf{Model Optimization}: Quantization, pruning, knowledge distillation
+    \item \textbf{Distributed Training}: Data parallelism, model parallelism, mixed precision
+    \item \textbf{Edge Deployment}: Resource-constrained optimization for mobile/IoT
+    \item \textbf{Caching Strategies}: Intelligent prefetching and cache invalidation
+    \item \textbf{Auto-scaling}: Demand prediction and elastic resource allocation
+    \item \textbf{Benchmarking}: Systematic performance measurement and validation
+\end{enumerate}
+
+\section{Model Optimization Techniques}
+
+Model optimization reduces model size and improves inference speed while maintaining accuracy.
+
+\subsection{ModelOptimizer: Comprehensive Optimization Framework}
+
+\begin{lstlisting}[language=Python, caption={Model Optimization Framework}]
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.quantization import quantize_dynamic, quantize_static
+import logging
+
+logger = logging.getLogger(__name__)
+
+class OptimizationTechnique(Enum):
+    """Model optimization techniques."""
+    QUANTIZATION = "quantization"
+    PRUNING = "pruning"
+    DISTILLATION = "distillation"
+    ONNX_CONVERSION = "onnx_conversion"
+    TENSORRT = "tensorrt"
+
+@dataclass
+class OptimizationResult:
+    """
+    Result of model optimization.
+
+    Attributes:
+        technique: Optimization technique used
+        original_size_mb: Original model size in MB
+        optimized_size_mb: Optimized model size in MB
+        compression_ratio: Size reduction ratio
+        original_latency_ms: Original inference latency
+        optimized_latency_ms: Optimized inference latency
+        speedup: Latency improvement ratio
+        accuracy_drop: Drop in accuracy percentage
+    """
+    technique: str
+    original_size_mb: float
+    optimized_size_mb: float
+    compression_ratio: float
+    original_latency_ms: float
+    optimized_latency_ms: float
+    speedup: float
+    accuracy_drop: float
+
+class ModelOptimizer:
+    """
+    Comprehensive model optimization framework.
+
+    Supports quantization, pruning, knowledge distillation, and conversion
+    to optimized formats (ONNX, TensorRT).
+
+    Example:
+        >>> optimizer = ModelOptimizer()
+        >>> optimized_model = optimizer.quantize(model, X_calibration)
+        >>> result = optimizer.benchmark(model, optimized_model, X_test)
+        >>> print(f"Speedup: {result.speedup:.2f}x")
+    """
+
+    def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        """
+        Initialize optimizer.
+
+        Args:
+            device: Device for optimization (cuda/cpu)
+        """
+        self.device = device
+        logger.info(f"Initialized ModelOptimizer on {device}")
+
+    def quantize(
+        self,
+        model: nn.Module,
+        calibration_data: Optional[torch.Tensor] = None,
+        method: str = "dynamic"
+    ) -> nn.Module:
+        """
+        Quantize model to reduce size and improve inference speed.
+
+        Quantization converts float32 weights to int8, reducing model size
+        by ~4x with minimal accuracy loss.
+
+        Args:
+            model: PyTorch model to quantize
+            calibration_data: Data for static quantization
+            method: "dynamic" or "static" quantization
+
+        Returns:
+            Quantized model
+        """
+        logger.info(f"Applying {method} quantization")
+
+        model.eval()
+
+        if method == "dynamic":
+            # Dynamic quantization (no calibration needed)
+            quantized_model = quantize_dynamic(
+                model,
+                {nn.Linear, nn.LSTM, nn.GRU},
+                dtype=torch.qint8
+            )
+
+        elif method == "static":
+            if calibration_data is None:
+                raise ValueError("Static quantization requires calibration data")
+
+            # Static quantization
+            model.qconfig = torch.quantization.get_default_qconfig('fbgemm')
+            torch.quantization.prepare(model, inplace=True)
+
+            # Calibrate
+            with torch.no_grad():
+                model(calibration_data)
+
+            quantized_model = torch.quantization.convert(model, inplace=False)
+
+        else:
+            raise ValueError(f"Unknown quantization method: {method}")
+
+        logger.info("Quantization complete")
+        return quantized_model
+
+    def prune(
+        self,
+        model: nn.Module,
+        pruning_ratio: float = 0.5,
+        method: str = "magnitude"
+    ) -> nn.Module:
+        """
+        Prune model by removing least important weights.
+
+        Pruning reduces model size and can improve inference speed.
+
+        Args:
+            model: Model to prune
+            pruning_ratio: Fraction of weights to remove (0-1)
+            method: Pruning method ("magnitude", "random", "structured")
+
+        Returns:
+            Pruned model
+        """
+        import torch.nn.utils.prune as prune
+
+        logger.info(f"Pruning {pruning_ratio:.1%} of weights using {method}")
+
+        parameters_to_prune = []
+
+        # Collect all linear and convolutional layers
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                parameters_to_prune.append((module, 'weight'))
+
+        if method == "magnitude":
+            # L1 unstructured pruning
+            prune.global_unstructured(
+                parameters_to_prune,
+                pruning_method=prune.L1Unstructured,
+                amount=pruning_ratio
+            )
+
+        elif method == "random":
+            # Random unstructured pruning
+            prune.global_unstructured(
+                parameters_to_prune,
+                pruning_method=prune.RandomUnstructured,
+                amount=pruning_ratio
+            )
+
+        elif method == "structured":
+            # Structured pruning (removes entire filters/neurons)
+            for module, param_name in parameters_to_prune:
+                prune.ln_structured(
+                    module,
+                    name=param_name,
+                    amount=pruning_ratio,
+                    n=2,
+                    dim=0
+                )
+
+        # Make pruning permanent
+        for module, param_name in parameters_to_prune:
+            prune.remove(module, param_name)
+
+        logger.info("Pruning complete")
+        return model
+
+    def distill(
+        self,
+        teacher_model: nn.Module,
+        student_model: nn.Module,
+        train_loader: torch.utils.data.DataLoader,
+        epochs: int = 10,
+        temperature: float = 3.0,
+        alpha: float = 0.5
+    ) -> nn.Module:
+        """
+        Knowledge distillation: train small student model from large teacher.
+
+        Student learns to mimic teacher's soft predictions, often achieving
+        similar accuracy with much smaller size.
+
+        Args:
+            teacher_model: Large pre-trained model
+            student_model: Smaller model to train
+            train_loader: Training data
+            epochs: Number of training epochs
+            temperature: Softmax temperature for distillation
+            alpha: Weight between hard and soft targets
+
+        Returns:
+            Trained student model
+        """
+        logger.info("Starting knowledge distillation")
+
+        teacher_model.eval()
+        student_model.train()
+
+        optimizer = torch.optim.Adam(student_model.parameters(), lr=0.001)
+        criterion_hard = nn.CrossEntropyLoss()
+        criterion_soft = nn.KLDivLoss(reduction='batchmean')
+
+        for epoch in range(epochs):
+            total_loss = 0
+
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(self.device), target.to(self.device)
+
+                optimizer.zero_grad()
+
+                # Student predictions
+                student_output = student_model(data)
+
+                # Teacher predictions (soft targets)
+                with torch.no_grad():
+                    teacher_output = teacher_model(data)
+
+                # Soft targets with temperature
+                soft_targets = nn.functional.softmax(
+                    teacher_output / temperature,
+                    dim=1
+                )
+
+                soft_prob = nn.functional.log_softmax(
+                    student_output / temperature,
+                    dim=1
+                )
+
+                # Combined loss
+                loss_soft = criterion_soft(soft_prob, soft_targets) * (temperature ** 2)
+                loss_hard = criterion_hard(student_output, target)
+
+                loss = alpha * loss_soft + (1 - alpha) * loss_hard
+
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(train_loader)
+            logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+
+        logger.info("Distillation complete")
+        return student_model
+
+    def convert_to_onnx(
+        self,
+        model: nn.Module,
+        input_shape: Tuple[int, ...],
+        output_path: str,
+        opset_version: int = 13
+    ):
+        """
+        Convert PyTorch model to ONNX format.
+
+        ONNX enables deployment on various platforms with optimized runtimes.
+
+        Args:
+            model: PyTorch model
+            input_shape: Example input shape
+            output_path: Path to save ONNX model
+            opset_version: ONNX opset version
+        """
+        logger.info(f"Converting to ONNX (opset {opset_version})")
+
+        model.eval()
+
+        # Create dummy input
+        dummy_input = torch.randn(input_shape).to(self.device)
+
+        # Export to ONNX
+        torch.onnx.export(
+            model,
+            dummy_input,
+            output_path,
+            export_params=True,
+            opset_version=opset_version,
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={
+                'input': {0: 'batch_size'},
+                'output': {0: 'batch_size'}
+            }
+        )
+
+        logger.info(f"ONNX model saved to {output_path}")
+
+    def benchmark(
+        self,
+        original_model: nn.Module,
+        optimized_model: nn.Module,
+        test_data: torch.Tensor,
+        test_labels: torch.Tensor,
+        num_runs: int = 100
+    ) -> OptimizationResult:
+        """
+        Benchmark original vs optimized model.
+
+        Args:
+            original_model: Original model
+            optimized_model: Optimized model
+            test_data: Test data for accuracy
+            test_labels: Test labels
+            num_runs: Number of inference runs for latency
+
+        Returns:
+            Optimization results
+        """
+        import time
+
+        logger.info("Benchmarking models")
+
+        # Model sizes
+        original_size = self._get_model_size(original_model)
+        optimized_size = self._get_model_size(optimized_model)
+
+        # Latency benchmarking
+        original_model.eval()
+        optimized_model.eval()
+
+        # Warmup
+        with torch.no_grad():
+            for _ in range(10):
+                original_model(test_data[:1])
+                optimized_model(test_data[:1])
+
+        # Original latency
+        start = time.time()
+        with torch.no_grad():
+            for _ in range(num_runs):
+                original_model(test_data[:1])
+        original_latency = (time.time() - start) / num_runs * 1000  # ms
+
+        # Optimized latency
+        start = time.time()
+        with torch.no_grad():
+            for _ in range(num_runs):
+                optimized_model(test_data[:1])
+        optimized_latency = (time.time() - start) / num_runs * 1000  # ms
+
+        # Accuracy
+        with torch.no_grad():
+            original_pred = original_model(test_data).argmax(dim=1)
+            optimized_pred = optimized_model(test_data).argmax(dim=1)
+
+        original_acc = (original_pred == test_labels).float().mean().item()
+        optimized_acc = (optimized_pred == test_labels).float().mean().item()
+
+        result = OptimizationResult(
+            technique="optimization",
+            original_size_mb=original_size,
+            optimized_size_mb=optimized_size,
+            compression_ratio=original_size / optimized_size,
+            original_latency_ms=original_latency,
+            optimized_latency_ms=optimized_latency,
+            speedup=original_latency / optimized_latency,
+            accuracy_drop=(original_acc - optimized_acc) * 100
+        )
+
+        logger.info(
+            f"Compression: {result.compression_ratio:.2f}x, "
+            f"Speedup: {result.speedup:.2f}x, "
+            f"Accuracy drop: {result.accuracy_drop:.2f}%"
+        )
+
+        return result
+
+    def _get_model_size(self, model: nn.Module) -> float:
+        """
+        Calculate model size in MB.
+
+        Args:
+            model: PyTorch model
+
+        Returns:
+            Model size in MB
+        """
+        param_size = 0
+        buffer_size = 0
+
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+
+        size_mb = (param_size + buffer_size) / 1024 / 1024
+
+        return size_mb
+\end{lstlisting}
+
+\subsection{Optimization Techniques in Practice}
+
+\begin{lstlisting}[language=Python, caption={Applying Model Optimizations}]
+import torch
+import torch.nn as nn
+
+# Load trained model
+model = load_model("recommendation_model.pth")
+model.eval()
+
+# Initialize optimizer
+optimizer = ModelOptimizer(device="cuda")
+
+# 1. Quantization (4x size reduction, 2-3x speedup)
+quantized_model = optimizer.quantize(
+    model,
+    calibration_data=calibration_data,
+    method="static"
+)
+
+result_quant = optimizer.benchmark(
+    original_model=model,
+    optimized_model=quantized_model,
+    test_data=test_data,
+    test_labels=test_labels
+)
+
+print(f"Quantization Results:")
+print(f"  Size: {result_quant.original_size_mb:.1f}MB -> "
+      f"{result_quant.optimized_size_mb:.1f}MB "
+      f"({result_quant.compression_ratio:.2f}x)")
+print(f"  Latency: {result_quant.original_latency_ms:.2f}ms -> "
+      f"{result_quant.optimized_latency_ms:.2f}ms "
+      f"({result_quant.speedup:.2f}x)")
+print(f"  Accuracy drop: {result_quant.accuracy_drop:.2f}%")
+
+# 2. Pruning (2x size reduction, 1.5-2x speedup)
+pruned_model = optimizer.prune(
+    model,
+    pruning_ratio=0.5,
+    method="magnitude"
+)
+
+# Fine-tune after pruning
+pruned_model = fine_tune(pruned_model, train_loader, epochs=3)
+
+result_prune = optimizer.benchmark(
+    original_model=model,
+    optimized_model=pruned_model,
+    test_data=test_data,
+    test_labels=test_labels
+)
+
+# 3. Knowledge Distillation (5-10x size reduction)
+# Create smaller student model
+student_model = create_student_model(
+    hidden_size=128,  # vs 512 in teacher
+    num_layers=2      # vs 6 in teacher
+)
+
+distilled_model = optimizer.distill(
+    teacher_model=model,
+    student_model=student_model,
+    train_loader=train_loader,
+    epochs=10,
+    temperature=3.0,
+    alpha=0.7
+)
+
+result_distill = optimizer.benchmark(
+    original_model=model,
+    optimized_model=distilled_model,
+    test_data=test_data,
+    test_labels=test_labels
+)
+
+# 4. Combined: Quantize + Prune
+pruned_quantized = optimizer.prune(model, pruning_ratio=0.3)
+pruned_quantized = optimizer.quantize(pruned_quantized, calibration_data)
+
+result_combined = optimizer.benchmark(
+    original_model=model,
+    optimized_model=pruned_quantized,
+    test_data=test_data,
+    test_labels=test_labels
+)
+
+# 5. Convert to ONNX for deployment
+optimizer.convert_to_onnx(
+    model=quantized_model,
+    input_shape=(1, input_dim),
+    output_path="models/optimized_model.onnx"
+)
+
+# Compare all techniques
+techniques = ["Quantization", "Pruning", "Distillation", "Combined"]
+results = [result_quant, result_prune, result_distill, result_combined]
+
+print("\nOptimization Summary:")
+print(f"{'Technique':<15} {'Compression':<12} {'Speedup':<10} {'Acc Drop':<10}")
+print("-" * 50)
+
+for tech, res in zip(techniques, results):
+    print(f"{tech:<15} {res.compression_ratio:<12.2f}x "
+          f"{res.speedup:<10.2f}x {res.accuracy_drop:<10.2f}%")
+
+# Select best technique based on requirements
+if latency_requirement < 50:  # ms
+    # Use distillation for maximum speedup
+    deployment_model = distilled_model
+elif size_requirement < 100:  # MB
+    # Use quantization for size reduction
+    deployment_model = quantized_model
+else:
+    # Use combined for balance
+    deployment_model = pruned_quantized
+
+logger.info(f"Selected optimization: {deployment_model}")
+\end{lstlisting}
+
+\section{Distributed Training}
+
+Distributed training enables training large models on multiple GPUs or machines.
+
+\subsection{DistributedTrainer: Data and Model Parallelism}
+
+\begin{lstlisting}[language=Python, caption={Distributed Training Framework}]
+from typing import Dict, List, Optional, Any
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ParallelismStrategy(Enum):
+    """Distributed training strategies."""
+    DATA_PARALLEL = "data_parallel"
+    MODEL_PARALLEL = "model_parallel"
+    PIPELINE_PARALLEL = "pipeline_parallel"
+    MIXED = "mixed"
+
+class DistributedTrainer:
+    """
+    Distributed training framework for large-scale model training.
+
+    Supports data parallelism, model parallelism, and mixed precision.
+
+    Example:
+        >>> trainer = DistributedTrainer(
+        ...     model=model,
+        ...     strategy=ParallelismStrategy.DATA_PARALLEL,
+        ...     num_gpus=8
+        ... )
+        >>> trainer.train(train_loader, epochs=10)
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        strategy: ParallelismStrategy,
+        num_gpus: int = torch.cuda.device_count(),
+        backend: str = "nccl",
+        use_mixed_precision: bool = True
+    ):
+        """
+        Initialize distributed trainer.
+
+        Args:
+            model: Model to train
+            strategy: Parallelism strategy
+            num_gpus: Number of GPUs to use
+            backend: Distributed backend (nccl, gloo, mpi)
+            use_mixed_precision: Use mixed precision (FP16)
+        """
+        self.model = model
+        self.strategy = strategy
+        self.num_gpus = num_gpus
+        self.backend = backend
+        self.use_mixed_precision = use_mixed_precision
+
+        # Initialize distributed training
+        self._setup_distributed()
+
+        # Wrap model for distributed training
+        self._wrap_model()
+
+        # Mixed precision scaler
+        self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
+
+        logger.info(
+            f"Initialized DistributedTrainer: "
+            f"strategy={strategy.value}, gpus={num_gpus}, "
+            f"mixed_precision={use_mixed_precision}"
+        )
+
+    def _setup_distributed(self):
+        """Initialize distributed training environment."""
+        if not dist.is_initialized():
+            # Initialize process group
+            dist.init_process_group(
+                backend=self.backend,
+                init_method='env://'
+            )
+
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+        # Set device
+        torch.cuda.set_device(self.local_rank)
+        self.device = torch.device(f"cuda:{self.local_rank}")
+
+        logger.info(
+            f"Process initialized: rank={self.rank}, "
+            f"world_size={self.world_size}, device={self.device}"
+        )
+
+    def _wrap_model(self):
+        """Wrap model for distributed training."""
+        # Move model to device
+        self.model = self.model.to(self.device)
+
+        if self.strategy == ParallelismStrategy.DATA_PARALLEL:
+            # Data parallelism
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank
+            )
+
+        elif self.strategy == ParallelismStrategy.MODEL_PARALLEL:
+            # Model parallelism (manual implementation needed)
+            # Split model across GPUs
+            self._apply_model_parallelism()
+
+        logger.info(f"Model wrapped for {self.strategy.value}")
+
+    def _apply_model_parallelism(self):
+        """
+        Apply model parallelism by splitting model across GPUs.
+
+        This is a simplified example. Production implementations
+        would use libraries like Megatron-LM or DeepSpeed.
+        """
+        # Example: Split transformer layers across GPUs
+        if hasattr(self.model, 'layers'):
+            layers_per_gpu = len(self.model.layers) // self.num_gpus
+
+            for i, layer in enumerate(self.model.layers):
+                gpu_id = i // layers_per_gpu
+                layer.to(f"cuda:{gpu_id}")
+
+    def create_distributed_dataloader(
+        self,
+        dataset: torch.utils.data.Dataset,
+        batch_size: int,
+        shuffle: bool = True
+    ) -> DataLoader:
+        """
+        Create dataloader with distributed sampler.
+
+        Args:
+            dataset: Training dataset
+            batch_size: Batch size per GPU
+            shuffle: Whether to shuffle data
+
+        Returns:
+            DataLoader with distributed sampler
+        """
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=self.world_size,
+            rank=self.rank,
+            shuffle=shuffle
+        )
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        return dataloader
+
+    def train(
+        self,
+        train_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        criterion: nn.Module,
+        epochs: int,
+        gradient_accumulation_steps: int = 1
+    ):
+        """
+        Train model in distributed fashion.
+
+        Args:
+            train_loader: Training data loader
+            optimizer: Optimizer
+            criterion: Loss function
+            epochs: Number of epochs
+            gradient_accumulation_steps: Steps before optimizer update
+        """
+        self.model.train()
+
+        for epoch in range(epochs):
+            # Set epoch for distributed sampler
+            if hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+
+            total_loss = 0
+            optimizer.zero_grad()
+
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(self.device), target.to(self.device)
+
+                # Mixed precision training
+                if self.use_mixed_precision:
+                    with torch.cuda.amp.autocast():
+                        output = self.model(data)
+                        loss = criterion(output, target)
+                        loss = loss / gradient_accumulation_steps
+
+                    # Scale loss and backward
+                    self.scaler.scale(loss).backward()
+
+                    # Update weights
+                    if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                        self.scaler.step(optimizer)
+                        self.scaler.update()
+                        optimizer.zero_grad()
+
+                else:
+                    # Standard training
+                    output = self.model(data)
+                    loss = criterion(output, target)
+                    loss = loss / gradient_accumulation_steps
+
+                    loss.backward()
+
+                    if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                        optimizer.step()
+                        optimizer.zero_grad()
+
+                total_loss += loss.item() * gradient_accumulation_steps
+
+                # Log progress
+                if self.rank == 0 and batch_idx % 100 == 0:
+                    logger.info(
+                        f"Epoch {epoch+1}/{epochs}, "
+                        f"Batch {batch_idx}/{len(train_loader)}, "
+                        f"Loss: {loss.item():.4f}"
+                    )
+
+            # Synchronize loss across processes
+            avg_loss = self._reduce_value(total_loss / len(train_loader))
+
+            if self.rank == 0:
+                logger.info(
+                    f"Epoch {epoch+1} completed. Avg Loss: {avg_loss:.4f}"
+                )
+
+    def _reduce_value(self, value: float) -> float:
+        """
+        Reduce value across all processes (average).
+
+        Args:
+            value: Value to reduce
+
+        Returns:
+            Reduced value
+        """
+        tensor = torch.tensor(value).to(self.device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return tensor.item() / self.world_size
+
+    def save_checkpoint(self, path: str, epoch: int, optimizer: torch.optim.Optimizer):
+        """
+        Save training checkpoint.
+
+        Args:
+            path: Path to save checkpoint
+            epoch: Current epoch
+            optimizer: Optimizer state
+        """
+        if self.rank == 0:  # Only save from rank 0
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict()
+            }
+
+            torch.save(checkpoint, path)
+            logger.info(f"Checkpoint saved to {path}")
+
+    def cleanup(self):
+        """Clean up distributed training."""
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+# Launch script for distributed training
+def launch_distributed_training():
+    """
+    Launch distributed training across multiple GPUs.
+
+    Example usage:
+        python -m torch.distributed.launch \\
+            --nproc_per_node=8 \\
+            train_distributed.py
+    """
+    # Initialize trainer
+    model = create_model()
+
+    trainer = DistributedTrainer(
+        model=model,
+        strategy=ParallelismStrategy.DATA_PARALLEL,
+        num_gpus=8,
+        use_mixed_precision=True
+    )
+
+    # Create distributed dataloader
+    train_loader = trainer.create_distributed_dataloader(
+        dataset=train_dataset,
+        batch_size=64,  # Per GPU
+        shuffle=True
+    )
+
+    # Train
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+
+    trainer.train(
+        train_loader=train_loader,
+        optimizer=optimizer,
+        criterion=criterion,
+        epochs=10,
+        gradient_accumulation_steps=4
+    )
+
+    # Save final model
+    trainer.save_checkpoint("checkpoints/final_model.pth", epoch=10, optimizer=optimizer)
+
+    # Cleanup
+    trainer.cleanup()
+
+if __name__ == "__main__":
+    launch_distributed_training()
+\end{lstlisting}
+
+\section{Edge Deployment and Resource Optimization}
+
+Edge deployment requires aggressive optimization for mobile and IoT devices.
+
+\subsection{EdgeDeployer: Resource-Constrained Optimization}
+
+\begin{lstlisting}[language=Python, caption={Edge Deployment Framework}]
+from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class EdgeConstraints:
+    """
+    Resource constraints for edge devices.
+
+    Attributes:
+        max_model_size_mb: Maximum model size
+        max_memory_mb: Maximum runtime memory
+        max_latency_ms: Maximum inference latency
+        target_device: Target device type
+    """
+    max_model_size_mb: float
+    max_memory_mb: float
+    max_latency_ms: float
+    target_device: str  # "mobile", "iot", "wearable"
+
+class EdgeDeployer:
+    """
+    Deploy ML models to edge devices with resource constraints.
+
+    Applies aggressive optimizations to meet device constraints.
+
+    Example:
+        >>> constraints = EdgeConstraints(
+        ...     max_model_size_mb=10,
+        ...     max_memory_mb=50,
+        ...     max_latency_ms=50,
+        ...     target_device="mobile"
+        ... )
+        >>> deployer = EdgeDeployer(constraints)
+        >>> optimized = deployer.optimize_for_edge(model)
+    """
+
+    def __init__(self, constraints: EdgeConstraints):
+        """
+        Initialize edge deployer.
+
+        Args:
+            constraints: Resource constraints
+        """
+        self.constraints = constraints
+        logger.info(f"Initialized EdgeDeployer for {constraints.target_device}")
+
+    def optimize_for_edge(
+        self,
+        model: nn.Module,
+        calibration_data: torch.Tensor
+    ) -> nn.Module:
+        """
+        Optimize model for edge deployment.
+
+        Applies multiple optimizations to meet constraints.
+
+        Args:
+            model: Model to optimize
+            calibration_data: Calibration data
+
+        Returns:
+            Optimized model
+        """
+        logger.info("Optimizing model for edge deployment")
+
+        optimizer = ModelOptimizer()
+
+        # 1. Quantization (required for edge)
+        model = optimizer.quantize(
+            model,
+            calibration_data=calibration_data,
+            method="static"
+        )
+
+        # 2. Pruning if size still too large
+        model_size = optimizer._get_model_size(model)
+
+        if model_size > self.constraints.max_model_size_mb:
+            # Calculate required pruning ratio
+            target_ratio = self.constraints.max_model_size_mb / model_size
+            pruning_ratio = 1 - target_ratio
+
+            logger.info(f"Pruning {pruning_ratio:.1%} to meet size constraint")
+
+            model = optimizer.prune(
+                model,
+                pruning_ratio=pruning_ratio,
+                method="structured"  # Structured pruning better for edge
+            )
+
+        # 3. Convert to mobile-optimized format
+        if self.constraints.target_device == "mobile":
+            self._convert_to_mobile(model)
+
+        logger.info("Edge optimization complete")
+        return model
+
+    def _convert_to_mobile(self, model: nn.Module):
+        """
+        Convert to TorchScript Mobile format.
+
+        Args:
+            model: Model to convert
+        """
+        # Trace model
+        example_input = torch.randn(1, model.input_size)
+        traced_model = torch.jit.trace(model, example_input)
+
+        # Optimize for mobile
+        from torch.utils.mobile_optimizer import optimize_for_mobile
+        optimized_model = optimize_for_mobile(traced_model)
+
+        # Save
+        optimized_model._save_for_lite_interpreter("model_mobile.ptl")
+
+        logger.info("Converted to TorchScript Mobile format")
+
+    def validate_constraints(
+        self,
+        model: nn.Module,
+        test_data: torch.Tensor
+    ) -> Dict[str, bool]:
+        """
+        Validate model meets edge constraints.
+
+        Args:
+            model: Model to validate
+            test_data: Test data for latency measurement
+
+        Returns:
+            Dictionary of constraint validation results
+        """
+        import time
+
+        results = {}
+
+        # Check model size
+        optimizer = ModelOptimizer()
+        model_size = optimizer._get_model_size(model)
+        results['size_ok'] = model_size <= self.constraints.max_model_size_mb
+
+        # Check inference latency
+        model.eval()
+        with torch.no_grad():
+            # Warmup
+            for _ in range(10):
+                model(test_data[:1])
+
+            # Measure
+            start = time.time()
+            for _ in range(100):
+                model(test_data[:1])
+            latency_ms = (time.time() - start) / 100 * 1000
+
+        results['latency_ok'] = latency_ms <= self.constraints.max_latency_ms
+
+        # Log results
+        logger.info(f"Size: {model_size:.1f}MB (limit: {self.constraints.max_model_size_mb}MB)")
+        logger.info(f"Latency: {latency_ms:.1f}ms (limit: {self.constraints.max_latency_ms}ms)")
+
+        all_ok = all(results.values())
+        results['all_constraints_met'] = all_ok
+
+        return results
+\end{lstlisting}
+
+\section{Real-World Scenario: Scaling Recommendation System}
+
+\subsection{The Problem}
+
+A video streaming platform's recommendation system faced critical scaling challenges:
+
+\textbf{Initial System}:
+\begin{itemize}
+    \item 500M parameter neural network
+    \item 10M daily active users
+    \item 300ms p95 latency
+    \item 2GB memory per instance
+    \item Cost: \$12,000/month for 100 instances
+\end{itemize}
+
+\textbf{Business Requirements}:
+\begin{itemize}
+    \item Scale to 20M daily users
+    \item Sub-100ms p95 latency
+    \item Budget: \$25,000/month maximum
+\end{itemize}
+
+\textbf{Challenges}:
+\begin{itemize}
+    \item Naive scaling would require 200 instances = \$240,000/month
+    \item Peak load 3x average (60M concurrent requests)
+    \item Cold start latency 2 seconds (unacceptable)
+    \item User experience degrades >100ms latency
+\end{itemize}
+
+\subsection{The Solution}
+
+Complete optimization and scaling strategy:
+
+\begin{lstlisting}[language=Python, caption={Production Optimization Pipeline}]
+# 1. Model Optimization
+logger.info("Phase 1: Model Optimization")
+
+# Original model: 500M parameters, 2GB, 300ms latency
+original_model = load_model("recommendation_model_v1.pth")
+
+# Benchmark original
+print("Original Model:")
+print(f"  Size: {get_model_size(original_model):.1f}MB")
+print(f"  Latency: {benchmark_latency(original_model):.1f}ms")
+
+# a) Knowledge Distillation: 500M -> 50M parameters
+logger.info("Distilling to smaller model")
+
+student_model = create_student_model(
+    embedding_dim=128,    # vs 512 in teacher
+    hidden_dim=256,       # vs 1024 in teacher
+    num_layers=2          # vs 6 in teacher
+)
+
+optimizer = ModelOptimizer()
+distilled_model = optimizer.distill(
+    teacher_model=original_model,
+    student_model=student_model,
+    train_loader=train_loader,
+    epochs=15,
+    temperature=4.0,
+    alpha=0.8
+)
+
+# Result: 10x smaller, 5x faster, 1% accuracy drop
+print("\nAfter Distillation:")
+print(f"  Size: {get_model_size(distilled_model):.1f}MB")  # 200MB
+print(f"  Latency: {benchmark_latency(distilled_model):.1f}ms")  # 60ms
+print(f"  Accuracy drop: 1.2%")
+
+# b) Quantization: 200MB -> 50MB
+logger.info("Applying quantization")
+
+quantized_model = optimizer.quantize(
+    distilled_model,
+    calibration_data=calibration_data,
+    method="static"
+)
+
+print("\nAfter Quantization:")
+print(f"  Size: {get_model_size(quantized_model):.1f}MB")  # 50MB
+print(f"  Latency: {benchmark_latency(quantized_model):.1f}ms")  # 35ms
+print(f"  Additional accuracy drop: 0.3%")
+
+# Total: 40x smaller, 8x faster, 1.5% accuracy drop
+
+# 2. Caching Strategy
+logger.info("Phase 2: Implementing Caching")
+
+class RecommendationCache:
+    """Intelligent caching for recommendations."""
+
+    def __init__(self, cache_size: int = 100000):
+        from cachetools import LRUCache
+        self.cache = LRUCache(maxsize=cache_size)
+        self.hit_count = 0
+        self.miss_count = 0
+
+    def get(self, user_id: str, context: Dict) -> Optional[List]:
+        """Get cached recommendations."""
+        cache_key = self._make_key(user_id, context)
+
+        if cache_key in self.cache:
+            self.hit_count += 1
+            return self.cache[cache_key]
+
+        self.miss_count += 1
+        return None
+
+    def put(self, user_id: str, context: Dict, recommendations: List):
+        """Cache recommendations."""
+        cache_key = self._make_key(user_id, context)
+        self.cache[cache_key] = recommendations
+
+    def _make_key(self, user_id: str, context: Dict) -> str:
+        """Generate cache key."""
+        # Include user_id and context (time of day, device, etc.)
+        return f"{user_id}:{context['hour']}:{context['device']}"
+
+    @property
+    def hit_rate(self) -> float:
+        """Calculate cache hit rate."""
+        total = self.hit_count + self.miss_count
+        return self.hit_count / total if total > 0 else 0
+
+# Initialize cache
+cache = RecommendationCache(cache_size=100000)
+
+# Serve with caching
+def serve_recommendations(user_id: str, context: Dict) -> List:
+    """Serve recommendations with caching."""
+    # Check cache
+    cached = cache.get(user_id, context)
+    if cached is not None:
+        return cached
+
+    # Generate recommendations
+    user_features = get_user_features(user_id)
+    recommendations = quantized_model.predict(user_features)
+
+    # Cache for 1 hour
+    cache.put(user_id, context, recommendations)
+
+    return recommendations
+
+# Result: 70% cache hit rate -> 70% reduction in inference calls
+
+# 3. Auto-Scaling
+logger.info("Phase 3: Implementing Auto-Scaling")
+
+class LoadPredictor:
+    """Predict future load for proactive scaling."""
+
+    def __init__(self):
+        from sklearn.ensemble import GradientBoostingRegressor
+        self.model = GradientBoostingRegressor()
+        self.history = deque(maxlen=1000)
+
+    def train(self, historical_data: pd.DataFrame):
+        """Train on historical load patterns."""
+        # Features: hour, day_of_week, is_weekend, recent_load
+        X = historical_data[['hour', 'day_of_week', 'is_weekend', 'recent_load']]
+        y = historical_data['requests_per_minute']
+
+        self.model.fit(X, y)
+
+    def predict(self, current_time: datetime) -> float:
+        """Predict load for next 5 minutes."""
+        features = {
+            'hour': current_time.hour,
+            'day_of_week': current_time.weekday(),
+            'is_weekend': current_time.weekday() >= 5,
+            'recent_load': np.mean(list(self.history)[-10:])
+        }
+
+        X = pd.DataFrame([features])
+        predicted_load = self.model.predict(X)[0]
+
+        return predicted_load
+
+class AutoScaler:
+    """Automatic scaling based on load prediction."""
+
+    def __init__(
+        self,
+        min_instances: int = 10,
+        max_instances: int = 100,
+        target_utilization: float = 0.7
+    ):
+        self.min_instances = min_instances
+        self.max_instances = max_instances
+        self.target_utilization = target_utilization
+        self.predictor = LoadPredictor()
+
+    def scale(self, current_load: float, current_instances: int) -> int:
+        """Determine target instance count."""
+        # Predict load 5 minutes ahead
+        predicted_load = self.predictor.predict(datetime.now())
+
+        # Calculate required instances
+        capacity_per_instance = 1000  # requests per minute
+        required_instances = predicted_load / (capacity_per_instance * self.target_utilization)
+
+        # Round up and clamp
+        target_instances = int(np.ceil(required_instances))
+        target_instances = max(self.min_instances, min(target_instances, self.max_instances))
+
+        # Smooth scaling (don't change by more than 30% at once)
+        max_change = int(current_instances * 0.3)
+        if target_instances > current_instances:
+            target_instances = min(target_instances, current_instances + max_change)
+        elif target_instances < current_instances:
+            target_instances = max(target_instances, current_instances - max_change)
+
+        logger.info(
+            f"Scaling: {current_instances} -> {target_instances} instances "
+            f"(predicted load: {predicted_load:.0f} req/min)"
+        )
+
+        return target_instances
+
+# Initialize auto-scaler
+scaler = AutoScaler(
+    min_instances=10,
+    max_instances=50,
+    target_utilization=0.7
+)
+
+# Proactive scaling loop
+def scaling_loop():
+    """Continuous scaling based on predictions."""
+    while True:
+        current_load = get_current_load()
+        current_instances = get_instance_count()
+
+        target_instances = scaler.scale(current_load, current_instances)
+
+        if target_instances != current_instances:
+            update_instance_count(target_instances)
+
+        time.sleep(60)  # Check every minute
+
+# 4. Performance Monitoring
+logger.info("Phase 4: Performance Monitoring")
+
+class PerformanceMonitor:
+    """Monitor system performance metrics."""
+
+    def __init__(self):
+        self.metrics = {
+            'latency_p50': deque(maxlen=1000),
+            'latency_p95': deque(maxlen=1000),
+            'latency_p99': deque(maxlen=1000),
+            'throughput': deque(maxlen=1000),
+            'cache_hit_rate': deque(maxlen=1000),
+            'error_rate': deque(maxlen=1000)
+        }
+
+    def record(self, metrics: Dict):
+        """Record metrics."""
+        for key, value in metrics.items():
+            if key in self.metrics:
+                self.metrics[key].append(value)
+
+    def get_summary(self) -> Dict:
+        """Get performance summary."""
+        summary = {}
+
+        for metric_name, values in self.metrics.items():
+            if values:
+                summary[metric_name] = {
+                    'current': values[-1],
+                    'mean': np.mean(values),
+                    'p95': np.percentile(values, 95),
+                    'p99': np.percentile(values, 99)
+                }
+
+        return summary
+
+monitor = PerformanceMonitor()
+
+# Record metrics every second
+def monitoring_loop():
+    """Continuous performance monitoring."""
+    while True:
+        metrics = {
+            'latency_p95': measure_latency_p95(),
+            'throughput': measure_throughput(),
+            'cache_hit_rate': cache.hit_rate,
+            'error_rate': measure_error_rate()
+        }
+
+        monitor.record(metrics)
+
+        # Alert if SLO violated
+        if metrics['latency_p95'] > 100:  # ms
+            alert("Latency SLO violated", metrics)
+
+        time.sleep(1)
+\end{lstlisting}
+
+\subsection{Outcome}
+
+With complete optimization and scaling:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Before} & \textbf{After} \\
+\midrule
+Model Size & 2GB & 50MB (40x reduction) \\
+Latency (p95) & 300ms & 35ms (8.6x faster) \\
+Cache Hit Rate & 0\% & 70\% \\
+Instances (avg) & 100 & 15 \\
+Instances (peak) & 100 & 30 \\
+Cost & \$12K/month & \$4.5K/month \\
+Supported Users & 10M & 25M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Business Impact}:
+\begin{itemize}
+    \item 2.5x user growth supported
+    \item 62\% cost reduction
+    \item 88\% latency reduction
+    \item 99.9\% availability maintained
+    \item 1.5\% accuracy trade-off (acceptable)
+\end{itemize}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Model Compression Pipeline}
+
+Build a complete model compression pipeline:
+\begin{itemize}
+    \item Apply quantization, pruning, and distillation
+    \item Measure accuracy-latency-size trade-offs
+    \item Create Pareto frontier of optimizations
+    \item Recommend best configuration for different scenarios
+    \item Validate on multiple model architectures
+\end{itemize}
+
+\subsection{Exercise 2: Distributed Training at Scale}
+
+Implement distributed training for large model:
+\begin{itemize}
+    \item Set up data parallelism across 8 GPUs
+    \item Implement gradient accumulation
+    \item Add mixed precision training
+    \item Measure training speedup vs single GPU
+    \item Optimize for maximum GPU utilization
+\end{itemize}
+
+\subsection{Exercise 3: Edge Deployment Pipeline}
+
+Deploy model to mobile device:
+\begin{itemize}
+    \item Apply aggressive optimizations (quantization + pruning)
+    \item Convert to TorchScript Mobile or TFLite
+    \item Validate constraints (size < 10MB, latency < 50ms)
+    \item Measure on-device performance
+    \item Compare accuracy on edge vs server
+\end{itemize}
+
+\subsection{Exercise 4: Intelligent Caching System}
+
+Build adaptive caching system:
+\begin{itemize}
+    \item Implement LRU and LFU caching strategies
+    \item Add time-based cache invalidation
+    \item Prefetch based on user behavior patterns
+    \item Measure cache hit rate and latency reduction
+    \item Handle cache stampede scenarios
+\end{itemize}
+
+\subsection{Exercise 5: Predictive Auto-Scaling}
+
+Create predictive auto-scaling system:
+\begin{itemize}
+    \item Train load prediction model on historical data
+    \item Implement proactive scaling (5 minutes ahead)
+    \item Add cost-optimization constraints
+    \item Simulate varying load patterns
+    \item Measure cost savings vs reactive scaling
+\end{itemize}
+
+\subsection{Exercise 6: Performance Benchmarking Suite}
+
+Build comprehensive benchmarking:
+\begin{itemize}
+    \item Measure latency (p50, p95, p99, p999)
+    \item Profile GPU/CPU utilization
+    \item Track memory usage over time
+    \item Identify bottlenecks with profiling
+    \item Generate performance reports
+\end{itemize}
+
+\subsection{Exercise 7: End-to-End Optimization}
+
+Optimize complete ML system:
+\begin{itemize}
+    \item Start with baseline system (model + serving)
+    \item Apply model optimizations
+    \item Add caching layer
+    \item Implement load balancing
+    \item Set up auto-scaling
+    \item Measure overall improvement in cost, latency, throughput
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+    \item \textbf{Model Size Matters}: Quantization and distillation reduce size 4-10x with minimal accuracy loss
+    \item \textbf{Distributed Training}: Essential for large models—data parallelism provides linear speedup
+    \item \textbf{Edge Requires Aggression}: Mobile deployment needs multiple optimizations combined
+    \item \textbf{Caching is Critical}: 70\% cache hit rate = 70\% cost reduction
+    \item \textbf{Predict, Don't React}: Proactive scaling prevents latency spikes
+    \item \textbf{Measure Everything}: Continuous benchmarking validates optimizations
+    \item \textbf{Trade-offs Exist}: Balance accuracy, latency, cost, and complexity
+\end{itemize}
+
+Performance optimization is not optional for production ML systems. The difference between a prototype and a scalable service is systematic optimization across model architecture, infrastructure, and operational patterns. Investing in optimization enables ML systems to deliver value at scale within realistic cost constraints.

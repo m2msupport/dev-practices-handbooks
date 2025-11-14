@@ -1,0 +1,2291 @@
+\chapter{Model Deployment and Serving}
+
+\section{Introduction}
+
+Model deployment transforms experimental code into production systems serving millions of predictions daily. A model with 95\% accuracy in development becomes worthless if it cannot handle production load, lacks proper error handling, or experiences downtime during updates. The gap between a trained model and a reliable production service is where most ML projects fail.
+
+\subsection{The Deployment Challenge}
+
+Consider a recommendation system that performs excellently in notebooks but crashes under production load, serves stale predictions after model updates, and requires 30 minutes of downtime for each deployment. These are not edge cases—they are the norm for teams without disciplined deployment practices.
+
+\subsection{Why Deployment Engineering Matters}
+
+Studies show that:
+\begin{itemize}
+    \item \textbf{87\% of ML models} never make it to production
+    \item \textbf{50\% of deployed models} experience service degradation in first month
+    \item \textbf{Deployment failures} cost companies \$300K+ in lost revenue and engineering time
+    \item \textbf{Manual deployment processes} introduce 10x more errors than automated pipelines
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-ready deployment frameworks:
+
+\begin{enumerate}
+    \item \textbf{Model Serving API}: FastAPI integration with validation and error handling
+    \item \textbf{Containerization}: Docker multi-stage builds and resource management
+    \item \textbf{Deployment Strategies}: Blue-green, canary, and rolling deployments
+    \item \textbf{Auto-scaling}: Load balancing and horizontal pod autoscaling
+    \item \textbf{Model Versioning}: Registry integration and rollback procedures
+    \item \textbf{Monitoring}: Health checks, readiness probes, and performance metrics
+\end{enumerate}
+
+\section{Model Serving API with FastAPI}
+
+Production ML services require robust APIs with request validation, error handling, and comprehensive logging.
+
+\subsection{Model Service Foundation}
+
+\begin{lstlisting}[language=Python, caption={Production Model Service with FastAPI}]
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Union
+from enum import Enum
+from pathlib import Path
+import logging
+from datetime import datetime
+import numpy as np
+import joblib
+import json
+
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
+import uvicorn
+
+logger = logging.getLogger(__name__)
+
+class ModelStatus(Enum):
+    """Model loading status."""
+    UNLOADED = "unloaded"
+    LOADING = "loading"
+    READY = "ready"
+    ERROR = "error"
+
+class PredictionRequest(BaseModel):
+    """
+    Validated prediction request schema.
+
+    Uses Pydantic for automatic validation and documentation.
+    """
+    features: Dict[str, Union[float, int, str]] = Field(
+        ...,
+        description="Feature dictionary with feature names as keys",
+        example={"age": 35, "income": 50000, "city": "NYC"}
+    )
+    model_version: Optional[str] = Field(
+        None,
+        description="Specific model version to use (defaults to latest)"
+    )
+    return_probabilities: bool = Field(
+        False,
+        description="Return class probabilities instead of labels"
+    )
+    explain: bool = Field(
+        False,
+        description="Include prediction explanation (SHAP values)"
+    )
+
+    @validator('features')
+    def validate_features(cls, v):
+        """Validate features are not empty."""
+        if not v:
+            raise ValueError("Features dictionary cannot be empty")
+        return v
+
+    class Config:
+        """Pydantic configuration."""
+        schema_extra = {
+            "example": {
+                "features": {
+                    "age": 35,
+                    "income": 50000,
+                    "credit_score": 720,
+                    "loan_amount": 25000
+                },
+                "return_probabilities": True,
+                "explain": False
+            }
+        }
+
+class PredictionResponse(BaseModel):
+    """Validated prediction response schema."""
+    prediction: Union[int, float, str, List[float]]
+    model_version: str
+    prediction_id: str
+    timestamp: datetime
+    latency_ms: float
+    probabilities: Optional[Dict[str, float]] = None
+    explanation: Optional[Dict[str, float]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str
+    model_status: str
+    model_version: str
+    uptime_seconds: float
+    predictions_served: int
+    avg_latency_ms: float
+
+@dataclass
+class ModelMetrics:
+    """Runtime metrics for model service."""
+    predictions_served: int = 0
+    total_latency_ms: float = 0.0
+    errors: int = 0
+    start_time: datetime = None
+
+    def __post_init__(self):
+        if self.start_time is None:
+            self.start_time = datetime.now()
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Calculate average prediction latency."""
+        if self.predictions_served == 0:
+            return 0.0
+        return self.total_latency_ms / self.predictions_served
+
+    @property
+    def uptime_seconds(self) -> float:
+        """Calculate service uptime."""
+        return (datetime.now() - self.start_time).total_seconds()
+
+class ModelService:
+    """
+    Production model serving service.
+
+    Features:
+    - Model loading and versioning
+    - Request validation
+    - Error handling and logging
+    - Performance monitoring
+    - Health checks
+    """
+
+    def __init__(
+        self,
+        model_path: Path,
+        model_name: str = "model",
+        preprocessor_path: Optional[Path] = None,
+        feature_names: Optional[List[str]] = None
+    ):
+        """
+        Args:
+            model_path: Path to serialized model file
+            model_name: Name identifier for the model
+            preprocessor_path: Optional path to feature preprocessor
+            feature_names: Expected feature names for validation
+        """
+        self.model_path = model_path
+        self.model_name = model_name
+        self.preprocessor_path = preprocessor_path
+        self.feature_names = feature_names or []
+
+        self.model = None
+        self.preprocessor = None
+        self.model_version = None
+        self.status = ModelStatus.UNLOADED
+        self.metrics = ModelMetrics()
+
+        # FastAPI app
+        self.app = FastAPI(
+            title=f"{model_name} Prediction API",
+            description="Production ML model serving API",
+            version="1.0.0"
+        )
+
+        # CORS middleware
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        # Register routes
+        self._register_routes()
+
+        # Exception handlers
+        self._register_exception_handlers()
+
+    def load_model(self) -> None:
+        """Load model and preprocessor from disk."""
+        try:
+            logger.info(f"Loading model from {self.model_path}")
+            self.status = ModelStatus.LOADING
+
+            # Load model
+            self.model = joblib.load(self.model_path)
+
+            # Load preprocessor if available
+            if self.preprocessor_path and self.preprocessor_path.exists():
+                logger.info(f"Loading preprocessor from {self.preprocessor_path}")
+                self.preprocessor = joblib.load(self.preprocessor_path)
+
+            # Extract model version from path or metadata
+            self.model_version = self._extract_version()
+
+            self.status = ModelStatus.READY
+            logger.info(f"Model {self.model_version} loaded successfully")
+
+        except Exception as e:
+            self.status = ModelStatus.ERROR
+            logger.error(f"Failed to load model: {e}")
+            raise
+
+    def _extract_version(self) -> str:
+        """Extract model version from path or model metadata."""
+        # Try to get version from model metadata
+        if hasattr(self.model, 'version'):
+            return self.model.version
+
+        # Extract from path (e.g., model_v1.2.3.pkl)
+        import re
+        version_match = re.search(r'v?(\d+\.\d+\.\d+)', str(self.model_path))
+        if version_match:
+            return version_match.group(1)
+
+        # Default to timestamp
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _validate_features(self, features: Dict[str, Any]) -> None:
+        """Validate input features."""
+        if self.feature_names:
+            missing = set(self.feature_names) - set(features.keys())
+            if missing:
+                raise ValueError(f"Missing required features: {missing}")
+
+            extra = set(features.keys()) - set(self.feature_names)
+            if extra:
+                logger.warning(f"Extra features provided (will be ignored): {extra}")
+
+    def _preprocess_features(self, features: Dict[str, Any]) -> np.ndarray:
+        """
+        Preprocess features for model input.
+
+        Args:
+            features: Raw feature dictionary
+
+        Returns:
+            Preprocessed feature array
+        """
+        # Convert to array in correct order
+        if self.feature_names:
+            feature_array = np.array([
+                [features.get(name, 0.0) for name in self.feature_names]
+            ])
+        else:
+            feature_array = np.array([list(features.values())])
+
+        # Apply preprocessor if available
+        if self.preprocessor is not None:
+            feature_array = self.preprocessor.transform(feature_array)
+
+        return feature_array
+
+    def predict(
+        self,
+        features: Dict[str, Any],
+        return_probabilities: bool = False,
+        explain: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Generate prediction.
+
+        Args:
+            features: Input features
+            return_probabilities: Return class probabilities
+            explain: Include SHAP explanation
+
+        Returns:
+            Prediction result dictionary
+        """
+        if self.status != ModelStatus.READY:
+            raise RuntimeError(f"Model not ready (status: {self.status.value})")
+
+        start_time = datetime.now()
+
+        try:
+            # Validate features
+            self._validate_features(features)
+
+            # Preprocess
+            X = self._preprocess_features(features)
+
+            # Generate prediction
+            if return_probabilities and hasattr(self.model, 'predict_proba'):
+                prediction = self.model.predict_proba(X)[0]
+                result = {
+                    "prediction": prediction.tolist(),
+                    "probabilities": dict(zip(
+                        self.model.classes_,
+                        prediction.tolist()
+                    ))
+                }
+            else:
+                prediction = self.model.predict(X)[0]
+                result = {"prediction": float(prediction)}
+
+            # Add explanation if requested
+            if explain:
+                result["explanation"] = self._generate_explanation(X)
+
+            # Record metrics
+            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+            self.metrics.predictions_served += 1
+            self.metrics.total_latency_ms += latency_ms
+
+            result.update({
+                "model_version": self.model_version,
+                "latency_ms": latency_ms,
+                "timestamp": datetime.now()
+            })
+
+            return result
+
+        except Exception as e:
+            self.metrics.errors += 1
+            logger.error(f"Prediction error: {e}")
+            raise
+
+    def _generate_explanation(self, X: np.ndarray) -> Dict[str, float]:
+        """
+        Generate SHAP explanation for prediction.
+
+        Args:
+            X: Preprocessed features
+
+        Returns:
+            Feature importance dictionary
+        """
+        try:
+            import shap
+
+            # Create explainer (cache in production)
+            explainer = shap.TreeExplainer(self.model)
+            shap_values = explainer.shap_values(X)
+
+            # Map to feature names
+            if self.feature_names:
+                explanation = dict(zip(
+                    self.feature_names,
+                    shap_values[0].tolist()
+                ))
+            else:
+                explanation = {
+                    f"feature_{i}": float(val)
+                    for i, val in enumerate(shap_values[0])
+                }
+
+            return explanation
+
+        except ImportError:
+            logger.warning("SHAP not installed, skipping explanation")
+            return {}
+        except Exception as e:
+            logger.error(f"Explanation generation failed: {e}")
+            return {}
+
+    def _register_routes(self) -> None:
+        """Register FastAPI routes."""
+
+        @self.app.post("/predict", response_model=PredictionResponse)
+        async def predict_endpoint(request: PredictionRequest) -> PredictionResponse:
+            """Generate prediction for input features."""
+            try:
+                result = self.predict(
+                    features=request.features,
+                    return_probabilities=request.return_probabilities,
+                    explain=request.explain
+                )
+
+                return PredictionResponse(
+                    prediction=result["prediction"],
+                    model_version=result["model_version"],
+                    prediction_id=f"{self.model_name}_{datetime.now().timestamp()}",
+                    timestamp=result["timestamp"],
+                    latency_ms=result["latency_ms"],
+                    probabilities=result.get("probabilities"),
+                    explanation=result.get("explanation")
+                )
+
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
+            except Exception as e:
+                logger.error(f"Prediction endpoint error: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Internal server error"
+                )
+
+        @self.app.get("/health", response_model=HealthResponse)
+        async def health_check() -> HealthResponse:
+            """Health check endpoint."""
+            return HealthResponse(
+                status="healthy" if self.status == ModelStatus.READY else "unhealthy",
+                model_status=self.status.value,
+                model_version=self.model_version or "unknown",
+                uptime_seconds=self.metrics.uptime_seconds,
+                predictions_served=self.metrics.predictions_served,
+                avg_latency_ms=self.metrics.avg_latency_ms
+            )
+
+        @self.app.get("/ready")
+        async def readiness_check() -> Dict[str, str]:
+            """Kubernetes readiness probe endpoint."""
+            if self.status == ModelStatus.READY:
+                return {"status": "ready"}
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Model not ready: {self.status.value}"
+                )
+
+        @self.app.get("/metrics")
+        async def metrics_endpoint() -> Dict[str, Any]:
+            """Prometheus-compatible metrics endpoint."""
+            return {
+                "predictions_total": self.metrics.predictions_served,
+                "errors_total": self.metrics.errors,
+                "latency_avg_ms": self.metrics.avg_latency_ms,
+                "uptime_seconds": self.metrics.uptime_seconds,
+                "model_version": self.model_version
+            }
+
+        @self.app.post("/reload")
+        async def reload_model() -> Dict[str, str]:
+            """Reload model from disk."""
+            try:
+                self.load_model()
+                return {"status": "reloaded", "version": self.model_version}
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Reload failed: {e}"
+                )
+
+    def _register_exception_handlers(self) -> None:
+        """Register custom exception handlers."""
+
+        @self.app.exception_handler(ValueError)
+        async def value_error_handler(request: Request, exc: ValueError):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": "Validation error",
+                    "detail": str(exc),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+
+        @self.app.exception_handler(Exception)
+        async def general_exception_handler(request: Request, exc: Exception):
+            logger.error(f"Unhandled exception: {exc}", exc_info=True)
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "error": "Internal server error",
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+
+    def run(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+        """
+        Start the service.
+
+        Args:
+            host: Host to bind to
+            port: Port to bind to
+        """
+        # Load model before starting
+        self.load_model()
+
+        # Start server
+        logger.info(f"Starting {self.model_name} service on {host}:{port}")
+        uvicorn.run(self.app, host=host, port=port, log_level="info")
+\end{lstlisting}
+
+\section{Containerization with Docker}
+
+Docker containers provide consistent, reproducible deployment environments with proper resource isolation and security.
+
+\subsection{Multi-Stage Docker Build}
+
+\begin{lstlisting}[style=shell, caption={Production Dockerfile with Multi-Stage Build}]
+# Stage 1: Build stage with full dependencies
+FROM python:3.10-slim as builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    make \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Stage 2: Runtime stage with minimal dependencies
+FROM python:3.10-slim
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash mlservice
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set working directory
+WORKDIR /app
+
+# Copy application code
+COPY --chown=mlservice:mlservice . /app
+
+# Switch to non-root user
+USER mlservice
+
+# Resource limits and configurations
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Run service
+CMD ["python", "-m", "uvicorn", "main:app", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--workers", "4", "--timeout-keep-alive", "75"]
+\end{lstlisting}
+
+\subsection{Docker Compose for Local Testing}
+
+\begin{lstlisting}[style=yaml, caption={Docker Compose Configuration}]
+version: '3.8'
+
+services:
+  model-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=/models/model_v1.0.0.pkl
+      - LOG_LEVEL=info
+      - MAX_WORKERS=4
+    volumes:
+      - ./models:/models:ro
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
+\end{lstlisting}
+
+\section{Deployment Strategies}
+
+Different deployment strategies balance risk, speed, and resource requirements.
+
+\subsection{Blue-Green Deployment}
+
+\begin{lstlisting}[language=Python, caption={Blue-Green Deployment Manager}]
+from typing import Literal
+import requests
+import time
+
+DeploymentColor = Literal["blue", "green"]
+
+@dataclass
+class DeploymentEnvironment:
+    """Deployment environment configuration."""
+    name: str
+    color: DeploymentColor
+    endpoint: str
+    version: str
+    is_active: bool
+    health_status: str
+
+class BlueGreenDeployment:
+    """
+    Blue-green deployment strategy.
+
+    Maintains two identical environments (blue and green).
+    Traffic routes to one while the other is updated.
+    Instant rollback by switching traffic back.
+    """
+
+    def __init__(
+        self,
+        blue_endpoint: str,
+        green_endpoint: str,
+        router_endpoint: str
+    ):
+        """
+        Args:
+            blue_endpoint: Blue environment URL
+            green_endpoint: Green environment URL
+            router_endpoint: Load balancer/router API endpoint
+        """
+        self.blue = DeploymentEnvironment(
+            name="blue",
+            color="blue",
+            endpoint=blue_endpoint,
+            version="unknown",
+            is_active=True,
+            health_status="unknown"
+        )
+        self.green = DeploymentEnvironment(
+            name="green",
+            color="green",
+            endpoint=green_endpoint,
+            version="unknown",
+            is_active=False,
+            health_status="unknown"
+        )
+        self.router_endpoint = router_endpoint
+
+    def get_active_environment(self) -> DeploymentEnvironment:
+        """Get currently active environment."""
+        return self.blue if self.blue.is_active else self.green
+
+    def get_inactive_environment(self) -> DeploymentEnvironment:
+        """Get currently inactive environment."""
+        return self.green if self.blue.is_active else self.blue
+
+    def check_health(self, environment: DeploymentEnvironment) -> bool:
+        """
+        Check environment health.
+
+        Args:
+            environment: Environment to check
+
+        Returns:
+            True if healthy, False otherwise
+        """
+        try:
+            response = requests.get(
+                f"{environment.endpoint}/health",
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                health_data = response.json()
+                environment.health_status = health_data.get("status", "unknown")
+                environment.version = health_data.get("model_version", "unknown")
+                return environment.health_status == "healthy"
+            else:
+                environment.health_status = "unhealthy"
+                return False
+
+        except Exception as e:
+            logger.error(f"Health check failed for {environment.name}: {e}")
+            environment.health_status = "error"
+            return False
+
+    def deploy_new_version(
+        self,
+        new_version_path: str,
+        validation_requests: Optional[List[Dict]] = None
+    ) -> bool:
+        """
+        Deploy new model version using blue-green strategy.
+
+        Steps:
+        1. Deploy to inactive environment
+        2. Run health checks
+        3. Validate with test requests
+        4. Switch traffic
+        5. Monitor for issues
+
+        Args:
+            new_version_path: Path to new model version
+            validation_requests: Test requests for validation
+
+        Returns:
+            True if deployment successful
+        """
+        inactive = self.get_inactive_environment()
+        active = self.get_active_environment()
+
+        logger.info(f"Deploying new version to {inactive.name} environment")
+
+        # Step 1: Deploy to inactive environment
+        logger.info("Step 1: Deploying to inactive environment")
+        if not self._deploy_to_environment(inactive, new_version_path):
+            logger.error("Deployment failed")
+            return False
+
+        # Step 2: Health check
+        logger.info("Step 2: Running health checks")
+        time.sleep(5)  # Allow startup time
+        if not self.check_health(inactive):
+            logger.error(f"Health check failed for {inactive.name}")
+            return False
+
+        # Step 3: Validation
+        logger.info("Step 3: Validating with test requests")
+        if validation_requests:
+            if not self._validate_environment(inactive, validation_requests):
+                logger.error("Validation failed")
+                return False
+
+        # Step 4: Switch traffic
+        logger.info("Step 4: Switching traffic to new version")
+        if not self._switch_traffic(inactive):
+            logger.error("Traffic switch failed")
+            return False
+
+        # Update state
+        inactive.is_active = True
+        active.is_active = False
+
+        # Step 5: Monitor
+        logger.info("Step 5: Monitoring new deployment")
+        if not self._monitor_deployment(inactive, duration_seconds=300):
+            logger.warning("Issues detected, consider rollback")
+            return False
+
+        logger.info(f"Deployment successful: {inactive.version} active on {inactive.name}")
+        return True
+
+    def _deploy_to_environment(
+        self,
+        environment: DeploymentEnvironment,
+        model_path: str
+    ) -> bool:
+        """Deploy model to environment."""
+        try:
+            # In practice, this would trigger CI/CD pipeline
+            # or Kubernetes deployment update
+            response = requests.post(
+                f"{environment.endpoint}/reload",
+                json={"model_path": model_path},
+                timeout=60
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Deployment to {environment.name} failed: {e}")
+            return False
+
+    def _validate_environment(
+        self,
+        environment: DeploymentEnvironment,
+        validation_requests: List[Dict]
+    ) -> bool:
+        """Validate environment with test requests."""
+        logger.info(f"Validating {environment.name} with {len(validation_requests)} requests")
+
+        for i, request_data in enumerate(validation_requests):
+            try:
+                response = requests.post(
+                    f"{environment.endpoint}/predict",
+                    json=request_data,
+                    timeout=30
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"Validation request {i} failed: {response.status_code}")
+                    return False
+
+                # Optional: Check prediction quality
+                result = response.json()
+                logger.debug(f"Validation {i}: {result}")
+
+            except Exception as e:
+                logger.error(f"Validation request {i} error: {e}")
+                return False
+
+        logger.info("All validation requests passed")
+        return True
+
+    def _switch_traffic(self, new_active: DeploymentEnvironment) -> bool:
+        """Switch traffic to new environment."""
+        try:
+            # Update load balancer configuration
+            response = requests.post(
+                f"{self.router_endpoint}/switch",
+                json={
+                    "target": new_active.name,
+                    "endpoint": new_active.endpoint
+                },
+                timeout=30
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Traffic switch failed: {e}")
+            return False
+
+    def _monitor_deployment(
+        self,
+        environment: DeploymentEnvironment,
+        duration_seconds: int = 300
+    ) -> bool:
+        """
+        Monitor deployment for issues.
+
+        Args:
+            environment: Environment to monitor
+            duration_seconds: How long to monitor
+
+        Returns:
+            True if no issues detected
+        """
+        logger.info(f"Monitoring {environment.name} for {duration_seconds}s")
+
+        start_time = time.time()
+        check_interval = 30
+
+        while time.time() - start_time < duration_seconds:
+            # Check health
+            if not self.check_health(environment):
+                logger.error(f"Health check failed during monitoring")
+                return False
+
+            # Check metrics (error rate, latency, etc.)
+            metrics = self._get_metrics(environment)
+            if self._detect_anomalies(metrics):
+                logger.warning(f"Anomalies detected in metrics: {metrics}")
+                return False
+
+            time.sleep(check_interval)
+
+        logger.info("Monitoring complete: no issues detected")
+        return True
+
+    def _get_metrics(self, environment: DeploymentEnvironment) -> Dict[str, float]:
+        """Get metrics from environment."""
+        try:
+            response = requests.get(
+                f"{environment.endpoint}/metrics",
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to get metrics: {e}")
+            return {}
+
+    def _detect_anomalies(self, metrics: Dict[str, float]) -> bool:
+        """Detect anomalies in metrics."""
+        # Simple threshold-based detection
+        if metrics.get("errors_total", 0) > 10:
+            return True
+        if metrics.get("latency_avg_ms", 0) > 1000:
+            return True
+        return False
+
+    def rollback(self) -> bool:
+        """
+        Rollback to previous version.
+
+        Simply switches traffic back to previous environment.
+        """
+        current_active = self.get_active_environment()
+        previous = self.get_inactive_environment()
+
+        logger.info(f"Rolling back from {current_active.name} to {previous.name}")
+
+        # Check previous environment health
+        if not self.check_health(previous):
+            logger.error(f"Cannot rollback: {previous.name} is unhealthy")
+            return False
+
+        # Switch traffic
+        if not self._switch_traffic(previous):
+            logger.error("Rollback traffic switch failed")
+            return False
+
+        # Update state
+        current_active.is_active = False
+        previous.is_active = True
+
+        logger.info(f"Rollback successful: {previous.version} active on {previous.name}")
+        return True
+\end{lstlisting}
+
+\subsection{Canary Deployment}
+
+\begin{lstlisting}[language=Python, caption={Canary Deployment Strategy}]
+from typing import List
+import random
+
+class CanaryDeployment:
+    """
+    Canary deployment strategy.
+
+    Gradually routes traffic to new version while monitoring metrics.
+    Rolls back automatically if issues detected.
+    """
+
+    def __init__(
+        self,
+        stable_endpoint: str,
+        canary_endpoint: str,
+        router_endpoint: str
+    ):
+        """
+        Args:
+            stable_endpoint: Stable version endpoint
+            canary_endpoint: Canary version endpoint
+            router_endpoint: Load balancer API endpoint
+        """
+        self.stable_endpoint = stable_endpoint
+        self.canary_endpoint = canary_endpoint
+        self.router_endpoint = router_endpoint
+        self.canary_weight = 0.0
+
+    def deploy_canary(
+        self,
+        new_version_path: str,
+        traffic_stages: List[float] = [0.05, 0.10, 0.25, 0.50, 1.0],
+        stage_duration_seconds: int = 300,
+        validation_requests: Optional[List[Dict]] = None
+    ) -> bool:
+        """
+        Deploy canary with gradual traffic increase.
+
+        Args:
+            new_version_path: Path to new model
+            traffic_stages: Traffic percentages for canary (e.g., [5%, 10%, 25%])
+            stage_duration_seconds: How long to run each stage
+            validation_requests: Test requests for validation
+
+        Returns:
+            True if deployment successful
+        """
+        logger.info(f"Starting canary deployment with stages: {traffic_stages}")
+
+        # Deploy canary version
+        logger.info("Deploying canary version")
+        if not self._deploy_canary_version(new_version_path):
+            logger.error("Canary deployment failed")
+            return False
+
+        # Validate canary
+        if validation_requests:
+            logger.info("Validating canary version")
+            if not self._validate_canary(validation_requests):
+                logger.error("Canary validation failed")
+                self._cleanup_canary()
+                return False
+
+        # Gradual traffic increase
+        for stage_pct in traffic_stages:
+            logger.info(f"Increasing canary traffic to {stage_pct:.0%}")
+
+            # Update traffic split
+            if not self._update_traffic_split(stage_pct):
+                logger.error("Failed to update traffic split")
+                self.rollback_canary()
+                return False
+
+            # Monitor stage
+            logger.info(f"Monitoring stage for {stage_duration_seconds}s")
+            if not self._monitor_canary_stage(stage_duration_seconds):
+                logger.error("Issues detected, rolling back")
+                self.rollback_canary()
+                return False
+
+            logger.info(f"Stage {stage_pct:.0%} successful")
+
+        # Promote canary to stable
+        logger.info("Promoting canary to stable")
+        self._promote_canary()
+
+        logger.info("Canary deployment successful")
+        return True
+
+    def _deploy_canary_version(self, model_path: str) -> bool:
+        """Deploy new version to canary environment."""
+        try:
+            response = requests.post(
+                f"{self.canary_endpoint}/reload",
+                json={"model_path": model_path},
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                # Wait for startup
+                time.sleep(5)
+
+                # Health check
+                health_response = requests.get(
+                    f"{self.canary_endpoint}/health",
+                    timeout=10
+                )
+                return health_response.status_code == 200
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Canary deployment failed: {e}")
+            return False
+
+    def _validate_canary(self, validation_requests: List[Dict]) -> bool:
+        """Validate canary with test requests."""
+        logger.info(f"Validating canary with {len(validation_requests)} requests")
+
+        for i, request_data in enumerate(validation_requests):
+            try:
+                # Send to canary
+                canary_response = requests.post(
+                    f"{self.canary_endpoint}/predict",
+                    json=request_data,
+                    timeout=30
+                )
+
+                # Send to stable for comparison
+                stable_response = requests.post(
+                    f"{self.stable_endpoint}/predict",
+                    json=request_data,
+                    timeout=30
+                )
+
+                if canary_response.status_code != 200:
+                    logger.error(f"Canary request {i} failed")
+                    return False
+
+                # Optional: Compare predictions
+                canary_pred = canary_response.json()
+                stable_pred = stable_response.json()
+
+                logger.debug(f"Validation {i}:")
+                logger.debug(f"  Stable: {stable_pred['prediction']}")
+                logger.debug(f"  Canary: {canary_pred['prediction']}")
+
+            except Exception as e:
+                logger.error(f"Validation error: {e}")
+                return False
+
+        return True
+
+    def _update_traffic_split(self, canary_weight: float) -> bool:
+        """
+        Update traffic split between stable and canary.
+
+        Args:
+            canary_weight: Fraction of traffic to canary (0.0 to 1.0)
+        """
+        try:
+            response = requests.post(
+                f"{self.router_endpoint}/weight",
+                json={
+                    "stable_weight": 1.0 - canary_weight,
+                    "canary_weight": canary_weight,
+                    "stable_endpoint": self.stable_endpoint,
+                    "canary_endpoint": self.canary_endpoint
+                },
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                self.canary_weight = canary_weight
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Failed to update traffic split: {e}")
+            return False
+
+    def _monitor_canary_stage(self, duration_seconds: int) -> bool:
+        """
+        Monitor canary stage for issues.
+
+        Compares canary metrics to stable metrics.
+        """
+        logger.info(f"Monitoring canary stage for {duration_seconds}s")
+
+        start_time = time.time()
+        check_interval = 30
+
+        while time.time() - start_time < duration_seconds:
+            # Get metrics from both versions
+            stable_metrics = self._get_metrics(self.stable_endpoint)
+            canary_metrics = self._get_metrics(self.canary_endpoint)
+
+            # Compare metrics
+            if self._detect_canary_issues(stable_metrics, canary_metrics):
+                logger.error("Canary issues detected")
+                return False
+
+            time.sleep(check_interval)
+
+        logger.info("Stage monitoring complete: no issues")
+        return True
+
+    def _get_metrics(self, endpoint: str) -> Dict[str, float]:
+        """Get metrics from endpoint."""
+        try:
+            response = requests.get(f"{endpoint}/metrics", timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to get metrics from {endpoint}: {e}")
+            return {}
+
+    def _detect_canary_issues(
+        self,
+        stable_metrics: Dict[str, float],
+        canary_metrics: Dict[str, float]
+    ) -> bool:
+        """
+        Detect issues by comparing canary to stable metrics.
+
+        Returns True if issues detected.
+        """
+        # Error rate comparison
+        stable_errors = stable_metrics.get("errors_total", 0)
+        canary_errors = canary_metrics.get("errors_total", 0)
+
+        stable_predictions = stable_metrics.get("predictions_total", 1)
+        canary_predictions = canary_metrics.get("predictions_total", 1)
+
+        stable_error_rate = stable_errors / stable_predictions
+        canary_error_rate = canary_errors / canary_predictions
+
+        # Canary error rate significantly higher?
+        if canary_error_rate > stable_error_rate * 2 and canary_error_rate > 0.01:
+            logger.error(f"Canary error rate too high: "
+                        f"{canary_error_rate:.2%} vs {stable_error_rate:.2%}")
+            return True
+
+        # Latency comparison
+        stable_latency = stable_metrics.get("latency_avg_ms", 0)
+        canary_latency = canary_metrics.get("latency_avg_ms", 0)
+
+        # Canary latency significantly higher?
+        if canary_latency > stable_latency * 1.5 and canary_latency > 500:
+            logger.error(f"Canary latency too high: "
+                        f"{canary_latency:.0f}ms vs {stable_latency:.0f}ms")
+            return True
+
+        return False
+
+    def rollback_canary(self) -> bool:
+        """Rollback canary deployment."""
+        logger.info("Rolling back canary deployment")
+
+        # Route all traffic to stable
+        if not self._update_traffic_split(0.0):
+            logger.error("Failed to rollback traffic")
+            return False
+
+        # Cleanup canary
+        self._cleanup_canary()
+
+        logger.info("Canary rollback complete")
+        return True
+
+    def _promote_canary(self) -> None:
+        """Promote canary to stable."""
+        # In practice, this would update stable environment
+        # to run canary version and cleanup old stable
+        logger.info("Promoting canary to stable")
+
+        # Swap endpoints
+        self.stable_endpoint, self.canary_endpoint = \
+            self.canary_endpoint, self.stable_endpoint
+
+        # Reset traffic split
+        self.canary_weight = 0.0
+
+    def _cleanup_canary(self) -> None:
+        """Cleanup canary deployment."""
+        logger.info("Cleaning up canary deployment")
+        # In practice, this would terminate canary pods/containers
+\end{lstlisting}
+
+\section{Kubernetes Deployment Configuration}
+
+Kubernetes provides robust orchestration for containerized ML services with auto-scaling, health checks, and rolling updates.
+
+\subsection{Kubernetes Deployment and Service}
+
+\begin{lstlisting}[style=yaml, caption={Kubernetes Deployment Configuration}]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-service
+  labels:
+    app: model-service
+    version: v1.0.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: model-service
+  template:
+    metadata:
+      labels:
+        app: model-service
+        version: v1.0.0
+    spec:
+      containers:
+      - name: model-service
+        image: your-registry/model-service:v1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+
+        # Resource limits and requests
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+
+        # Environment variables
+        env:
+        - name: MODEL_PATH
+          value: "/models/model_v1.0.0.pkl"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: MAX_WORKERS
+          value: "4"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+
+        # Volume mounts
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        - name: cache
+          mountPath: /tmp
+
+        # Liveness probe - is container alive?
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        # Readiness probe - is container ready for traffic?
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        # Startup probe - has container started successfully?
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+      # Volumes
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-pvc
+      - name: cache
+        emptyDir: {}
+
+      # Node affinity and tolerations
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - model-service
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-service
+  labels:
+    app: model-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: model-service
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: model-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: model-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+      selectPolicy: Max
+\end{lstlisting}
+
+\subsection{Model Registry Integration}
+
+\begin{lstlisting}[language=Python, caption={Model Registry for Version Management}]
+from typing import Optional, List
+from pathlib import Path
+import hashlib
+import shutil
+from datetime import datetime
+
+@dataclass
+class ModelMetadata:
+    """Metadata for registered model."""
+    model_id: str
+    version: str
+    name: str
+    framework: str  # 'sklearn', 'pytorch', 'tensorflow', etc.
+    metrics: Dict[str, float]
+    training_date: datetime
+    author: str
+    description: str
+    tags: List[str]
+    file_path: Path
+    file_hash: str
+    status: str  # 'registered', 'staging', 'production', 'archived'
+
+class ModelRegistry:
+    """
+    Centralized model registry for version management.
+
+    Features:
+    - Version tracking
+    - Metadata storage
+    - Model promotion (dev -> staging -> production)
+    - Rollback capabilities
+    - Model comparison
+    """
+
+    def __init__(self, registry_path: Path):
+        """
+        Args:
+            registry_path: Base path for model registry storage
+        """
+        self.registry_path = Path(registry_path)
+        self.registry_path.mkdir(parents=True, exist_ok=True)
+
+        self.metadata_file = self.registry_path / "registry.json"
+        self.models: Dict[str, ModelMetadata] = {}
+
+        # Load existing registry
+        self._load_registry()
+
+    def _load_registry(self) -> None:
+        """Load registry from disk."""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                data = json.load(f)
+                self.models = {
+                    k: ModelMetadata(**v) for k, v in data.items()
+                }
+            logger.info(f"Loaded {len(self.models)} models from registry")
+
+    def _save_registry(self) -> None:
+        """Save registry to disk."""
+        with open(self.metadata_file, 'w') as f:
+            data = {
+                k: {
+                    **v.__dict__,
+                    'training_date': v.training_date.isoformat(),
+                    'file_path': str(v.file_path)
+                }
+                for k, v in self.models.items()
+            }
+            json.dump(data, f, indent=2)
+
+    def _compute_file_hash(self, file_path: Path) -> str:
+        """Compute SHA256 hash of model file."""
+        sha256 = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+    def register_model(
+        self,
+        model_path: Path,
+        name: str,
+        version: str,
+        framework: str,
+        metrics: Dict[str, float],
+        author: str,
+        description: str = "",
+        tags: Optional[List[str]] = None
+    ) -> str:
+        """
+        Register new model version.
+
+        Args:
+            model_path: Path to model file
+            name: Model name
+            version: Version string (e.g., '1.0.0')
+            framework: ML framework used
+            metrics: Model performance metrics
+            author: Model author
+            description: Model description
+            tags: Optional tags for organization
+
+        Returns:
+            Model ID
+        """
+        # Generate model ID
+        model_id = f"{name}_{version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Copy model to registry
+        registry_model_path = self.registry_path / model_id / "model"
+        registry_model_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(model_path, registry_model_path)
+
+        # Compute hash
+        file_hash = self._compute_file_hash(registry_model_path)
+
+        # Create metadata
+        metadata = ModelMetadata(
+            model_id=model_id,
+            version=version,
+            name=name,
+            framework=framework,
+            metrics=metrics,
+            training_date=datetime.now(),
+            author=author,
+            description=description,
+            tags=tags or [],
+            file_path=registry_model_path,
+            file_hash=file_hash,
+            status='registered'
+        )
+
+        self.models[model_id] = metadata
+        self._save_registry()
+
+        logger.info(f"Registered model {model_id}")
+        return model_id
+
+    def promote_model(self, model_id: str, target_status: str) -> bool:
+        """
+        Promote model to new status.
+
+        Args:
+            model_id: Model to promote
+            target_status: Target status ('staging' or 'production')
+
+        Returns:
+            True if successful
+        """
+        if model_id not in self.models:
+            logger.error(f"Model {model_id} not found")
+            return False
+
+        model = self.models[model_id]
+
+        # Validation based on target status
+        if target_status == 'production':
+            # Check if model was in staging
+            if model.status != 'staging':
+                logger.warning(f"Promoting {model_id} to production "
+                             f"without staging (current: {model.status})")
+
+        # Demote previous production models if promoting to production
+        if target_status == 'production':
+            for mid, m in self.models.items():
+                if m.name == model.name and m.status == 'production':
+                    m.status = 'archived'
+                    logger.info(f"Archived previous production model: {mid}")
+
+        model.status = target_status
+        self._save_registry()
+
+        logger.info(f"Promoted {model_id} to {target_status}")
+        return True
+
+    def get_model(
+        self,
+        name: str,
+        version: Optional[str] = None,
+        status: str = 'production'
+    ) -> Optional[ModelMetadata]:
+        """
+        Get model by name, version, and status.
+
+        Args:
+            name: Model name
+            version: Specific version (None for latest)
+            status: Model status filter
+
+        Returns:
+            ModelMetadata or None
+        """
+        # Filter by name and status
+        candidates = [
+            m for m in self.models.values()
+            if m.name == name and m.status == status
+        ]
+
+        if not candidates:
+            return None
+
+        # Filter by version if specified
+        if version:
+            candidates = [m for m in candidates if m.version == version]
+            if not candidates:
+                return None
+            return candidates[0]
+
+        # Return latest (by training date)
+        return max(candidates, key=lambda m: m.training_date)
+
+    def rollback_production(self, name: str) -> Optional[str]:
+        """
+        Rollback to previous production model.
+
+        Args:
+            name: Model name
+
+        Returns:
+            Rolled back model ID or None
+        """
+        # Get current production model
+        current = self.get_model(name, status='production')
+        if not current:
+            logger.error(f"No production model found for {name}")
+            return None
+
+        # Archive current
+        current.status = 'archived'
+
+        # Find previous production (now archived)
+        archived = [
+            m for m in self.models.values()
+            if m.name == name and m.status == 'archived'
+            and m.model_id != current.model_id
+        ]
+
+        if not archived:
+            logger.error(f"No previous version found for rollback")
+            return None
+
+        # Get most recent archived
+        previous = max(archived, key=lambda m: m.training_date)
+
+        # Promote to production
+        previous.status = 'production'
+        self._save_registry()
+
+        logger.info(f"Rolled back {name} from {current.version} to {previous.version}")
+        return previous.model_id
+
+    def compare_models(
+        self,
+        model_id_1: str,
+        model_id_2: str
+    ) -> Dict[str, Any]:
+        """
+        Compare two models.
+
+        Returns:
+            Comparison dictionary with metrics differences
+        """
+        if model_id_1 not in self.models or model_id_2 not in self.models:
+            raise ValueError("One or both models not found")
+
+        model1 = self.models[model_id_1]
+        model2 = self.models[model_id_2]
+
+        # Compare metrics
+        metric_comparison = {}
+        all_metrics = set(model1.metrics.keys()) | set(model2.metrics.keys())
+
+        for metric in all_metrics:
+            val1 = model1.metrics.get(metric)
+            val2 = model2.metrics.get(metric)
+
+            if val1 is not None and val2 is not None:
+                diff = val2 - val1
+                pct_change = (diff / val1 * 100) if val1 != 0 else float('inf')
+                metric_comparison[metric] = {
+                    "model1": val1,
+                    "model2": val2,
+                    "difference": diff,
+                    "percent_change": pct_change
+                }
+
+        return {
+            "model1": {
+                "id": model1.model_id,
+                "version": model1.version,
+                "status": model1.status
+            },
+            "model2": {
+                "id": model2.model_id,
+                "version": model2.version,
+                "status": model2.status
+            },
+            "metrics": metric_comparison
+        }
+
+    def list_models(
+        self,
+        name: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> List[ModelMetadata]:
+        """
+        List models with optional filters.
+
+        Args:
+            name: Filter by model name
+            status: Filter by status
+
+        Returns:
+            List of matching models
+        """
+        models = list(self.models.values())
+
+        if name:
+            models = [m for m in models if m.name == name]
+
+        if status:
+            models = [m for m in models if m.status == status]
+
+        # Sort by training date (newest first)
+        models.sort(key=lambda m: m.training_date, reverse=True)
+
+        return models
+\end{lstlisting}
+
+\section{CI/CD Pipeline for Model Deployment}
+
+Automated deployment pipelines ensure consistent, tested deployments with proper validation.
+
+\subsection{GitHub Actions Deployment Pipeline}
+
+\begin{lstlisting}[style=yaml, caption={CI/CD Pipeline with GitHub Actions}]
+name: Model Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'models/**'
+      - 'src/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/model-service
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit --cov=src --cov-report=xml
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+
+  validate-model:
+    name: Validate Model
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate model performance
+        run: |
+          python scripts/validate_model.py \
+            --model-path models/model_latest.pkl \
+            --test-data data/test.csv \
+            --min-accuracy 0.85 \
+            --max-latency-ms 500
+
+      - name: Check model size
+        run: |
+          MODEL_SIZE=$(stat -f%z models/model_latest.pkl)
+          if [ $MODEL_SIZE -gt 1073741824 ]; then
+            echo "Model size exceeds 1GB limit"
+            exit 1
+          fi
+
+  build:
+    name: Build and Push Docker Image
+    needs: [test, validate-model]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.api.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_STAGING }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl set image deployment/model-service \
+            model-service=${{ needs.build.outputs.image-tag }} \
+            -n staging
+
+          kubectl rollout status deployment/model-service -n staging
+
+      - name: Run smoke tests
+        run: |
+          python scripts/smoke_test.py \
+            --endpoint https://staging.api.example.com \
+            --requests 100
+
+      - name: Notify deployment
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Staging deployment completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always()
+
+  deploy-production:
+    name: Deploy to Production
+    needs: [build, deploy-staging]
+    if: github.event.inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_PRODUCTION }}
+
+      - name: Create backup
+        run: |
+          kubectl get deployment model-service -n production -o yaml > backup.yaml
+
+      - name: Deploy with canary strategy
+        run: |
+          python scripts/canary_deploy.py \
+            --image ${{ needs.build.outputs.image-tag }} \
+            --namespace production \
+            --stages 0.05,0.10,0.25,0.50,1.0 \
+            --stage-duration 600
+
+      - name: Run production smoke tests
+        run: |
+          python scripts/smoke_test.py \
+            --endpoint https://api.example.com \
+            --requests 1000
+
+      - name: Update model registry
+        run: |
+          python scripts/update_registry.py \
+            --model-id ${{ github.sha }} \
+            --status production
+
+      - name: Notify deployment
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always()
+
+  rollback:
+    name: Rollback Deployment
+    if: failure()
+    needs: [deploy-production]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rollback to previous version
+        run: |
+          kubectl rollout undo deployment/model-service -n production
+          kubectl rollout status deployment/model-service -n production
+
+      - name: Notify rollback
+        uses: 8398a7/action-slack@v3
+        with:
+          status: 'failure'
+          text: 'Production deployment failed, rollback initiated'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+\end{lstlisting}
+
+\section{Real-World Scenario: The Black Friday Deployment Disaster}
+
+\subsection{RetailML's Production Outage}
+
+RetailML, an e-commerce recommendation platform serving 5 million daily predictions, deployed a new recommendation model on Black Friday eve—the highest traffic day of the year. The deployment used a simple rolling update without proper validation or monitoring.
+
+Within 15 minutes of deployment:
+\begin{itemize}
+    \item \textbf{Recommendation API latency} increased from 50ms to 8 seconds
+    \item \textbf{Error rate} spiked to 23\% (from baseline 0.1\%)
+    \item \textbf{Customer purchases} dropped 47\% as pages failed to load
+    \item \textbf{Revenue loss}: \$1.2M in the first hour
+\end{itemize}
+
+\subsection{Root Cause Analysis}
+
+The incident investigation revealed multiple failures:
+
+\textbf{1. Insufficient Resource Allocation}
+\begin{itemize}
+    \item New model required 3.5GB memory vs. 1GB allocated
+    \item Containers OOMKilled and restarted continuously
+    \item No resource request updates in deployment configuration
+\end{itemize}
+
+\textbf{2. Missing Performance Validation}
+\begin{itemize}
+    \item Model inference time: 800ms (vs. 30ms for old model)
+    \item No load testing performed before production
+    \item Staging environment had 10x less traffic than production
+\end{itemize}
+
+\textbf{3. Poor Deployment Strategy}
+\begin{itemize}
+    \item Rolling update deployed to all pods simultaneously
+    \item No canary testing with small traffic percentage
+    \item No automatic rollback on error rate increase
+\end{itemize}
+
+\textbf{4. Inadequate Monitoring}
+\begin{itemize}
+    \item No alerting on latency degradation
+    \item 15 minutes until manual detection
+    \item No automated circuit breaker to old version
+\end{itemize}
+
+\subsection{The Recovery Process}
+
+\textbf{Immediate Actions (15-30 minutes)}:
+\begin{enumerate}
+    \item Manual rollback to previous deployment (10 minutes)
+    \item Verified old version health checks passing
+    \item Confirmed error rate returned to baseline
+    \item Revenue recovery began
+\end{enumerate}
+
+\textbf{Root Cause Fixes (Week 1)}:
+\begin{enumerate}
+    \item Updated Kubernetes deployment with 4GB memory limit
+    \item Optimized model inference (quantization + ONNX runtime)
+    \item Reduced inference time from 800ms to 45ms
+    \item Implemented model performance gates in CI/CD
+\end{enumerate}
+
+\textbf{Process Improvements (Week 2-4)}:
+\begin{enumerate}
+    \item Implemented canary deployment strategy
+    \item Added automated rollback on SLO violations
+    \item Enhanced monitoring with p95/p99 latency alerts
+    \item Created production-scale load testing environment
+    \item Established deployment windows (never on high-traffic periods)
+\end{enumerate}
+
+\subsection{The Corrective Deployment}
+
+After fixes, the team successfully deployed with canary strategy:
+
+\begin{enumerate}
+    \item \textbf{5\% canary}: Monitored for 30 minutes, p99 latency 52ms (OK)
+    \item \textbf{25\% canary}: Monitored for 1 hour, error rate 0.08\% (OK)
+    \item \textbf{50\% canary}: Monitored for 2 hours, all metrics healthy (OK)
+    \item \textbf{100\% rollout}: Completed successfully
+\end{enumerate}
+
+Results after successful deployment:
+\begin{itemize}
+    \item Recommendation quality improved 12\% (measured by CTR)
+    \item Latency maintained at p99 < 100ms
+    \item Zero errors during deployment
+    \item \$450K additional weekly revenue from better recommendations
+\end{itemize}
+
+\subsection{Lessons Learned}
+
+\begin{enumerate}
+    \item \textbf{Never deploy on peak traffic days}: Deployment windows matter
+    \item \textbf{Canary deployments are mandatory}: Catch issues with 5\% traffic, not 100\%
+    \item \textbf{Performance testing is non-negotiable}: Staging must match production load
+    \item \textbf{Resource requirements must be validated}: Memory/CPU limits prevent OOM kills
+    \item \textbf{Automated rollback saves millions}: Manual detection is too slow
+    \item \textbf{Monitoring must be proactive}: Alert before customers notice
+    \item \textbf{Model optimization is deployment engineering}: Fast models prevent incidents
+\end{enumerate}
+
+\section{Exercises}
+
+\subsection{Exercise 1: FastAPI Model Service (Easy)}
+
+Implement a complete FastAPI service for a classification model:
+\begin{itemize}
+    \item Request/response validation with Pydantic
+    \item Health and readiness endpoints
+    \item Prediction endpoint with error handling
+    \item Metrics endpoint for monitoring
+    \item CORS middleware configuration
+\end{itemize}
+
+Test with curl or Python requests library.
+
+\subsection{Exercise 2: Docker Containerization (Easy)}
+
+Create a production Dockerfile for your model service:
+\begin{itemize}
+    \item Multi-stage build (builder + runtime)
+    \item Non-root user for security
+    \item Minimal base image (python:3.10-slim)
+    \item Health check configuration
+    \item Proper layer caching for dependencies
+\end{itemize}
+
+Build and run the container, verify endpoints work.
+
+\subsection{Exercise 3: Kubernetes Deployment (Medium)}
+
+Write Kubernetes manifests for model deployment:
+\begin{itemize}
+    \item Deployment with 3 replicas
+    \item Resource requests and limits
+    \item Liveness and readiness probes
+    \item Service with ClusterIP
+    \item HorizontalPodAutoscaler based on CPU
+\end{itemize}
+
+Deploy to local Kubernetes (minikube or kind) and test scaling.
+
+\subsection{Exercise 4: Model Registry (Medium)}
+
+Implement a model registry system:
+\begin{itemize}
+    \item Register models with metadata (version, metrics, author)
+    \item Promote models through stages (dev → staging → production)
+    \item Compare model metrics between versions
+    \item Rollback to previous production version
+    \item List models with filtering
+\end{itemize}
+
+Test with multiple model versions and promotions.
+
+\subsection{Exercise 5: Blue-Green Deployment (Medium)}
+
+Implement blue-green deployment:
+\begin{itemize}
+    \item Maintain two identical environments
+    \item Deploy new version to inactive environment
+    \item Run validation tests on new version
+    \item Switch traffic to new version
+    \item Implement instant rollback capability
+\end{itemize}
+
+Simulate a deployment and rollback scenario.
+
+\subsection{Exercise 6: Canary Deployment with Monitoring (Advanced)}
+
+Implement canary deployment with automated decision making:
+\begin{itemize}
+    \item Gradual traffic increase (5\% → 10\% → 25\% → 50\% → 100\%)
+    \item Real-time metrics comparison (error rate, latency)
+    \item Automated rollback on threshold violations
+    \item Stage duration configuration
+    \item Comprehensive logging
+\end{itemize}
+
+Simulate both successful deployment and automatic rollback.
+
+\subsection{Exercise 7: Complete CI/CD Pipeline (Advanced)}
+
+Build end-to-end deployment pipeline:
+
+\begin{enumerate}
+    \item \textbf{Testing Stage}:
+    \begin{itemize}
+        \item Unit tests with coverage
+        \item Integration tests
+        \item Model performance validation
+    \end{itemize}
+
+    \item \textbf{Build Stage}:
+    \begin{itemize}
+        \item Docker image build
+        \item Security scanning
+        \item Image registry push
+    \end{itemize}
+
+    \item \textbf{Deploy Stage}:
+    \begin{itemize}
+        \item Staging deployment with canary
+        \item Smoke tests
+        \item Production deployment approval
+        \item Production canary deployment
+    \end{itemize}
+
+    \item \textbf{Monitoring}:
+    \begin{itemize}
+        \item Automated metrics collection
+        \item Alerting on SLO violations
+        \item Automatic rollback on failure
+    \end{itemize}
+\end{enumerate}
+
+Implement with GitHub Actions, GitLab CI, or Jenkins.
+
+\section{Summary}
+
+This chapter provided comprehensive production deployment strategies:
+
+\begin{itemize}
+    \item \textbf{Model Serving API}: FastAPI with request validation, error handling, health checks, and metrics endpoints for production-grade ML services
+
+    \item \textbf{Containerization}: Multi-stage Docker builds with security best practices, resource limits, and optimized layer caching for efficient deployments
+
+    \item \textbf{Deployment Strategies}: Blue-green for zero-downtime with instant rollback, canary for gradual rollout with risk mitigation, rolling for resource-efficient updates
+
+    \item \textbf{Kubernetes Orchestration}: Deployment configurations with resource management, HPA for auto-scaling, health probes for reliability
+
+    \item \textbf{Model Versioning}: Centralized registry for version tracking, promotion workflows (dev → staging → production), rollback capabilities
+
+    \item \textbf{CI/CD Automation}: Automated testing, validation, building, and deployment pipelines with security scanning and smoke tests
+\end{itemize}
+
+Deployment engineering transforms models from experimental code into reliable production systems. By implementing proper containerization, deployment strategies, monitoring, and automation, teams can deploy models confidently with minimal downtime, rapid rollback capabilities, and continuous validation of production performance.
+
+The key insight: deployment is not a one-time event but a continuous process requiring rigorous testing, gradual rollout, comprehensive monitoring, and instant rollback capabilities. Organizations that master deployment engineering achieve higher model velocity, lower incident rates, and greater business impact from ML investments.

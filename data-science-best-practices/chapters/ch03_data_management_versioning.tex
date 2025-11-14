@@ -1,0 +1,4784 @@
+\chapter{Data Management and Versioning}
+\label{ch:data_management}
+
+\section{Chapter Overview}
+
+Data is the foundation of machine learning systems. Poor data quality leads to poor models, regardless of algorithmic sophistication. Yet data management remains one of the most neglected aspects of ML engineering. This chapter addresses the complete lifecycle of data management: quality assessment, versioning, schema evolution, monitoring, and corruption detection.
+
+\subsection{Learning Objectives}
+
+By the end of this chapter, you will be able to:
+
+\begin{itemize}
+    \item Implement comprehensive data quality metrics with statistical validation
+    \item Manage data versions using DVC with pipeline automation
+    \item Design and evolve data schemas with compatibility guarantees
+    \item Monitor data quality in real-time with alerting systems
+    \item Detect data drift using statistical methods
+    \item Identify and diagnose data corruption systematically
+    \item Track data lineage through complex pipelines
+    \item Implement data governance workflows
+\end{itemize}
+
+\section{The Data Quality Challenge}
+
+\subsection{Why Data Quality Matters}
+
+Consider these industry findings:
+
+\begin{itemize}
+    \item Poor data quality costs organizations an average of \$15 million per year (Gartner)
+    \item Data scientists spend 60\% of their time cleaning and organizing data
+    \item 47\% of data records contain at least one critical error
+    \item Silent data corruption causes 30\% of production ML failures
+\end{itemize}
+
+The principle ``garbage in, garbage out'' is fundamental. No amount of feature engineering or hyperparameter tuning can compensate for fundamentally flawed data.
+
+\subsection{Dimensions of Data Quality}
+
+We assess data quality across multiple dimensions:
+
+\begin{enumerate}
+    \item \textbf{Completeness}: What percentage of expected data is present?
+    \item \textbf{Validity}: Does data conform to expected schemas and constraints?
+    \item \textbf{Accuracy}: How closely does data represent ground truth?
+    \item \textbf{Consistency}: Are relationships and constraints maintained?
+    \item \textbf{Timeliness}: Is data fresh and up-to-date?
+    \item \textbf{Uniqueness}: Are there inappropriate duplicates?
+\end{enumerate}
+
+\section{Data Quality Metrics System}
+
+We implement a comprehensive data quality assessment framework with statistical validation.
+
+\begin{lstlisting}[style=python, caption={Data quality metrics with statistical validation}]
+"""
+Data Quality Metrics System
+
+Comprehensive assessment of data quality across multiple dimensions
+with statistical validation and drift detection.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+import logging
+import numpy as np
+import pandas as pd
+from scipy import stats
+import json
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class DataType(Enum):
+    """Data type categories."""
+    NUMERIC = "numeric"
+    CATEGORICAL = "categorical"
+    DATETIME = "datetime"
+    TEXT = "text"
+    BOOLEAN = "boolean"
+
+
+class QualityIssueType(Enum):
+    """Types of data quality issues."""
+    MISSING_VALUES = "missing_values"
+    INVALID_VALUES = "invalid_values"
+    OUTLIERS = "outliers"
+    DUPLICATES = "duplicates"
+    SCHEMA_MISMATCH = "schema_mismatch"
+    DRIFT = "drift"
+    CORRELATION_BREAK = "correlation_break"
+
+
+@dataclass
+class QualityIssue:
+    """Representation of a data quality issue."""
+    issue_type: QualityIssueType
+    severity: str  # "critical", "high", "medium", "low"
+    column: Optional[str]
+    description: str
+    count: int
+    percentage: float
+    recommendation: str
+
+
+@dataclass
+class ColumnQualityMetrics:
+    """Quality metrics for a single column."""
+    column_name: str
+    data_type: DataType
+
+    # Completeness
+    total_count: int = 0
+    null_count: int = 0
+    null_percentage: float = 0.0
+
+    # Uniqueness
+    unique_count: int = 0
+    duplicate_count: int = 0
+    duplicate_percentage: float = 0.0
+
+    # Validity (for numeric)
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    mean_value: Optional[float] = None
+    std_value: Optional[float] = None
+    median_value: Optional[float] = None
+
+    # Validity (for categorical)
+    distinct_values: Optional[int] = None
+    most_common: Optional[List[Tuple[Any, int]]] = None
+
+    # Outliers (for numeric)
+    outlier_count: int = 0
+    outlier_percentage: float = 0.0
+
+    # Quality score
+    quality_score: float = 0.0
+
+    issues: List[QualityIssue] = field(default_factory=list)
+
+    def calculate_quality_score(self) -> float:
+        """
+        Calculate overall quality score for this column (0-100).
+
+        Returns:
+            Quality score
+        """
+        score = 100.0
+
+        # Penalize missing values
+        score -= self.null_percentage * 0.5
+
+        # Penalize outliers (for numeric)
+        if self.data_type == DataType.NUMERIC:
+            score -= self.outlier_percentage * 0.3
+
+        # Penalize low uniqueness (potential duplicates)
+        if self.total_count > 0:
+            uniqueness = self.unique_count / self.total_count
+            if uniqueness < 0.5:
+                score -= (0.5 - uniqueness) * 20
+
+        return max(0.0, score)
+
+
+@dataclass
+class DataQualityReport:
+    """Complete data quality assessment report."""
+    timestamp: datetime = field(default_factory=datetime.now)
+    dataset_name: str = ""
+    row_count: int = 0
+    column_count: int = 0
+
+    # Column-level metrics
+    column_metrics: Dict[str, ColumnQualityMetrics] = field(default_factory=dict)
+
+    # Dataset-level issues
+    issues: List[QualityIssue] = field(default_factory=list)
+
+    # Overall scores
+    overall_quality_score: float = 0.0
+    completeness_score: float = 0.0
+    validity_score: float = 0.0
+    consistency_score: float = 0.0
+
+    def calculate_overall_score(self) -> float:
+        """Calculate overall quality score."""
+        if not self.column_metrics:
+            return 0.0
+
+        column_scores = [m.quality_score for m in self.column_metrics.values()]
+        return np.mean(column_scores)
+
+    def get_critical_issues(self) -> List[QualityIssue]:
+        """Get all critical and high severity issues."""
+        critical = []
+
+        # Dataset-level issues
+        critical.extend([
+            i for i in self.issues
+            if i.severity in ["critical", "high"]
+        ])
+
+        # Column-level issues
+        for metrics in self.column_metrics.values():
+            critical.extend([
+                i for i in metrics.issues
+                if i.severity in ["critical", "high"]
+            ])
+
+        return critical
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "dataset_name": self.dataset_name,
+            "row_count": self.row_count,
+            "column_count": self.column_count,
+            "overall_quality_score": self.overall_quality_score,
+            "completeness_score": self.completeness_score,
+            "validity_score": self.validity_score,
+            "consistency_score": self.consistency_score,
+            "critical_issues_count": len(self.get_critical_issues()),
+            "column_metrics": {
+                name: {
+                    "data_type": m.data_type.value,
+                    "null_percentage": m.null_percentage,
+                    "quality_score": m.quality_score,
+                    "issues": len(m.issues)
+                }
+                for name, m in self.column_metrics.items()
+            },
+            "issues": [
+                {
+                    "type": i.issue_type.value,
+                    "severity": i.severity,
+                    "column": i.column,
+                    "description": i.description,
+                    "percentage": i.percentage
+                }
+                for i in self.issues
+            ]
+        }
+
+    def save(self, filepath: Path) -> None:
+        """Save report to JSON file."""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Quality report saved to {filepath}")
+
+
+class DataQualityAnalyzer:
+    """Analyze data quality with statistical validation."""
+
+    def __init__(
+        self,
+        outlier_method: str = "iqr",
+        outlier_threshold: float = 1.5
+    ):
+        """
+        Initialize analyzer.
+
+        Args:
+            outlier_method: Method for outlier detection ("iqr", "zscore")
+            outlier_threshold: Threshold for outlier detection
+        """
+        self.outlier_method = outlier_method
+        self.outlier_threshold = outlier_threshold
+
+    def infer_data_type(self, series: pd.Series) -> DataType:
+        """Infer data type of a pandas Series."""
+        if pd.api.types.is_numeric_dtype(series):
+            return DataType.NUMERIC
+        elif pd.api.types.is_datetime64_dtype(series):
+            return DataType.DATETIME
+        elif pd.api.types.is_bool_dtype(series):
+            return DataType.BOOLEAN
+        elif series.nunique() / len(series) < 0.5:  # Heuristic
+            return DataType.CATEGORICAL
+        else:
+            return DataType.TEXT
+
+    def detect_outliers_iqr(
+        self,
+        series: pd.Series,
+        threshold: float = 1.5
+    ) -> np.ndarray:
+        """
+        Detect outliers using IQR method.
+
+        Args:
+            series: Data series
+            threshold: IQR multiplier (default 1.5)
+
+        Returns:
+            Boolean array indicating outliers
+        """
+        Q1 = series.quantile(0.25)
+        Q3 = series.quantile(0.75)
+        IQR = Q3 - Q1
+
+        lower_bound = Q1 - threshold * IQR
+        upper_bound = Q3 + threshold * IQR
+
+        return (series < lower_bound) | (series > upper_bound)
+
+    def detect_outliers_zscore(
+        self,
+        series: pd.Series,
+        threshold: float = 3.0
+    ) -> np.ndarray:
+        """
+        Detect outliers using Z-score method.
+
+        Args:
+            series: Data series
+            threshold: Z-score threshold (default 3.0)
+
+        Returns:
+            Boolean array indicating outliers
+        """
+        z_scores = np.abs(stats.zscore(series.dropna()))
+        # Align with original index
+        outliers = np.zeros(len(series), dtype=bool)
+        outliers[series.notna()] = z_scores > threshold
+        return outliers
+
+    def analyze_column(
+        self,
+        series: pd.Series,
+        column_name: str
+    ) -> ColumnQualityMetrics:
+        """
+        Analyze quality of a single column.
+
+        Args:
+            series: Data series to analyze
+            column_name: Name of the column
+
+        Returns:
+            ColumnQualityMetrics
+        """
+        data_type = self.infer_data_type(series)
+
+        metrics = ColumnQualityMetrics(
+            column_name=column_name,
+            data_type=data_type,
+            total_count=len(series)
+        )
+
+        # Completeness
+        metrics.null_count = series.isna().sum()
+        metrics.null_percentage = (metrics.null_count / len(series)) * 100
+
+        if metrics.null_percentage > 50:
+            metrics.issues.append(QualityIssue(
+                issue_type=QualityIssueType.MISSING_VALUES,
+                severity="critical",
+                column=column_name,
+                description=f"More than 50% missing values",
+                count=metrics.null_count,
+                percentage=metrics.null_percentage,
+                recommendation="Investigate data collection process"
+            ))
+        elif metrics.null_percentage > 20:
+            metrics.issues.append(QualityIssue(
+                issue_type=QualityIssueType.MISSING_VALUES,
+                severity="high",
+                column=column_name,
+                description=f"High percentage of missing values",
+                count=metrics.null_count,
+                percentage=metrics.null_percentage,
+                recommendation="Consider imputation or removal"
+            ))
+
+        # Uniqueness
+        metrics.unique_count = series.nunique()
+        metrics.duplicate_count = len(series) - metrics.unique_count
+        metrics.duplicate_percentage = (
+            metrics.duplicate_count / len(series)
+        ) * 100
+
+        # Type-specific analysis
+        if data_type == DataType.NUMERIC:
+            valid_data = series.dropna()
+            if len(valid_data) > 0:
+                metrics.min_value = float(valid_data.min())
+                metrics.max_value = float(valid_data.max())
+                metrics.mean_value = float(valid_data.mean())
+                metrics.std_value = float(valid_data.std())
+                metrics.median_value = float(valid_data.median())
+
+                # Outlier detection
+                if self.outlier_method == "iqr":
+                    outliers = self.detect_outliers_iqr(
+                        valid_data,
+                        self.outlier_threshold
+                    )
+                else:
+                    outliers = self.detect_outliers_zscore(
+                        valid_data,
+                        self.outlier_threshold
+                    )
+
+                metrics.outlier_count = outliers.sum()
+                metrics.outlier_percentage = (
+                    metrics.outlier_count / len(series)
+                ) * 100
+
+                if metrics.outlier_percentage > 10:
+                    metrics.issues.append(QualityIssue(
+                        issue_type=QualityIssueType.OUTLIERS,
+                        severity="medium",
+                        column=column_name,
+                        description=f"High percentage of outliers",
+                        count=metrics.outlier_count,
+                        percentage=metrics.outlier_percentage,
+                        recommendation="Review outlier detection or data collection"
+                    ))
+
+        elif data_type == DataType.CATEGORICAL:
+            metrics.distinct_values = series.nunique()
+            value_counts = series.value_counts()
+            metrics.most_common = list(value_counts.head(10).items())
+
+            # Check for too many categories
+            if metrics.distinct_values > 100:
+                metrics.issues.append(QualityIssue(
+                    issue_type=QualityIssueType.INVALID_VALUES,
+                    severity="medium",
+                    column=column_name,
+                    description=f"Very high cardinality ({metrics.distinct_values})",
+                    count=metrics.distinct_values,
+                    percentage=0.0,
+                    recommendation="Consider grouping or feature engineering"
+                ))
+
+        # Calculate quality score
+        metrics.quality_score = metrics.calculate_quality_score()
+
+        return metrics
+
+    def analyze_dataframe(
+        self,
+        df: pd.DataFrame,
+        dataset_name: str = "dataset"
+    ) -> DataQualityReport:
+        """
+        Analyze complete dataframe.
+
+        Args:
+            df: DataFrame to analyze
+            dataset_name: Name of dataset
+
+        Returns:
+            DataQualityReport
+        """
+        logger.info(f"Analyzing data quality for {dataset_name}")
+
+        report = DataQualityReport(
+            dataset_name=dataset_name,
+            row_count=len(df),
+            column_count=len(df.columns)
+        )
+
+        # Analyze each column
+        for col in df.columns:
+            metrics = self.analyze_column(df[col], col)
+            report.column_metrics[col] = metrics
+
+        # Calculate dataset-level scores
+        report.completeness_score = 100 - np.mean([
+            m.null_percentage for m in report.column_metrics.values()
+        ])
+
+        report.validity_score = np.mean([
+            m.quality_score for m in report.column_metrics.values()
+        ])
+
+        # Check for duplicate rows
+        duplicate_rows = df.duplicated().sum()
+        if duplicate_rows > 0:
+            duplicate_pct = (duplicate_rows / len(df)) * 100
+            severity = "critical" if duplicate_pct > 10 else "high"
+
+            report.issues.append(QualityIssue(
+                issue_type=QualityIssueType.DUPLICATES,
+                severity=severity,
+                column=None,
+                description=f"Duplicate rows detected",
+                count=duplicate_rows,
+                percentage=duplicate_pct,
+                recommendation="Remove duplicates or investigate source"
+            ))
+
+        # Calculate overall score
+        report.overall_quality_score = report.calculate_overall_score()
+
+        logger.info(
+            f"Analysis complete: overall score {report.overall_quality_score:.2f}, "
+            f"{len(report.get_critical_issues())} critical issues"
+        )
+
+        return report
+
+
+class DataDriftDetector:
+    """Detect distribution drift between datasets."""
+
+    @staticmethod
+    def ks_test(
+        reference: pd.Series,
+        current: pd.Series,
+        alpha: float = 0.05
+    ) -> Tuple[float, float, bool]:
+        """
+        Kolmogorov-Smirnov test for distribution drift.
+
+        Args:
+            reference: Reference distribution
+            current: Current distribution
+            alpha: Significance level
+
+        Returns:
+            Tuple of (statistic, p_value, has_drifted)
+        """
+        # Remove NaN values
+        ref_clean = reference.dropna()
+        curr_clean = current.dropna()
+
+        if len(ref_clean) == 0 or len(curr_clean) == 0:
+            logger.warning("Empty series for KS test")
+            return 0.0, 1.0, False
+
+        statistic, p_value = stats.ks_2samp(ref_clean, curr_clean)
+        has_drifted = p_value < alpha
+
+        return statistic, p_value, has_drifted
+
+    @staticmethod
+    def chi_squared_test(
+        reference: pd.Series,
+        current: pd.Series,
+        alpha: float = 0.05
+    ) -> Tuple[float, float, bool]:
+        """
+        Chi-squared test for categorical drift.
+
+        Args:
+            reference: Reference distribution
+            current: Current distribution
+            alpha: Significance level
+
+        Returns:
+            Tuple of (statistic, p_value, has_drifted)
+        """
+        # Get value counts
+        ref_counts = reference.value_counts()
+        curr_counts = current.value_counts()
+
+        # Align categories
+        all_categories = set(ref_counts.index) | set(curr_counts.index)
+
+        ref_aligned = [ref_counts.get(cat, 0) for cat in all_categories]
+        curr_aligned = [curr_counts.get(cat, 0) for cat in all_categories]
+
+        # Chi-squared test
+        statistic, p_value = stats.chisquare(curr_aligned, ref_aligned)
+        has_drifted = p_value < alpha
+
+        return statistic, p_value, has_drifted
+
+    @classmethod
+    def detect_drift(
+        cls,
+        reference_df: pd.DataFrame,
+        current_df: pd.DataFrame,
+        numerical_columns: Optional[List[str]] = None,
+        categorical_columns: Optional[List[str]] = None,
+        alpha: float = 0.05
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Detect drift across multiple columns.
+
+        Args:
+            reference_df: Reference dataset
+            current_df: Current dataset
+            numerical_columns: Columns to test with KS test
+            categorical_columns: Columns to test with chi-squared
+            alpha: Significance level
+
+        Returns:
+            Dictionary of drift results per column
+        """
+        results = {}
+
+        # Numerical drift
+        if numerical_columns is None:
+            numerical_columns = reference_df.select_dtypes(
+                include=[np.number]
+            ).columns.tolist()
+
+        for col in numerical_columns:
+            if col in current_df.columns:
+                stat, p_val, drifted = cls.ks_test(
+                    reference_df[col],
+                    current_df[col],
+                    alpha
+                )
+
+                results[col] = {
+                    "test": "ks_test",
+                    "statistic": stat,
+                    "p_value": p_val,
+                    "drifted": drifted,
+                    "severity": "high" if drifted else "none"
+                }
+
+        # Categorical drift
+        if categorical_columns:
+            for col in categorical_columns:
+                if col in current_df.columns:
+                    stat, p_val, drifted = cls.chi_squared_test(
+                        reference_df[col],
+                        current_df[col],
+                        alpha
+                    )
+
+                    results[col] = {
+                        "test": "chi_squared",
+                        "statistic": stat,
+                        "p_value": p_val,
+                        "drifted": drifted,
+                        "severity": "high" if drifted else "none"
+                    }
+
+        return results
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create sample data
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'age': np.random.normal(35, 10, 1000),
+        'income': np.random.lognormal(10, 1, 1000),
+        'category': np.random.choice(['A', 'B', 'C'], 1000),
+        'score': np.random.uniform(0, 100, 1000)
+    })
+
+    # Add some quality issues
+    df.loc[0:50, 'age'] = np.nan
+    df.loc[100:105, :] = df.loc[100:105, :]  # Duplicates
+
+    # Analyze quality
+    analyzer = DataQualityAnalyzer()
+    report = analyzer.analyze_dataframe(df, "customer_data")
+
+    print(f"Overall Quality Score: {report.overall_quality_score:.2f}")
+    print(f"Critical Issues: {len(report.get_critical_issues())}")
+
+    for issue in report.get_critical_issues():
+        print(f"\n[{issue.severity.upper()}] {issue.description}")
+        print(f"  Column: {issue.column}")
+        print(f"  Percentage: {issue.percentage:.2f}%")
+        print(f"  Recommendation: {issue.recommendation}")
+
+    # Test drift detection
+    df_reference = df.copy()
+    df_current = df.copy()
+    df_current['age'] = np.random.normal(40, 10, 1000)  # Drift
+
+    drift_results = DataDriftDetector.detect_drift(
+        df_reference,
+        df_current,
+        numerical_columns=['age', 'income', 'score']
+    )
+
+    print(f"\nDrift Detection Results:")
+    for col, result in drift_results.items():
+        if result['drifted']:
+            print(f"  {col}: DRIFT DETECTED (p={result['p_value']:.4f})")
+\end{lstlisting}
+
+\section{Data Version Control with DVC}
+
+DVC (Data Version Control) extends Git to handle large datasets and ML pipelines. We provide utilities for DVC integration and pipeline automation.
+
+\begin{lstlisting}[style=python, caption={DVC integration and pipeline automation}]
+"""
+DVC Integration Utilities
+
+Automates DVC operations, pipeline creation, and validation.
+"""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional
+import subprocess
+import yaml
+import logging
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DVCStage:
+    """Representation of a DVC pipeline stage."""
+    name: str
+    command: str
+    dependencies: List[str]
+    outputs: List[str]
+    parameters: Optional[Dict[str, Any]] = None
+    metrics: Optional[List[str]] = None
+
+    def to_dict(self) -> Dict:
+        """Convert to DVC stage format."""
+        stage = {
+            'cmd': self.command,
+            'deps': self.dependencies,
+            'outs': self.outputs
+        }
+
+        if self.parameters:
+            stage['params'] = self.parameters
+
+        if self.metrics:
+            stage['metrics'] = [{'path': m} for m in self.metrics]
+
+        return stage
+
+
+class DVCManager:
+    """Manage DVC operations and pipelines."""
+
+    def __init__(self, repo_path: Path):
+        """
+        Initialize DVC manager.
+
+        Args:
+            repo_path: Path to Git repository
+        """
+        self.repo_path = Path(repo_path)
+        self._verify_dvc_installed()
+
+    def _verify_dvc_installed(self) -> None:
+        """Verify DVC is installed."""
+        try:
+            subprocess.run(
+                ['dvc', 'version'],
+                capture_output=True,
+                check=True
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            raise RuntimeError("DVC not installed. Install with: pip install dvc")
+
+    def init_dvc(self) -> None:
+        """Initialize DVC in repository."""
+        try:
+            subprocess.run(
+                ['dvc', 'init'],
+                cwd=self.repo_path,
+                check=True
+            )
+            logger.info("DVC initialized")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to initialize DVC: {e}")
+            raise
+
+    def add_remote(
+        self,
+        name: str,
+        url: str,
+        default: bool = True
+    ) -> None:
+        """
+        Add DVC remote storage.
+
+        Args:
+            name: Remote name
+            url: Remote URL (s3://, gs://, /path/to/storage)
+            default: Set as default remote
+        """
+        try:
+            subprocess.run(
+                ['dvc', 'remote', 'add', name, url],
+                cwd=self.repo_path,
+                check=True
+            )
+
+            if default:
+                subprocess.run(
+                    ['dvc', 'remote', 'default', name],
+                    cwd=self.repo_path,
+                    check=True
+                )
+
+            logger.info(f"Added DVC remote: {name}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to add remote: {e}")
+            raise
+
+    def add_data(self, data_path: Path) -> None:
+        """
+        Add data file or directory to DVC.
+
+        Args:
+            data_path: Path to data file or directory
+        """
+        try:
+            subprocess.run(
+                ['dvc', 'add', str(data_path)],
+                cwd=self.repo_path,
+                check=True
+            )
+            logger.info(f"Added to DVC: {data_path}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to add data: {e}")
+            raise
+
+    def push_data(self, remote: Optional[str] = None) -> None:
+        """
+        Push data to remote storage.
+
+        Args:
+            remote: Remote name (uses default if None)
+        """
+        cmd = ['dvc', 'push']
+        if remote:
+            cmd.extend(['-r', remote])
+
+        try:
+            subprocess.run(cmd, cwd=self.repo_path, check=True)
+            logger.info("Pushed data to remote")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to push data: {e}")
+            raise
+
+    def pull_data(self, remote: Optional[str] = None) -> None:
+        """
+        Pull data from remote storage.
+
+        Args:
+            remote: Remote name (uses default if None)
+        """
+        cmd = ['dvc', 'pull']
+        if remote:
+            cmd.extend(['-r', remote])
+
+        try:
+            subprocess.run(cmd, cwd=self.repo_path, check=True)
+            logger.info("Pulled data from remote")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to pull data: {e}")
+            raise
+
+    def create_pipeline(
+        self,
+        stages: List[DVCStage],
+        output_file: Path = Path("dvc.yaml")
+    ) -> None:
+        """
+        Create DVC pipeline from stages.
+
+        Args:
+            stages: List of pipeline stages
+            output_file: Output pipeline file
+        """
+        pipeline = {'stages': {}}
+
+        for stage in stages:
+            pipeline['stages'][stage.name] = stage.to_dict()
+
+        output_path = self.repo_path / output_file
+        with open(output_path, 'w') as f:
+            yaml.dump(pipeline, f, default_flow_style=False)
+
+        logger.info(f"Pipeline created: {output_path}")
+
+    def run_pipeline(
+        self,
+        pipeline_file: Path = Path("dvc.yaml")
+    ) -> None:
+        """
+        Run DVC pipeline.
+
+        Args:
+            pipeline_file: Pipeline file to run
+        """
+        try:
+            subprocess.run(
+                ['dvc', 'repro', str(pipeline_file)],
+                cwd=self.repo_path,
+                check=True
+            )
+            logger.info("Pipeline executed successfully")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Pipeline execution failed: {e}")
+            raise
+
+    def get_data_hash(self, data_path: Path) -> Optional[str]:
+        """
+        Get DVC hash for data file.
+
+        Args:
+            data_path: Path to data file
+
+        Returns:
+            MD5 hash from DVC
+        """
+        dvc_file = self.repo_path / f"{data_path}.dvc"
+
+        if not dvc_file.exists():
+            logger.warning(f"DVC file not found: {dvc_file}")
+            return None
+
+        with open(dvc_file, 'r') as f:
+            dvc_data = yaml.safe_load(f)
+
+        return dvc_data.get('outs', [{}])[0].get('md5')
+
+    def validate_data_integrity(
+        self,
+        data_path: Path
+    ) -> bool:
+        """
+        Validate data integrity against DVC hash.
+
+        Args:
+            data_path: Path to data file
+
+        Returns:
+            True if integrity check passes
+        """
+        expected_hash = self.get_data_hash(data_path)
+
+        if expected_hash is None:
+            return False
+
+        # Calculate actual hash
+        hasher = hashlib.md5()
+        with open(self.repo_path / data_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hasher.update(chunk)
+
+        actual_hash = hasher.hexdigest()
+
+        is_valid = expected_hash == actual_hash
+
+        if is_valid:
+            logger.info(f"Data integrity validated: {data_path}")
+        else:
+            logger.error(
+                f"Data integrity check failed: {data_path}\n"
+                f"Expected: {expected_hash}\n"
+                f"Actual: {actual_hash}"
+            )
+
+        return is_valid
+
+
+class DVCPipelineBuilder:
+    """Builder for DVC pipelines."""
+
+    def __init__(self):
+        """Initialize pipeline builder."""
+        self.stages: List[DVCStage] = []
+
+    def add_stage(
+        self,
+        name: str,
+        command: str,
+        dependencies: List[str],
+        outputs: List[str],
+        parameters: Optional[Dict] = None,
+        metrics: Optional[List[str]] = None
+    ) -> 'DVCPipelineBuilder':
+        """
+        Add stage to pipeline.
+
+        Args:
+            name: Stage name
+            command: Command to execute
+            dependencies: Input dependencies
+            outputs: Output files
+            parameters: Parameters dictionary
+            metrics: Metrics files
+
+        Returns:
+            Self for chaining
+        """
+        stage = DVCStage(
+            name=name,
+            command=command,
+            dependencies=dependencies,
+            outputs=outputs,
+            parameters=parameters,
+            metrics=metrics
+        )
+
+        self.stages.append(stage)
+        return self
+
+    def build(
+        self,
+        repo_path: Path,
+        output_file: Path = Path("dvc.yaml")
+    ) -> None:
+        """
+        Build and save pipeline.
+
+        Args:
+            repo_path: Repository path
+            output_file: Output file name
+        """
+        manager = DVCManager(repo_path)
+        manager.create_pipeline(self.stages, output_file)
+
+
+# Example usage
+if __name__ == "__main__":
+    repo_path = Path(".")
+
+    # Initialize DVC manager
+    dvc = DVCManager(repo_path)
+
+    # Add remote storage (S3 example)
+    # dvc.add_remote("storage", "s3://my-bucket/dvc-storage")
+
+    # Add data to DVC
+    # dvc.add_data(Path("data/raw/dataset.csv"))
+
+    # Create ML pipeline
+    builder = DVCPipelineBuilder()
+
+    builder.add_stage(
+        name="prepare_data",
+        command="python src/prepare_data.py",
+        dependencies=["data/raw/dataset.csv", "src/prepare_data.py"],
+        outputs=["data/processed/train.csv", "data/processed/test.csv"],
+        parameters={"prepare.test_size": 0.2}
+    ).add_stage(
+        name="train_model",
+        command="python src/train_model.py",
+        dependencies=[
+            "data/processed/train.csv",
+            "src/train_model.py"
+        ],
+        outputs=["models/model.pkl"],
+        parameters={"train.n_estimators": 100},
+        metrics=["metrics/train_metrics.json"]
+    ).add_stage(
+        name="evaluate_model",
+        command="python src/evaluate_model.py",
+        dependencies=[
+            "data/processed/test.csv",
+            "models/model.pkl",
+            "src/evaluate_model.py"
+        ],
+        outputs=["reports/evaluation.json"],
+        metrics=["metrics/test_metrics.json"]
+    )
+
+    # Build pipeline
+    builder.build(repo_path)
+
+    print("DVC pipeline created successfully")
+    print("Run with: dvc repro")
+\end{lstlisting}
+
+\section{Enterprise Data Governance}
+
+\subsection{Data Lineage Tracking with Automated Discovery}
+
+Data lineage tracks the complete lifecycle of data from source to consumption, enabling impact analysis, compliance auditing, and debugging. Modern lineage systems automatically discover relationships through metadata extraction and query parsing.
+
+\begin{lstlisting}[style=python, caption={Automated data lineage tracking system}]
+"""
+Enterprise Data Lineage System
+
+Automated discovery and tracking of data lineage with impact analysis,
+compliance auditing, and visualization capabilities.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple
+from collections import defaultdict
+import logging
+import json
+from pathlib import Path
+import hashlib
+import networkx as nx
+
+logger = logging.getLogger(__name__)
+
+
+class LineageNodeType(Enum):
+    """Types of lineage nodes."""
+    SOURCE = "source"  # Raw data source (database, file, API)
+    TRANSFORMATION = "transformation"  # Processing step
+    MODEL = "model"  # ML model
+    DATASET = "dataset"  # Intermediate or final dataset
+    FEATURE = "feature"  # Feature engineering output
+    METRIC = "metric"  # Metric or KPI
+
+
+class LineageEdgeType(Enum):
+    """Types of lineage relationships."""
+    READS = "reads"
+    WRITES = "writes"
+    TRANSFORMS = "transforms"
+    DERIVES_FROM = "derives_from"
+    DEPENDS_ON = "depends_on"
+
+
+@dataclass
+class LineageNode:
+    """Node in the lineage graph."""
+    node_id: str
+    node_type: LineageNodeType
+    name: str
+    description: str = ""
+
+    # Metadata
+    schema: Optional[Dict] = None
+    location: Optional[str] = None
+    owner: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+
+    # Governance
+    pii_fields: List[str] = field(default_factory=list)
+    compliance_tags: List[str] = field(default_factory=list)
+    retention_days: Optional[int] = None
+
+    # Tracking
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    last_accessed: Optional[datetime] = None
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LineageEdge:
+    """Edge in the lineage graph."""
+    source_id: str
+    target_id: str
+    edge_type: LineageEdgeType
+
+    # Transformation details
+    transformation_logic: Optional[str] = None
+    column_mapping: Optional[Dict[str, str]] = None
+
+    # Tracking
+    created_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class DataLineageTracker:
+    """Track and analyze data lineage."""
+
+    def __init__(self, storage_path: Optional[Path] = None):
+        """
+        Initialize lineage tracker.
+
+        Args:
+            storage_path: Path to store lineage graph
+        """
+        self.nodes: Dict[str, LineageNode] = {}
+        self.edges: List[LineageEdge] = []
+        self.graph = nx.DiGraph()
+        self.storage_path = storage_path
+
+        if storage_path and storage_path.exists():
+            self.load()
+
+    def add_node(self, node: LineageNode) -> None:
+        """
+        Add node to lineage graph.
+
+        Args:
+            node: Lineage node to add
+        """
+        self.nodes[node.node_id] = node
+        self.graph.add_node(
+            node.node_id,
+            **{
+                'type': node.node_type.value,
+                'name': node.name,
+                'pii': len(node.pii_fields) > 0
+            }
+        )
+        logger.info(f"Added lineage node: {node.name} ({node.node_type.value})")
+
+    def add_edge(self, edge: LineageEdge) -> None:
+        """
+        Add edge to lineage graph.
+
+        Args:
+            edge: Lineage edge to add
+        """
+        self.edges.append(edge)
+        self.graph.add_edge(
+            edge.source_id,
+            edge.target_id,
+            type=edge.edge_type.value,
+            transformation=edge.transformation_logic
+        )
+        logger.info(
+            f"Added lineage edge: {edge.source_id} -> {edge.target_id} "
+            f"({edge.edge_type.value})"
+        )
+
+    def get_upstream_lineage(
+        self,
+        node_id: str,
+        max_depth: Optional[int] = None
+    ) -> Set[str]:
+        """
+        Get all upstream dependencies of a node.
+
+        Args:
+            node_id: Node to analyze
+            max_depth: Maximum depth to traverse
+
+        Returns:
+            Set of upstream node IDs
+        """
+        if node_id not in self.graph:
+            return set()
+
+        if max_depth is None:
+            return set(nx.ancestors(self.graph, node_id))
+
+        upstream = set()
+        current_level = {node_id}
+
+        for _ in range(max_depth):
+            next_level = set()
+            for node in current_level:
+                predecessors = set(self.graph.predecessors(node))
+                next_level.update(predecessors)
+                upstream.update(predecessors)
+
+            if not next_level:
+                break
+
+            current_level = next_level
+
+        return upstream
+
+    def get_downstream_lineage(
+        self,
+        node_id: str,
+        max_depth: Optional[int] = None
+    ) -> Set[str]:
+        """
+        Get all downstream dependencies of a node.
+
+        Args:
+            node_id: Node to analyze
+            max_depth: Maximum depth to traverse
+
+        Returns:
+            Set of downstream node IDs
+        """
+        if node_id not in self.graph:
+            return set()
+
+        if max_depth is None:
+            return set(nx.descendants(self.graph, node_id))
+
+        downstream = set()
+        current_level = {node_id}
+
+        for _ in range(max_depth):
+            next_level = set()
+            for node in current_level:
+                successors = set(self.graph.successors(node))
+                next_level.update(successors)
+                downstream.update(successors)
+
+            if not next_level:
+                break
+
+            current_level = next_level
+
+        return downstream
+
+    def impact_analysis(
+        self,
+        node_id: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze impact of changes to a node.
+
+        Args:
+            node_id: Node to analyze
+
+        Returns:
+            Impact analysis report
+        """
+        downstream = self.get_downstream_lineage(node_id)
+
+        # Categorize impacted nodes
+        impacted_by_type = defaultdict(list)
+        pii_impacted = []
+        critical_impacted = []
+
+        for down_id in downstream:
+            node = self.nodes[down_id]
+            impacted_by_type[node.node_type.value].append(node.name)
+
+            if node.pii_fields:
+                pii_impacted.append(node.name)
+
+            if 'critical' in node.tags:
+                critical_impacted.append(node.name)
+
+        return {
+            'source_node': self.nodes[node_id].name,
+            'total_impacted': len(downstream),
+            'impacted_by_type': dict(impacted_by_type),
+            'pii_impacted': pii_impacted,
+            'critical_impacted': critical_impacted,
+            'requires_reprocessing': len(downstream) > 0
+        }
+
+    def find_pii_lineage(self) -> Dict[str, List[str]]:
+        """
+        Find all datasets containing PII and their lineage.
+
+        Returns:
+            Dictionary mapping PII sources to affected datasets
+        """
+        pii_lineage = {}
+
+        for node_id, node in self.nodes.items():
+            if node.pii_fields:
+                downstream = self.get_downstream_lineage(node_id)
+                affected = [
+                    self.nodes[n].name
+                    for n in downstream
+                    if n in self.nodes
+                ]
+                pii_lineage[node.name] = affected
+
+        return pii_lineage
+
+    def get_data_journey(
+        self,
+        start_node_id: str,
+        end_node_id: str
+    ) -> Optional[List[str]]:
+        """
+        Get path from source to target.
+
+        Args:
+            start_node_id: Source node
+            end_node_id: Target node
+
+        Returns:
+            List of node IDs in path, or None if no path exists
+        """
+        try:
+            path = nx.shortest_path(
+                self.graph,
+                start_node_id,
+                end_node_id
+            )
+            return path
+        except nx.NetworkXNoPath:
+            return None
+
+    def validate_lineage_integrity(self) -> List[str]:
+        """
+        Validate lineage graph integrity.
+
+        Returns:
+            List of validation errors
+        """
+        errors = []
+
+        # Check for orphaned nodes
+        for node_id in self.graph.nodes():
+            if (self.graph.in_degree(node_id) == 0 and
+                self.graph.out_degree(node_id) == 0):
+                errors.append(f"Orphaned node: {node_id}")
+
+        # Check for circular dependencies
+        if not nx.is_directed_acyclic_graph(self.graph):
+            cycles = list(nx.simple_cycles(self.graph))
+            for cycle in cycles:
+                errors.append(f"Circular dependency: {' -> '.join(cycle)}")
+
+        # Check for missing node definitions
+        for edge in self.edges:
+            if edge.source_id not in self.nodes:
+                errors.append(f"Missing source node: {edge.source_id}")
+            if edge.target_id not in self.nodes:
+                errors.append(f"Missing target node: {edge.target_id}")
+
+        return errors
+
+    def save(self) -> None:
+        """Save lineage graph to storage."""
+        if not self.storage_path:
+            raise ValueError("No storage path configured")
+
+        data = {
+            'nodes': {
+                node_id: {
+                    'node_type': node.node_type.value,
+                    'name': node.name,
+                    'description': node.description,
+                    'schema': node.schema,
+                    'location': node.location,
+                    'owner': node.owner,
+                    'tags': node.tags,
+                    'pii_fields': node.pii_fields,
+                    'compliance_tags': node.compliance_tags,
+                    'retention_days': node.retention_days,
+                    'created_at': node.created_at.isoformat(),
+                    'metadata': node.metadata
+                }
+                for node_id, node in self.nodes.items()
+            },
+            'edges': [
+                {
+                    'source_id': edge.source_id,
+                    'target_id': edge.target_id,
+                    'edge_type': edge.edge_type.value,
+                    'transformation_logic': edge.transformation_logic,
+                    'column_mapping': edge.column_mapping,
+                    'created_at': edge.created_at.isoformat()
+                }
+                for edge in self.edges
+            ]
+        }
+
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        filepath = self.storage_path / 'lineage.json'
+
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        logger.info(f"Lineage graph saved to {filepath}")
+
+    def load(self) -> None:
+        """Load lineage graph from storage."""
+        if not self.storage_path:
+            raise ValueError("No storage path configured")
+
+        filepath = self.storage_path / 'lineage.json'
+
+        if not filepath.exists():
+            logger.warning(f"No lineage file found at {filepath}")
+            return
+
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        # Load nodes
+        for node_id, node_data in data['nodes'].items():
+            node = LineageNode(
+                node_id=node_id,
+                node_type=LineageNodeType(node_data['node_type']),
+                name=node_data['name'],
+                description=node_data.get('description', ''),
+                schema=node_data.get('schema'),
+                location=node_data.get('location'),
+                owner=node_data.get('owner'),
+                tags=node_data.get('tags', []),
+                pii_fields=node_data.get('pii_fields', []),
+                compliance_tags=node_data.get('compliance_tags', []),
+                retention_days=node_data.get('retention_days'),
+                created_at=datetime.fromisoformat(node_data['created_at']),
+                metadata=node_data.get('metadata', {})
+            )
+            self.add_node(node)
+
+        # Load edges
+        for edge_data in data['edges']:
+            edge = LineageEdge(
+                source_id=edge_data['source_id'],
+                target_id=edge_data['target_id'],
+                edge_type=LineageEdgeType(edge_data['edge_type']),
+                transformation_logic=edge_data.get('transformation_logic'),
+                column_mapping=edge_data.get('column_mapping'),
+                created_at=datetime.fromisoformat(edge_data['created_at'])
+            )
+            self.add_edge(edge)
+
+        logger.info(f"Lineage graph loaded from {filepath}")
+
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize tracker
+    tracker = DataLineageTracker(Path("lineage_store"))
+
+    # Define data pipeline
+    # Source
+    raw_data = LineageNode(
+        node_id="src_customer_db",
+        node_type=LineageNodeType.SOURCE,
+        name="Customer Database",
+        location="postgresql://prod/customers",
+        pii_fields=["email", "phone", "address"],
+        compliance_tags=["GDPR", "CCPA"],
+        retention_days=2555,  # 7 years
+        tags=["production", "critical"]
+    )
+    tracker.add_node(raw_data)
+
+    # Transformation
+    cleaned_data = LineageNode(
+        node_id="transform_clean",
+        node_type=LineageNodeType.TRANSFORMATION,
+        name="Data Cleaning Pipeline",
+        description="Remove nulls, standardize formats",
+        pii_fields=["email", "phone"],
+        compliance_tags=["GDPR"]
+    )
+    tracker.add_node(cleaned_data)
+
+    # Feature engineering
+    features = LineageNode(
+        node_id="features_customer",
+        node_type=LineageNodeType.FEATURE,
+        name="Customer Features",
+        description="Engineered features for ML model"
+    )
+    tracker.add_node(features)
+
+    # Model
+    model = LineageNode(
+        node_id="model_churn",
+        node_type=LineageNodeType.MODEL,
+        name="Churn Prediction Model",
+        tags=["production", "critical"]
+    )
+    tracker.add_node(model)
+
+    # Add relationships
+    tracker.add_edge(LineageEdge(
+        source_id="src_customer_db",
+        target_id="transform_clean",
+        edge_type=LineageEdgeType.READS,
+        transformation_logic="SELECT * FROM customers WHERE active=true"
+    ))
+
+    tracker.add_edge(LineageEdge(
+        source_id="transform_clean",
+        target_id="features_customer",
+        edge_type=LineageEdgeType.TRANSFORMS,
+        column_mapping={
+            "purchase_count": "COUNT(purchases)",
+            "avg_purchase": "AVG(purchase_amount)"
+        }
+    ))
+
+    tracker.add_edge(LineageEdge(
+        source_id="features_customer",
+        target_id="model_churn",
+        edge_type=LineageEdgeType.DEPENDS_ON
+    ))
+
+    # Impact analysis
+    impact = tracker.impact_analysis("src_customer_db")
+    print("\nImpact Analysis for Customer Database:")
+    print(f"Total impacted nodes: {impact['total_impacted']}")
+    print(f"Impacted by type: {impact['impacted_by_type']}")
+    print(f"PII impacted: {impact['pii_impacted']}")
+
+    # PII lineage
+    pii_lineage = tracker.find_pii_lineage()
+    print("\nPII Lineage:")
+    for source, affected in pii_lineage.items():
+        print(f"{source} -> {affected}")
+
+    # Validation
+    errors = tracker.validate_lineage_integrity()
+    if errors:
+        print(f"\nLineage validation errors: {errors}")
+    else:
+        print("\nLineage graph is valid")
+
+    # Save
+    tracker.save()
+\end{lstlisting}
+
+\subsection{Data Catalog Management with Automated Metadata Extraction}
+
+A data catalog provides a searchable inventory of all data assets with automatically extracted metadata, enabling data discovery, understanding, and governance at scale.
+
+\begin{lstlisting}[style=python, caption={Enterprise data catalog with automated metadata extraction}]
+"""
+Enterprise Data Catalog System
+
+Automated metadata extraction, data profiling, and searchable catalog
+for enterprise data discovery and governance.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
+import logging
+import json
+from pathlib import Path
+import pandas as pd
+import numpy as np
+from collections import Counter
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+
+class DataAssetType(Enum):
+    """Types of data assets."""
+    TABLE = "table"
+    VIEW = "view"
+    FILE = "file"
+    API = "api"
+    STREAM = "stream"
+    MODEL = "model"
+
+
+class SensitivityLevel(Enum):
+    """Data sensitivity classification."""
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+
+@dataclass
+class ColumnMetadata:
+    """Metadata for a single column."""
+    name: str
+    data_type: str
+    nullable: bool
+
+    # Statistics
+    distinct_count: Optional[int] = None
+    null_percentage: Optional[float] = None
+    min_value: Optional[Any] = None
+    max_value: Optional[Any] = None
+    mean_value: Optional[float] = None
+    median_value: Optional[float] = None
+
+    # Sample values
+    sample_values: List[Any] = field(default_factory=list)
+    top_values: List[Tuple[Any, int]] = field(default_factory=list)
+
+    # Classification
+    is_pii: bool = False
+    pii_type: Optional[str] = None  # email, phone, ssn, etc.
+    is_key: bool = False
+    is_foreign_key: bool = False
+
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class DataAssetMetadata:
+    """Complete metadata for a data asset."""
+    asset_id: str
+    asset_type: DataAssetType
+    name: str
+    description: str = ""
+
+    # Location
+    database: Optional[str] = None
+    schema: Optional[str] = None
+    location: Optional[str] = None
+
+    # Ownership
+    owner: str = ""
+    team: str = ""
+    contact_email: str = ""
+
+    # Classification
+    sensitivity: SensitivityLevel = SensitivityLevel.INTERNAL
+    compliance_tags: List[str] = field(default_factory=list)
+    business_tags: List[str] = field(default_factory=list)
+
+    # Schema
+    columns: List[ColumnMetadata] = field(default_factory=list)
+
+    # Statistics
+    row_count: Optional[int] = None
+    size_bytes: Optional[int] = None
+    partition_keys: List[str] = field(default_factory=list)
+
+    # Lineage
+    upstream_assets: List[str] = field(default_factory=list)
+    downstream_assets: List[str] = field(default_factory=list)
+
+    # Usage
+    last_accessed: Optional[datetime] = None
+    access_count_30d: int = 0
+    query_count_30d: int = 0
+
+    # Quality
+    quality_score: Optional[float] = None
+    last_quality_check: Optional[datetime] = None
+
+    # Tracking
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class MetadataExtractor:
+    """Extract metadata from data assets automatically."""
+
+    PII_PATTERNS = {
+        'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+        'phone': r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',
+        'ssn': r'\b\d{3}-\d{2}-\d{4}\b',
+        'credit_card': r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+    }
+
+    @classmethod
+    def extract_column_metadata(
+        cls,
+        series: pd.Series,
+        column_name: str,
+        sample_size: int = 100
+    ) -> ColumnMetadata:
+        """
+        Extract metadata from a pandas Series.
+
+        Args:
+            series: Data series
+            column_name: Column name
+            sample_size: Number of sample values to store
+
+        Returns:
+            ColumnMetadata
+        """
+        metadata = ColumnMetadata(
+            name=column_name,
+            data_type=str(series.dtype),
+            nullable=series.isna().any()
+        )
+
+        # Statistics
+        metadata.distinct_count = series.nunique()
+        metadata.null_percentage = (series.isna().sum() / len(series)) * 100
+
+        if pd.api.types.is_numeric_dtype(series):
+            clean = series.dropna()
+            if len(clean) > 0:
+                metadata.min_value = float(clean.min())
+                metadata.max_value = float(clean.max())
+                metadata.mean_value = float(clean.mean())
+                metadata.median_value = float(clean.median())
+
+        # Sample values
+        sample = series.dropna().sample(
+            min(sample_size, len(series.dropna()))
+        ).tolist()
+        metadata.sample_values = sample[:10]  # Store top 10
+
+        # Top values
+        value_counts = series.value_counts()
+        metadata.top_values = list(value_counts.head(10).items())
+
+        # PII detection
+        metadata.is_pii, metadata.pii_type = cls._detect_pii(series, column_name)
+
+        # Key detection (heuristic)
+        if metadata.distinct_count == len(series) and not series.isna().any():
+            metadata.is_key = True
+
+        return metadata
+
+    @classmethod
+    def _detect_pii(
+        cls,
+        series: pd.Series,
+        column_name: str
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Detect if column contains PII.
+
+        Args:
+            series: Data series
+            column_name: Column name
+
+        Returns:
+            Tuple of (is_pii, pii_type)
+        """
+        import re
+
+        # Check column name
+        name_lower = column_name.lower()
+        pii_keywords = {
+            'email': 'email',
+            'phone': 'phone',
+            'ssn': 'ssn',
+            'social_security': 'ssn',
+            'credit_card': 'credit_card',
+            'password': 'password',
+            'address': 'address',
+            'dob': 'date_of_birth',
+            'birth_date': 'date_of_birth'
+        }
+
+        for keyword, pii_type in pii_keywords.items():
+            if keyword in name_lower:
+                return True, pii_type
+
+        # Pattern matching on sample
+        if pd.api.types.is_string_dtype(series):
+            sample = series.dropna().astype(str).sample(
+                min(100, len(series.dropna()))
+            )
+
+            for pii_type, pattern in cls.PII_PATTERNS.items():
+                matches = sample.str.match(pattern).sum()
+                if matches / len(sample) > 0.5:  # >50% match
+                    return True, pii_type
+
+        return False, None
+
+    @classmethod
+    def extract_dataframe_metadata(
+        cls,
+        df: pd.DataFrame,
+        asset_id: str,
+        name: str,
+        asset_type: DataAssetType = DataAssetType.TABLE
+    ) -> DataAssetMetadata:
+        """
+        Extract complete metadata from DataFrame.
+
+        Args:
+            df: DataFrame to analyze
+            asset_id: Unique asset identifier
+            name: Asset name
+            asset_type: Type of asset
+
+        Returns:
+            DataAssetMetadata
+        """
+        metadata = DataAssetMetadata(
+            asset_id=asset_id,
+            asset_type=asset_type,
+            name=name,
+            row_count=len(df)
+        )
+
+        # Extract column metadata
+        for col in df.columns:
+            col_meta = cls.extract_column_metadata(df[col], col)
+            metadata.columns.append(col_meta)
+
+        # Detect PII
+        pii_columns = [c.name for c in metadata.columns if c.is_pii]
+        if pii_columns:
+            metadata.sensitivity = SensitivityLevel.CONFIDENTIAL
+            metadata.compliance_tags.extend(['PII', 'GDPR', 'CCPA'])
+
+        # Calculate quality score (simple heuristic)
+        null_pcts = [c.null_percentage for c in metadata.columns]
+        avg_null_pct = np.mean(null_pcts) if null_pcts else 0
+        metadata.quality_score = max(0, 100 - avg_null_pct)
+
+        return metadata
+
+
+class DataCatalog:
+    """Searchable catalog of data assets."""
+
+    def __init__(self, catalog_path: Path):
+        """
+        Initialize data catalog.
+
+        Args:
+            catalog_path: Path to catalog storage
+        """
+        self.catalog_path = Path(catalog_path)
+        self.catalog_path.mkdir(parents=True, exist_ok=True)
+        self.assets: Dict[str, DataAssetMetadata] = {}
+        self._load_catalog()
+
+    def register_asset(self, metadata: DataAssetMetadata) -> None:
+        """
+        Register a data asset in the catalog.
+
+        Args:
+            metadata: Asset metadata
+        """
+        metadata.updated_at = datetime.now()
+        self.assets[metadata.asset_id] = metadata
+        self._save_asset(metadata)
+        logger.info(f"Registered asset: {metadata.name}")
+
+    def get_asset(self, asset_id: str) -> Optional[DataAssetMetadata]:
+        """Get asset by ID."""
+        return self.assets.get(asset_id)
+
+    def search_assets(
+        self,
+        query: Optional[str] = None,
+        asset_type: Optional[DataAssetType] = None,
+        sensitivity: Optional[SensitivityLevel] = None,
+        has_pii: Optional[bool] = None,
+        tags: Optional[List[str]] = None
+    ) -> List[DataAssetMetadata]:
+        """
+        Search catalog with filters.
+
+        Args:
+            query: Text search in name/description
+            asset_type: Filter by asset type
+            sensitivity: Filter by sensitivity level
+            has_pii: Filter by PII presence
+            tags: Filter by tags
+
+        Returns:
+            List of matching assets
+        """
+        results = list(self.assets.values())
+
+        # Text search
+        if query:
+            query_lower = query.lower()
+            results = [
+                a for a in results
+                if query_lower in a.name.lower()
+                or query_lower in a.description.lower()
+            ]
+
+        # Asset type filter
+        if asset_type:
+            results = [a for a in results if a.asset_type == asset_type]
+
+        # Sensitivity filter
+        if sensitivity:
+            results = [a for a in results if a.sensitivity == sensitivity]
+
+        # PII filter
+        if has_pii is not None:
+            results = [
+                a for a in results
+                if any(c.is_pii for c in a.columns) == has_pii
+            ]
+
+        # Tags filter
+        if tags:
+            results = [
+                a for a in results
+                if any(tag in a.business_tags + a.compliance_tags for tag in tags)
+            ]
+
+        return results
+
+    def find_pii_assets(self) -> List[DataAssetMetadata]:
+        """Find all assets containing PII."""
+        return self.search_assets(has_pii=True)
+
+    def get_catalog_statistics(self) -> Dict[str, Any]:
+        """Get catalog statistics."""
+        total_assets = len(self.assets)
+
+        assets_by_type = Counter(a.asset_type.value for a in self.assets.values())
+        assets_by_sensitivity = Counter(
+            a.sensitivity.value for a in self.assets.values()
+        )
+
+        pii_assets = len(self.find_pii_assets())
+
+        total_rows = sum(
+            a.row_count for a in self.assets.values()
+            if a.row_count is not None
+        )
+
+        return {
+            'total_assets': total_assets,
+            'assets_by_type': dict(assets_by_type),
+            'assets_by_sensitivity': dict(assets_by_sensitivity),
+            'pii_assets': pii_assets,
+            'total_rows': total_rows
+        }
+
+    def _save_asset(self, metadata: DataAssetMetadata) -> None:
+        """Save asset metadata to file."""
+        filepath = self.catalog_path / f"{metadata.asset_id}.json"
+
+        data = {
+            'asset_id': metadata.asset_id,
+            'asset_type': metadata.asset_type.value,
+            'name': metadata.name,
+            'description': metadata.description,
+            'database': metadata.database,
+            'schema': metadata.schema,
+            'location': metadata.location,
+            'owner': metadata.owner,
+            'team': metadata.team,
+            'contact_email': metadata.contact_email,
+            'sensitivity': metadata.sensitivity.value,
+            'compliance_tags': metadata.compliance_tags,
+            'business_tags': metadata.business_tags,
+            'columns': [
+                {
+                    'name': c.name,
+                    'data_type': c.data_type,
+                    'nullable': c.nullable,
+                    'distinct_count': c.distinct_count,
+                    'null_percentage': c.null_percentage,
+                    'is_pii': c.is_pii,
+                    'pii_type': c.pii_type,
+                    'description': c.description
+                }
+                for c in metadata.columns
+            ],
+            'row_count': metadata.row_count,
+            'quality_score': metadata.quality_score,
+            'created_at': metadata.created_at.isoformat(),
+            'updated_at': metadata.updated_at.isoformat()
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _load_catalog(self) -> None:
+        """Load all assets from storage."""
+        for filepath in self.catalog_path.glob("*.json"):
+            try:
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+
+                columns = [
+                    ColumnMetadata(
+                        name=c['name'],
+                        data_type=c['data_type'],
+                        nullable=c['nullable'],
+                        distinct_count=c.get('distinct_count'),
+                        null_percentage=c.get('null_percentage'),
+                        is_pii=c.get('is_pii', False),
+                        pii_type=c.get('pii_type'),
+                        description=c.get('description', '')
+                    )
+                    for c in data.get('columns', [])
+                ]
+
+                asset = DataAssetMetadata(
+                    asset_id=data['asset_id'],
+                    asset_type=DataAssetType(data['asset_type']),
+                    name=data['name'],
+                    description=data.get('description', ''),
+                    database=data.get('database'),
+                    schema=data.get('schema'),
+                    location=data.get('location'),
+                    owner=data.get('owner', ''),
+                    team=data.get('team', ''),
+                    sensitivity=SensitivityLevel(
+                        data.get('sensitivity', 'internal')
+                    ),
+                    compliance_tags=data.get('compliance_tags', []),
+                    business_tags=data.get('business_tags', []),
+                    columns=columns,
+                    row_count=data.get('row_count'),
+                    quality_score=data.get('quality_score'),
+                    created_at=datetime.fromisoformat(data['created_at']),
+                    updated_at=datetime.fromisoformat(data['updated_at'])
+                )
+
+                self.assets[asset.asset_id] = asset
+
+            except Exception as e:
+                logger.error(f"Failed to load asset from {filepath}: {e}")
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create sample data
+    df = pd.DataFrame({
+        'customer_id': range(1000),
+        'email': [f"user{i}@example.com" for i in range(1000)],
+        'age': np.random.randint(18, 80, 1000),
+        'purchase_amount': np.random.lognormal(4, 1, 1000),
+        'category': np.random.choice(['A', 'B', 'C'], 1000)
+    })
+
+    # Extract metadata
+    metadata = MetadataExtractor.extract_dataframe_metadata(
+        df=df,
+        asset_id="customers_table",
+        name="Customers Table",
+        asset_type=DataAssetType.TABLE
+    )
+
+    metadata.description = "Main customer data table"
+    metadata.owner = "data-team"
+    metadata.database = "production"
+    metadata.schema = "public"
+
+    # Register in catalog
+    catalog = DataCatalog(Path("data_catalog"))
+    catalog.register_asset(metadata)
+
+    # Search catalog
+    pii_assets = catalog.find_pii_assets()
+    print(f"\nAssets with PII: {len(pii_assets)}")
+    for asset in pii_assets:
+        pii_cols = [c.name for c in asset.columns if c.is_pii]
+        print(f"  {asset.name}: {pii_cols}")
+
+    # Statistics
+    stats = catalog.get_catalog_statistics()
+    print(f"\nCatalog Statistics:")
+    print(f"  Total assets: {stats['total_assets']}")
+    print(f"  PII assets: {stats['pii_assets']}")
+    print(f"  Assets by type: {stats['assets_by_type']}")
+\end{lstlisting}
+
+\subsection{Data Privacy Compliance and Automated PII Detection}
+
+Modern data systems must comply with multiple privacy regulations including GDPR, CCPA, and HIPAA. Automated PII detection and data retention enforcement are essential for compliance at scale.
+
+\begin{lstlisting}[style=python, caption={Comprehensive data privacy compliance framework}]
+"""
+Data Privacy and Compliance Framework
+
+Automated compliance for GDPR, CCPA, HIPAA with PII detection,
+data retention, anonymization, and cross-border transfer controls.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple
+import logging
+import json
+import re
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+
+class PIIType(Enum):
+    """Types of Personally Identifiable Information."""
+    EMAIL = "email"
+    PHONE = "phone"
+    SSN = "ssn"
+    CREDIT_CARD = "credit_card"
+    IP_ADDRESS = "ip_address"
+    NAME = "name"
+    ADDRESS = "address"
+    DATE_OF_BIRTH = "date_of_birth"
+    PASSPORT = "passport"
+    MEDICAL_RECORD = "medical_record"
+    BIOMETRIC = "biometric"
+
+
+class ComplianceRegulation(Enum):
+    """Privacy regulations."""
+    GDPR = "gdpr"  # General Data Protection Regulation (EU)
+    CCPA = "ccpa"  # California Consumer Privacy Act (US)
+    HIPAA = "hipaa"  # Health Insurance Portability and Accountability Act (US)
+    LGPD = "lgpd"  # Lei Geral de Protecao de Dados (Brazil)
+    PIPEDA = "pipeda"  # Personal Information Protection (Canada)
+
+
+class DataResidency(Enum):
+    """Data residency regions."""
+    EU = "eu"
+    US = "us"
+    APAC = "apac"
+    CANADA = "canada"
+    BRAZIL = "brazil"
+    UK = "uk"
+
+
+@dataclass
+class PIIDetectionResult:
+    """Result of PII detection scan."""
+    column_name: str
+    pii_detected: bool
+    pii_types: List[PIIType]
+    confidence: float
+    sample_matches: int
+    total_samples: int
+    recommended_action: str
+
+
+@dataclass
+class RetentionPolicy:
+    """Data retention policy definition."""
+    policy_id: str
+    name: str
+    description: str
+
+    # Retention period
+    retention_days: int
+    grace_period_days: int = 30
+
+    # Applicability
+    applies_to_tables: List[str] = field(default_factory=list)
+    applies_to_pii_types: List[PIIType] = field(default_factory=list)
+    regulation: ComplianceRegulation = ComplianceRegulation.GDPR
+
+    # Actions
+    action_on_expiry: str = "archive"  # "delete", "archive", "anonymize"
+
+    # Metadata
+    created_at: datetime = field(default_factory=datetime.now)
+    last_enforced: Optional[datetime] = None
+
+
+@dataclass
+class DataSubjectRequest:
+    """GDPR/CCPA data subject request."""
+    request_id: str
+    request_type: str  # "access", "delete", "portability", "rectification"
+    subject_id: str
+    email: str
+
+    # Status
+    status: str = "pending"  # "pending", "in_progress", "completed", "failed"
+    created_at: datetime = field(default_factory=datetime.now)
+    completed_at: Optional[datetime] = None
+
+    # Results
+    affected_tables: List[str] = field(default_factory=list)
+    records_found: int = 0
+    records_deleted: int = 0
+    export_path: Optional[str] = None
+
+
+class PIIDetector:
+    """Advanced PII detection with multiple strategies."""
+
+    # Regex patterns for common PII
+    PATTERNS = {
+        PIIType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+        PIIType.PHONE: r'\b(?:\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b',
+        PIIType.SSN: r'\b\d{3}-?\d{2}-?\d{4}\b',
+        PIIType.CREDIT_CARD: r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b',
+        PIIType.IP_ADDRESS: r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
+        PIIType.PASSPORT: r'\b[A-Z]{1,2}\d{6,9}\b',
+    }
+
+    # Column name keywords
+    COLUMN_KEYWORDS = {
+        PIIType.EMAIL: ['email', 'e-mail', 'mail'],
+        PIIType.PHONE: ['phone', 'mobile', 'telephone', 'cell'],
+        PIIType.SSN: ['ssn', 'social_security'],
+        PIIType.NAME: ['name', 'first_name', 'last_name', 'full_name'],
+        PIIType.ADDRESS: ['address', 'street', 'city', 'zip', 'postal'],
+        PIIType.DATE_OF_BIRTH: ['dob', 'birth', 'birthday'],
+        PIIType.MEDICAL_RECORD: ['medical', 'diagnosis', 'patient', 'health'],
+    }
+
+    @classmethod
+    def detect_pii_in_column(
+        cls,
+        series: pd.Series,
+        column_name: str,
+        sample_size: int = 1000
+    ) -> PIIDetectionResult:
+        """
+        Detect PII in a data column.
+
+        Args:
+            series: Data series to scan
+            column_name: Column name
+            sample_size: Number of samples to test
+
+        Returns:
+            PIIDetectionResult
+        """
+        detected_types = []
+        total_samples = min(sample_size, len(series.dropna()))
+        max_matches = 0
+
+        if total_samples == 0:
+            return PIIDetectionResult(
+                column_name=column_name,
+                pii_detected=False,
+                pii_types=[],
+                confidence=0.0,
+                sample_matches=0,
+                total_samples=0,
+                recommended_action="No data to analyze"
+            )
+
+        # Strategy 1: Column name matching
+        name_lower = column_name.lower()
+        for pii_type, keywords in cls.COLUMN_KEYWORDS.items():
+            if any(kw in name_lower for kw in keywords):
+                detected_types.append(pii_type)
+
+        # Strategy 2: Pattern matching
+        if pd.api.types.is_string_dtype(series):
+            sample = series.dropna().astype(str).sample(total_samples)
+
+            for pii_type, pattern in cls.PATTERNS.items():
+                matches = sample.str.match(pattern, flags=re.IGNORECASE).sum()
+                if matches > max_matches:
+                    max_matches = matches
+
+                # If >50% of samples match, consider it PII
+                if matches / total_samples > 0.5:
+                    if pii_type not in detected_types:
+                        detected_types.append(pii_type)
+
+        # Calculate confidence
+        confidence = 0.0
+        if detected_types:
+            # High confidence if both name and pattern match
+            if max_matches > 0:
+                confidence = min(1.0, (max_matches / total_samples) + 0.5)
+            else:
+                confidence = 0.7  # Name match only
+
+        # Recommendation
+        if detected_types:
+            action = (
+                f"Encrypt column, apply retention policy, "
+                f"enable audit logging for {', '.join([t.value for t in detected_types])}"
+            )
+        else:
+            action = "No PII detected, no special handling required"
+
+        return PIIDetectionResult(
+            column_name=column_name,
+            pii_detected=len(detected_types) > 0,
+            pii_types=detected_types,
+            confidence=confidence,
+            sample_matches=max_matches,
+            total_samples=total_samples,
+            recommended_action=action
+        )
+
+    @classmethod
+    def scan_dataframe(
+        cls,
+        df: pd.DataFrame,
+        table_name: str
+    ) -> Dict[str, PIIDetectionResult]:
+        """
+        Scan entire DataFrame for PII.
+
+        Args:
+            df: DataFrame to scan
+            table_name: Table name
+
+        Returns:
+            Dictionary of column results
+        """
+        results = {}
+
+        for col in df.columns:
+            result = cls.detect_pii_in_column(df[col], col)
+            if result.pii_detected:
+                results[col] = result
+                logger.warning(
+                    f"PII detected in {table_name}.{col}: "
+                    f"{[t.value for t in result.pii_types]} "
+                    f"(confidence: {result.confidence:.2f})"
+                )
+
+        return results
+
+
+class ComplianceManager:
+    """Manage compliance policies and data subject requests."""
+
+    def __init__(self, storage_path: Path):
+        """Initialize compliance manager."""
+        self.storage_path = Path(storage_path)
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        self.policies: Dict[str, RetentionPolicy] = {}
+        self.requests: Dict[str, DataSubjectRequest] = {}
+        self._load_policies()
+
+    def add_retention_policy(self, policy: RetentionPolicy) -> None:
+        """Add data retention policy."""
+        self.policies[policy.policy_id] = policy
+        self._save_policy(policy)
+        logger.info(
+            f"Added retention policy: {policy.name} "
+            f"({policy.retention_days} days)"
+        )
+
+    def enforce_retention(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        timestamp_column: str
+    ) -> Tuple[pd.DataFrame, int]:
+        """
+        Enforce retention policies on data.
+
+        Args:
+            df: DataFrame to process
+            table_name: Table name
+            timestamp_column: Column with record timestamps
+
+        Returns:
+            Tuple of (filtered_df, expired_count)
+        """
+        # Find applicable policies
+        applicable_policies = [
+            p for p in self.policies.values()
+            if table_name in p.applies_to_tables
+        ]
+
+        if not applicable_policies:
+            return df, 0
+
+        # Use strictest policy
+        min_retention_days = min(p.retention_days for p in applicable_policies)
+
+        # Calculate cutoff date
+        cutoff_date = datetime.now() - timedelta(days=min_retention_days)
+
+        # Filter expired records
+        df[timestamp_column] = pd.to_datetime(df[timestamp_column])
+        expired_mask = df[timestamp_column] < cutoff_date
+        expired_count = expired_mask.sum()
+
+        if expired_count > 0:
+            logger.info(
+                f"Retention enforcement: {expired_count} expired records "
+                f"in {table_name}"
+            )
+
+            # Apply action
+            policy = applicable_policies[0]
+            if policy.action_on_expiry == "delete":
+                df_filtered = df[~expired_mask].copy()
+            elif policy.action_on_expiry == "anonymize":
+                df_filtered = df.copy()
+                # Anonymize PII columns in expired records
+                df_filtered = self._anonymize_records(
+                    df_filtered,
+                    expired_mask,
+                    policy
+                )
+            else:  # archive
+                df_filtered = df[~expired_mask].copy()
+                # Archive expired records (implementation depends on storage)
+
+            policy.last_enforced = datetime.now()
+            return df_filtered, expired_count
+
+        return df, 0
+
+    def _anonymize_records(
+        self,
+        df: pd.DataFrame,
+        mask: pd.Series,
+        policy: RetentionPolicy
+    ) -> pd.DataFrame:
+        """Anonymize PII in specified records."""
+        df_result = df.copy()
+
+        # Detect PII columns
+        pii_results = PIIDetector.scan_dataframe(df, "temp_table")
+
+        for col, result in pii_results.items():
+            # Hash PII values for expired records
+            df_result.loc[mask, col] = df_result.loc[mask, col].apply(
+                lambda x: hashlib.sha256(str(x).encode()).hexdigest()[:16]
+                if pd.notna(x) else x
+            )
+
+        return df_result
+
+    def submit_data_subject_request(
+        self,
+        request: DataSubjectRequest
+    ) -> None:
+        """Submit GDPR/CCPA data subject request."""
+        self.requests[request.request_id] = request
+        self._save_request(request)
+        logger.info(
+            f"Data subject request submitted: {request.request_type} "
+            f"for {request.email}"
+        )
+
+    def process_deletion_request(
+        self,
+        request_id: str,
+        df: pd.DataFrame,
+        id_column: str
+    ) -> Tuple[pd.DataFrame, int]:
+        """
+        Process right-to-be-forgotten request.
+
+        Args:
+            request_id: Request ID
+            df: DataFrame to process
+            id_column: Column containing subject IDs
+
+        Returns:
+            Tuple of (filtered_df, deleted_count)
+        """
+        request = self.requests.get(request_id)
+        if not request:
+            raise ValueError(f"Request {request_id} not found")
+
+        if request.request_type != "delete":
+            raise ValueError(f"Request {request_id} is not a deletion request")
+
+        # Find matching records
+        mask = df[id_column] == request.subject_id
+        deleted_count = mask.sum()
+
+        if deleted_count > 0:
+            df_filtered = df[~mask].copy()
+
+            # Update request
+            request.records_deleted += deleted_count
+            request.status = "in_progress"
+
+            logger.info(
+                f"Deleted {deleted_count} records for subject {request.subject_id}"
+            )
+
+            return df_filtered, deleted_count
+
+        return df, 0
+
+    def check_cross_border_transfer(
+        self,
+        source_region: DataResidency,
+        target_region: DataResidency,
+        has_pii: bool
+    ) -> Tuple[bool, str]:
+        """
+        Check if cross-border data transfer is compliant.
+
+        Args:
+            source_region: Source data residency
+            target_region: Target data residency
+            has_pii: Whether data contains PII
+
+        Returns:
+            Tuple of (is_allowed, reason)
+        """
+        # GDPR restrictions: EU data with PII cannot leave EU without adequacy
+        if source_region == DataResidency.EU and has_pii:
+            adequate_countries = {
+                DataResidency.UK,
+                DataResidency.CANADA
+            }
+
+            if target_region not in adequate_countries:
+                return False, (
+                    "GDPR: Transfer of PII from EU to "
+                    f"{target_region.value} requires Standard Contractual "
+                    "Clauses or Binding Corporate Rules"
+                )
+
+        # LGPD (Brazil) similar to GDPR
+        if source_region == DataResidency.BRAZIL and has_pii:
+            if target_region not in {DataResidency.EU, DataResidency.UK}:
+                return False, (
+                    "LGPD: Transfer of PII from Brazil requires "
+                    "adequate protection level"
+                )
+
+        return True, "Transfer allowed"
+
+    def _save_policy(self, policy: RetentionPolicy) -> None:
+        """Save retention policy to file."""
+        filepath = self.storage_path / f"policy_{policy.policy_id}.json"
+
+        data = {
+            'policy_id': policy.policy_id,
+            'name': policy.name,
+            'description': policy.description,
+            'retention_days': policy.retention_days,
+            'grace_period_days': policy.grace_period_days,
+            'applies_to_tables': policy.applies_to_tables,
+            'applies_to_pii_types': [t.value for t in policy.applies_to_pii_types],
+            'regulation': policy.regulation.value,
+            'action_on_expiry': policy.action_on_expiry,
+            'created_at': policy.created_at.isoformat(),
+            'last_enforced': (
+                policy.last_enforced.isoformat()
+                if policy.last_enforced else None
+            )
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _save_request(self, request: DataSubjectRequest) -> None:
+        """Save data subject request to file."""
+        filepath = self.storage_path / f"request_{request.request_id}.json"
+
+        data = {
+            'request_id': request.request_id,
+            'request_type': request.request_type,
+            'subject_id': request.subject_id,
+            'email': request.email,
+            'status': request.status,
+            'created_at': request.created_at.isoformat(),
+            'completed_at': (
+                request.completed_at.isoformat()
+                if request.completed_at else None
+            ),
+            'affected_tables': request.affected_tables,
+            'records_found': request.records_found,
+            'records_deleted': request.records_deleted,
+            'export_path': request.export_path
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _load_policies(self) -> None:
+        """Load all policies from storage."""
+        for filepath in self.storage_path.glob("policy_*.json"):
+            try:
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+
+                policy = RetentionPolicy(
+                    policy_id=data['policy_id'],
+                    name=data['name'],
+                    description=data['description'],
+                    retention_days=data['retention_days'],
+                    grace_period_days=data.get('grace_period_days', 30),
+                    applies_to_tables=data.get('applies_to_tables', []),
+                    applies_to_pii_types=[
+                        PIIType(t) for t in data.get('applies_to_pii_types', [])
+                    ],
+                    regulation=ComplianceRegulation(data.get('regulation', 'gdpr')),
+                    action_on_expiry=data.get('action_on_expiry', 'archive'),
+                    created_at=datetime.fromisoformat(data['created_at']),
+                    last_enforced=(
+                        datetime.fromisoformat(data['last_enforced'])
+                        if data.get('last_enforced') else None
+                    )
+                )
+
+                self.policies[policy.policy_id] = policy
+
+            except Exception as e:
+                logger.error(f"Failed to load policy from {filepath}: {e}")
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create sample data with PII
+    df = pd.DataFrame({
+        'user_id': range(1000),
+        'email': [f"user{i}@example.com" for i in range(1000)],
+        'phone': [f"555-{i:04d}" for i in range(1000)],
+        'ssn': [f"123-45-{i:04d}" for i in range(1000)],
+        'name': [f"User {i}" for i in range(1000)],
+        'purchase_amount': np.random.lognormal(4, 1, 1000),
+        'created_at': pd.date_range(
+            end=datetime.now(),
+            periods=1000,
+            freq='D'
+        )
+    })
+
+    # PII Detection
+    print("=== PII Detection ===")
+    pii_results = PIIDetector.scan_dataframe(df, "users_table")
+    for col, result in pii_results.items():
+        print(f"\nColumn: {col}")
+        print(f"  PII Types: {[t.value for t in result.pii_types]}")
+        print(f"  Confidence: {result.confidence:.2%}")
+        print(f"  Recommendation: {result.recommended_action}")
+
+    # Compliance Manager
+    compliance = ComplianceManager(Path("compliance_data"))
+
+    # Add retention policy (GDPR: 7 years for financial data)
+    policy = RetentionPolicy(
+        policy_id="gdpr_financial",
+        name="GDPR Financial Data Retention",
+        description="7-year retention for financial transaction data",
+        retention_days=2555,  # ~7 years
+        applies_to_tables=["users_table", "transactions"],
+        applies_to_pii_types=[PIIType.EMAIL, PIIType.NAME],
+        regulation=ComplianceRegulation.GDPR,
+        action_on_expiry="anonymize"
+    )
+    compliance.add_retention_policy(policy)
+
+    # Enforce retention
+    df_retained, expired = compliance.enforce_retention(
+        df,
+        "users_table",
+        "created_at"
+    )
+    print(f"\n=== Retention Enforcement ===")
+    print(f"Expired records: {expired}")
+    print(f"Retained records: {len(df_retained)}")
+
+    # Data subject request (Right to be forgotten)
+    request = DataSubjectRequest(
+        request_id="req_001",
+        request_type="delete",
+        subject_id=42,
+        email="user42@example.com"
+    )
+    compliance.submit_data_subject_request(request)
+
+    df_after_deletion, deleted = compliance.process_deletion_request(
+        "req_001",
+        df_retained,
+        "user_id"
+    )
+    print(f"\n=== Data Subject Request ===")
+    print(f"Records deleted: {deleted}")
+    print(f"Remaining records: {len(df_after_deletion)}")
+
+    # Cross-border transfer check
+    allowed, reason = compliance.check_cross_border_transfer(
+        source_region=DataResidency.EU,
+        target_region=DataResidency.US,
+        has_pii=True
+    )
+    print(f"\n=== Cross-Border Transfer ===")
+    print(f"EU -> US with PII: {'Allowed' if allowed else 'Not Allowed'}")
+    print(f"Reason: {reason}")
+\end{lstlisting}
+
+\section{Schema Management and Evolution}
+
+Schema management ensures data conforms to expected structures and enables safe schema evolution over time.
+
+\begin{lstlisting}[style=python, caption={Schema registry with versioning and compatibility}]
+"""
+Schema Registry with Versioning
+
+Manages data schemas with versioning, validation, and compatibility checking.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
+import json
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class FieldType(Enum):
+    """Supported field types."""
+    INTEGER = "integer"
+    FLOAT = "float"
+    STRING = "string"
+    BOOLEAN = "boolean"
+    DATETIME = "datetime"
+    ARRAY = "array"
+    OBJECT = "object"
+
+
+class CompatibilityMode(Enum):
+    """Schema compatibility modes."""
+    BACKWARD = "backward"  # New schema can read old data
+    FORWARD = "forward"    # Old schema can read new data
+    FULL = "full"          # Both backward and forward
+    NONE = "none"          # No compatibility required
+
+
+@dataclass
+class FieldSchema:
+    """Schema for a single field."""
+    name: str
+    field_type: FieldType
+    required: bool = True
+    nullable: bool = False
+    default: Optional[Any] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    pattern: Optional[str] = None  # Regex for strings
+    enum_values: Optional[List[Any]] = None
+    description: str = ""
+
+    def validate_value(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """
+        Validate a value against this field schema.
+
+        Args:
+            value: Value to validate
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Check nullability
+        if value is None:
+            if self.required and not self.nullable:
+                return False, f"Field '{self.name}' is required and cannot be null"
+            return True, None
+
+        # Type validation
+        if self.field_type == FieldType.INTEGER:
+            if not isinstance(value, int) or isinstance(value, bool):
+                return False, f"Expected integer, got {type(value).__name__}"
+
+        elif self.field_type == FieldType.FLOAT:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return False, f"Expected float, got {type(value).__name__}"
+
+        elif self.field_type == FieldType.STRING:
+            if not isinstance(value, str):
+                return False, f"Expected string, got {type(value).__name__}"
+
+        elif self.field_type == FieldType.BOOLEAN:
+            if not isinstance(value, bool):
+                return False, f"Expected boolean, got {type(value).__name__}"
+
+        # Range validation
+        if self.min_value is not None and value < self.min_value:
+            return False, f"Value {value} below minimum {self.min_value}"
+
+        if self.max_value is not None and value > self.max_value:
+            return False, f"Value {value} above maximum {self.max_value}"
+
+        # Enum validation
+        if self.enum_values and value not in self.enum_values:
+            return False, f"Value {value} not in allowed values: {self.enum_values}"
+
+        return True, None
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary."""
+        return {
+            "name": self.name,
+            "type": self.field_type.value,
+            "required": self.required,
+            "nullable": self.nullable,
+            "default": self.default,
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "pattern": self.pattern,
+            "enum_values": self.enum_values,
+            "description": self.description
+        }
+
+
+@dataclass
+class DataSchema:
+    """Complete data schema."""
+    name: str
+    version: str
+    fields: List[FieldSchema]
+    created_at: datetime = field(default_factory=datetime.now)
+    description: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def get_field(self, field_name: str) -> Optional[FieldSchema]:
+        """Get field schema by name."""
+        for field in self.fields:
+            if field.name == field_name:
+                return field
+        return None
+
+    def validate_record(
+        self,
+        record: Dict[str, Any]
+    ) -> Tuple[bool, List[str]]:
+        """
+        Validate a data record against schema.
+
+        Args:
+            record: Data record to validate
+
+        Returns:
+            Tuple of (is_valid, error_messages)
+        """
+        errors = []
+
+        # Check required fields
+        for field in self.fields:
+            if field.required and field.name not in record:
+                errors.append(f"Missing required field: {field.name}")
+                continue
+
+            if field.name in record:
+                is_valid, error = field.validate_value(record[field.name])
+                if not is_valid:
+                    errors.append(error)
+
+        # Check for unexpected fields
+        schema_fields = {f.name for f in self.fields}
+        record_fields = set(record.keys())
+        unexpected = record_fields - schema_fields
+
+        if unexpected:
+            errors.append(f"Unexpected fields: {unexpected}")
+
+        return len(errors) == 0, errors
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary."""
+        return {
+            "name": self.name,
+            "version": self.version,
+            "created_at": self.created_at.isoformat(),
+            "description": self.description,
+            "fields": [f.to_dict() for f in self.fields],
+            "metadata": self.metadata
+        }
+
+    def save(self, filepath: Path) -> None:
+        """Save schema to file."""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Schema saved: {filepath}")
+
+    @classmethod
+    def load(cls, filepath: Path) -> 'DataSchema':
+        """Load schema from file."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        fields = [
+            FieldSchema(
+                name=f['name'],
+                field_type=FieldType(f['type']),
+                required=f.get('required', True),
+                nullable=f.get('nullable', False),
+                default=f.get('default'),
+                min_value=f.get('min_value'),
+                max_value=f.get('max_value'),
+                pattern=f.get('pattern'),
+                enum_values=f.get('enum_values'),
+                description=f.get('description', '')
+            )
+            for f in data['fields']
+        ]
+
+        return cls(
+            name=data['name'],
+            version=data['version'],
+            fields=fields,
+            created_at=datetime.fromisoformat(data['created_at']),
+            description=data.get('description', ''),
+            metadata=data.get('metadata', {})
+        )
+
+
+class SchemaRegistry:
+    """Registry for managing schema versions."""
+
+    def __init__(self, registry_path: Path):
+        """
+        Initialize schema registry.
+
+        Args:
+            registry_path: Path to registry directory
+        """
+        self.registry_path = Path(registry_path)
+        self.registry_path.mkdir(parents=True, exist_ok=True)
+        self.schemas: Dict[str, Dict[str, DataSchema]] = {}
+        self._load_all_schemas()
+
+    def _load_all_schemas(self) -> None:
+        """Load all schemas from registry."""
+        for schema_file in self.registry_path.glob("*.json"):
+            try:
+                schema = DataSchema.load(schema_file)
+                if schema.name not in self.schemas:
+                    self.schemas[schema.name] = {}
+                self.schemas[schema.name][schema.version] = schema
+            except Exception as e:
+                logger.error(f"Failed to load schema {schema_file}: {e}")
+
+    def register_schema(
+        self,
+        schema: DataSchema,
+        compatibility_mode: CompatibilityMode = CompatibilityMode.BACKWARD
+    ) -> None:
+        """
+        Register a new schema version.
+
+        Args:
+            schema: Schema to register
+            compatibility_mode: Compatibility requirement
+
+        Raises:
+            ValueError: If schema is incompatible
+        """
+        # Check compatibility
+        if schema.name in self.schemas:
+            latest_version = self.get_latest_version(schema.name)
+            if latest_version:
+                is_compatible = self.check_compatibility(
+                    latest_version,
+                    schema,
+                    compatibility_mode
+                )
+
+                if not is_compatible:
+                    raise ValueError(
+                        f"Schema {schema.name} v{schema.version} is "
+                        f"incompatible with v{latest_version.version}"
+                    )
+
+        # Register schema
+        if schema.name not in self.schemas:
+            self.schemas[schema.name] = {}
+
+        self.schemas[schema.name][schema.version] = schema
+
+        # Save to file
+        filepath = self.registry_path / f"{schema.name}_v{schema.version}.json"
+        schema.save(filepath)
+
+        logger.info(f"Schema registered: {schema.name} v{schema.version}")
+
+    def get_schema(
+        self,
+        name: str,
+        version: Optional[str] = None
+    ) -> Optional[DataSchema]:
+        """
+        Get schema by name and version.
+
+        Args:
+            name: Schema name
+            version: Version (latest if None)
+
+        Returns:
+            DataSchema or None
+        """
+        if name not in self.schemas:
+            return None
+
+        if version:
+            return self.schemas[name].get(version)
+        else:
+            return self.get_latest_version(name)
+
+    def get_latest_version(self, name: str) -> Optional[DataSchema]:
+        """Get latest version of a schema."""
+        if name not in self.schemas:
+            return None
+
+        versions = self.schemas[name]
+        if not versions:
+            return None
+
+        # Sort by version string (simple lexicographic)
+        latest_version = sorted(versions.keys())[-1]
+        return versions[latest_version]
+
+    @staticmethod
+    def check_compatibility(
+        old_schema: DataSchema,
+        new_schema: DataSchema,
+        mode: CompatibilityMode
+    ) -> bool:
+        """
+        Check compatibility between schema versions.
+
+        Args:
+            old_schema: Older schema version
+            new_schema: Newer schema version
+            mode: Compatibility mode
+
+        Returns:
+            True if compatible
+        """
+        if mode == CompatibilityMode.NONE:
+            return True
+
+        old_fields = {f.name: f for f in old_schema.fields}
+        new_fields = {f.name: f for f in new_schema.fields}
+
+        # Backward compatibility: new schema can read old data
+        if mode in [CompatibilityMode.BACKWARD, CompatibilityMode.FULL]:
+            # All required fields in new schema must exist in old schema
+            for field in new_schema.fields:
+                if field.required and field.name not in old_fields:
+                    logger.warning(
+                        f"Backward incompatible: new required field '{field.name}'"
+                    )
+                    return False
+
+        # Forward compatibility: old schema can read new data
+        if mode in [CompatibilityMode.FORWARD, CompatibilityMode.FULL]:
+            # All required fields in old schema must exist in new schema
+            for field in old_schema.fields:
+                if field.required and field.name not in new_fields:
+                    logger.warning(
+                        f"Forward incompatible: removed required field '{field.name}'"
+                    )
+                    return False
+
+        return True
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create schema
+    schema_v1 = DataSchema(
+        name="customer",
+        version="1.0.0",
+        description="Customer data schema",
+        fields=[
+            FieldSchema(
+                name="customer_id",
+                field_type=FieldType.INTEGER,
+                required=True,
+                description="Unique customer identifier"
+            ),
+            FieldSchema(
+                name="email",
+                field_type=FieldType.STRING,
+                required=True
+            ),
+            FieldSchema(
+                name="age",
+                field_type=FieldType.INTEGER,
+                required=False,
+                min_value=0,
+                max_value=150
+            )
+        ]
+    )
+
+    # Create registry
+    registry = SchemaRegistry(Path("schema_registry"))
+    registry.register_schema(schema_v1)
+
+    # Validate data
+    valid_record = {
+        "customer_id": 12345,
+        "email": "user@example.com",
+        "age": 30
+    }
+
+    is_valid, errors = schema_v1.validate_record(valid_record)
+    print(f"Valid: {is_valid}")
+
+    if not is_valid:
+        for error in errors:
+            print(f"  - {error}")
+
+    # Evolve schema (add optional field)
+    schema_v2 = DataSchema(
+        name="customer",
+        version="2.0.0",
+        fields=schema_v1.fields + [
+            FieldSchema(
+                name="country",
+                field_type=FieldType.STRING,
+                required=False,
+                default="US"
+            )
+        ]
+    )
+
+    # Check compatibility
+    compatible = SchemaRegistry.check_compatibility(
+        schema_v1,
+        schema_v2,
+        CompatibilityMode.BACKWARD
+    )
+
+    print(f"Backward compatible: {compatible}")
+
+    if compatible:
+        registry.register_schema(schema_v2, CompatibilityMode.BACKWARD)
+\end{lstlisting}
+
+\section{Real-Time Data Quality Monitoring}
+
+Production systems require continuous data quality monitoring with alerting capabilities. We implement a monitoring system with SQLite backend for persistence.
+
+\begin{lstlisting}[style=python, caption={Real-time quality monitoring with SQLite backend}]
+"""
+Real-Time Data Quality Monitoring
+
+Continuous monitoring of data quality with alerting and persistence.
+"""
+
+import sqlite3
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import logging
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QualityThreshold:
+    """Quality threshold configuration."""
+    metric_name: str
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    severity: str = "warning"  # "critical", "warning", "info"
+
+
+@dataclass
+class QualityAlert:
+    """Quality alert representation."""
+    alert_id: str
+    timestamp: datetime
+    dataset_name: str
+    metric_name: str
+    current_value: float
+    threshold_value: float
+    severity: str
+    message: str
+    resolved: bool = False
+    resolved_at: Optional[datetime] = None
+
+
+class QualityMonitor:
+    """Real-time data quality monitoring system."""
+
+    def __init__(self, db_path: Path):
+        """
+        Initialize quality monitor.
+
+        Args:
+            db_path: Path to SQLite database
+        """
+        self.db_path = Path(db_path)
+        self._init_database()
+
+    def _init_database(self) -> None:
+        """Initialize database schema."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # Quality metrics table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS quality_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME NOT NULL,
+                    dataset_name TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    metric_value REAL NOT NULL,
+                    column_name TEXT
+                )
+            """)
+
+            # Quality alerts table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS quality_alerts (
+                    alert_id TEXT PRIMARY KEY,
+                    timestamp DATETIME NOT NULL,
+                    dataset_name TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    current_value REAL NOT NULL,
+                    threshold_value REAL NOT NULL,
+                    severity TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    resolved INTEGER DEFAULT 0,
+                    resolved_at DATETIME
+                )
+            """)
+
+            # Thresholds table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS quality_thresholds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_name TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    min_value REAL,
+                    max_value REAL,
+                    severity TEXT NOT NULL,
+                    UNIQUE(dataset_name, metric_name)
+                )
+            """)
+
+            # Create indices
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_metrics_timestamp
+                ON quality_metrics(timestamp)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alerts_resolved
+                ON quality_alerts(resolved)
+            """)
+
+            conn.commit()
+
+        logger.info(f"Quality monitor database initialized: {self.db_path}")
+
+    def set_threshold(
+        self,
+        dataset_name: str,
+        threshold: QualityThreshold
+    ) -> None:
+        """
+        Set quality threshold for a dataset.
+
+        Args:
+            dataset_name: Dataset name
+            threshold: Threshold configuration
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO quality_thresholds
+                (dataset_name, metric_name, min_value, max_value, severity)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                dataset_name,
+                threshold.metric_name,
+                threshold.min_value,
+                threshold.max_value,
+                threshold.severity
+            ))
+
+            conn.commit()
+
+        logger.info(
+            f"Threshold set: {dataset_name}.{threshold.metric_name} "
+            f"[{threshold.min_value}, {threshold.max_value}]"
+        )
+
+    def record_metric(
+        self,
+        dataset_name: str,
+        metric_name: str,
+        value: float,
+        column_name: Optional[str] = None,
+        check_threshold: bool = True
+    ) -> Optional[QualityAlert]:
+        """
+        Record a quality metric.
+
+        Args:
+            dataset_name: Dataset name
+            metric_name: Metric name
+            value: Metric value
+            column_name: Optional column name
+            check_threshold: Check against thresholds
+
+        Returns:
+            QualityAlert if threshold violated, None otherwise
+        """
+        timestamp = datetime.now()
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # Insert metric
+            cursor.execute("""
+                INSERT INTO quality_metrics
+                (timestamp, dataset_name, metric_name, metric_value, column_name)
+                VALUES (?, ?, ?, ?, ?)
+            """, (timestamp, dataset_name, metric_name, value, column_name))
+
+            conn.commit()
+
+        # Check threshold
+        if check_threshold:
+            return self._check_threshold(
+                dataset_name,
+                metric_name,
+                value,
+                timestamp
+            )
+
+        return None
+
+    def _check_threshold(
+        self,
+        dataset_name: str,
+        metric_name: str,
+        value: float,
+        timestamp: datetime
+    ) -> Optional[QualityAlert]:
+        """Check if value violates threshold."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT min_value, max_value, severity
+                FROM quality_thresholds
+                WHERE dataset_name = ? AND metric_name = ?
+            """, (dataset_name, metric_name))
+
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        min_val, max_val, severity = row
+        violated = False
+        threshold_val = None
+        message = ""
+
+        if min_val is not None and value < min_val:
+            violated = True
+            threshold_val = min_val
+            message = f"{metric_name} below minimum: {value:.2f} < {min_val:.2f}"
+
+        elif max_val is not None and value > max_val:
+            violated = True
+            threshold_val = max_val
+            message = f"{metric_name} above maximum: {value:.2f} > {max_val:.2f}"
+
+        if violated:
+            alert = self._create_alert(
+                dataset_name,
+                metric_name,
+                value,
+                threshold_val,
+                severity,
+                message,
+                timestamp
+            )
+            return alert
+
+        return None
+
+    def _create_alert(
+        self,
+        dataset_name: str,
+        metric_name: str,
+        current_value: float,
+        threshold_value: float,
+        severity: str,
+        message: str,
+        timestamp: datetime
+    ) -> QualityAlert:
+        """Create and persist quality alert."""
+        alert_id = f"{dataset_name}_{metric_name}_{timestamp.strftime('%Y%m%d%H%M%S')}"
+
+        alert = QualityAlert(
+            alert_id=alert_id,
+            timestamp=timestamp,
+            dataset_name=dataset_name,
+            metric_name=metric_name,
+            current_value=current_value,
+            threshold_value=threshold_value,
+            severity=severity,
+            message=message
+        )
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT INTO quality_alerts
+                (alert_id, timestamp, dataset_name, metric_name,
+                 current_value, threshold_value, severity, message, resolved)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                alert.alert_id,
+                alert.timestamp,
+                alert.dataset_name,
+                alert.metric_name,
+                alert.current_value,
+                alert.threshold_value,
+                alert.severity,
+                alert.message,
+                0
+            ))
+
+            conn.commit()
+
+        logger.warning(f"Alert created: {alert.message}")
+
+        return alert
+
+    def get_active_alerts(
+        self,
+        dataset_name: Optional[str] = None
+    ) -> List[QualityAlert]:
+        """
+        Get active (unresolved) alerts.
+
+        Args:
+            dataset_name: Filter by dataset (all if None)
+
+        Returns:
+            List of active alerts
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            if dataset_name:
+                cursor.execute("""
+                    SELECT alert_id, timestamp, dataset_name, metric_name,
+                           current_value, threshold_value, severity, message
+                    FROM quality_alerts
+                    WHERE resolved = 0 AND dataset_name = ?
+                    ORDER BY timestamp DESC
+                """, (dataset_name,))
+            else:
+                cursor.execute("""
+                    SELECT alert_id, timestamp, dataset_name, metric_name,
+                           current_value, threshold_value, severity, message
+                    FROM quality_alerts
+                    WHERE resolved = 0
+                    ORDER BY timestamp DESC
+                """)
+
+            rows = cursor.fetchall()
+
+        alerts = []
+        for row in rows:
+            alerts.append(QualityAlert(
+                alert_id=row[0],
+                timestamp=datetime.fromisoformat(row[1]),
+                dataset_name=row[2],
+                metric_name=row[3],
+                current_value=row[4],
+                threshold_value=row[5],
+                severity=row[6],
+                message=row[7],
+                resolved=False
+            ))
+
+        return alerts
+
+    def resolve_alert(self, alert_id: str) -> None:
+        """Mark alert as resolved."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE quality_alerts
+                SET resolved = 1, resolved_at = ?
+                WHERE alert_id = ?
+            """, (datetime.now(), alert_id))
+
+            conn.commit()
+
+        logger.info(f"Alert resolved: {alert_id}")
+
+    def get_metric_history(
+        self,
+        dataset_name: str,
+        metric_name: str,
+        hours: int = 24
+    ) -> pd.DataFrame:
+        """
+        Get metric history.
+
+        Args:
+            dataset_name: Dataset name
+            metric_name: Metric name
+            hours: Hours of history to fetch
+
+        Returns:
+            DataFrame with metric history
+        """
+        cutoff = datetime.now() - timedelta(hours=hours)
+
+        with sqlite3.connect(self.db_path) as conn:
+            query = """
+                SELECT timestamp, metric_value, column_name
+                FROM quality_metrics
+                WHERE dataset_name = ? AND metric_name = ?
+                  AND timestamp >= ?
+                ORDER BY timestamp
+            """
+
+            df = pd.read_sql_query(
+                query,
+                conn,
+                params=(dataset_name, metric_name, cutoff)
+            )
+
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+        return df
+
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize monitor
+    monitor = QualityMonitor(Path("quality_monitor.db"))
+
+    # Set thresholds
+    monitor.set_threshold(
+        "customer_data",
+        QualityThreshold(
+            metric_name="null_percentage",
+            max_value=10.0,
+            severity="warning"
+        )
+    )
+
+    monitor.set_threshold(
+        "customer_data",
+        QualityThreshold(
+            metric_name="overall_quality_score",
+            min_value=80.0,
+            severity="critical"
+        )
+    )
+
+    # Record metrics
+    alert = monitor.record_metric(
+        dataset_name="customer_data",
+        metric_name="null_percentage",
+        value=15.5  # Exceeds threshold
+    )
+
+    if alert:
+        print(f"ALERT: {alert.message}")
+
+    # Get active alerts
+    active_alerts = monitor.get_active_alerts("customer_data")
+    print(f"\nActive alerts: {len(active_alerts)}")
+
+    for alert in active_alerts:
+        print(f"  [{alert.severity.upper()}] {alert.message}")
+
+    # Resolve alerts
+    for alert in active_alerts:
+        monitor.resolve_alert(alert.alert_id)
+\end{lstlisting}
+
+\section{A Motivating Example: Silent Data Corruption in Production}
+
+\subsection{The System}
+
+TechCommerce, a mid-sized e-commerce company, deployed a recommendation system that drove 40\% of their revenue. The system used collaborative filtering trained on user purchase history. It ran in production for two years with impressive performance.
+
+\subsection{The Corruption}
+
+In March 2023, the data engineering team migrated their data warehouse from PostgreSQL to a new cloud-based system. The migration involved:
+
+\begin{enumerate}
+    \item Exporting 500 million purchase records to CSV
+    \item Transforming timestamps and currency values
+    \item Loading into the new system
+\end{enumerate}
+
+The migration was declared successful. All row counts matched. Schema validation passed.
+
+\subsection{The Silent Failure}
+
+Three months later, the business team reported a troubling trend: recommendation click-through rates had declined by 18\%. Revenue from recommendations dropped by 22\%.
+
+The ML team investigated the model. Retraining showed similar performance in offline metrics. A/B tests showed no issues. Model monitoring dashboards showed normal prediction distributions.
+
+\subsection{The Discovery}
+
+After two weeks of investigation, a data scientist noticed something odd: when plotting the distribution of purchase timestamps, there was a strange gap in March 2023---exactly when the migration occurred.
+
+Deeper investigation revealed:
+
+\textbf{The Bug}: During migration, timestamps were converted from UTC to EST without accounting for daylight saving time transitions. This caused a subset of records to shift by one hour.
+
+For example:
+\begin{itemize}
+    \item Original: \texttt{2023-03-12 02:30:00 UTC}
+    \item After migration: \texttt{2023-03-11 21:30:00 EST}
+\end{itemize}
+
+This one-hour shift broke temporal patterns. Products purchased at night appeared to be purchased in the evening. Seasonal patterns shifted. Time-based features became unreliable.
+
+\textbf{Scale}: 47 million records (9.4\%) were affected. The corruption was systematic but subtle enough to pass naive validation.
+
+\subsection{The Impact}
+
+\begin{itemize}
+    \item \textbf{Revenue loss}: \$2.1 million over 3 months
+    \item \textbf{Investigation cost}: 120 engineer-hours
+    \item \textbf{Remediation}: Data reload, model retraining, 2-week rollout
+    \item \textbf{Customer trust}: Degraded recommendations for 3 months
+\end{itemize}
+
+\subsection{The Root Causes}
+
+The corruption went undetected because:
+
+\begin{enumerate}
+    \item \textbf{No distribution validation}: Row counts and schemas matched, but distributions weren't compared
+    \item \textbf{No statistical testing}: No KS tests or other drift detection during migration
+    \item \textbf{Inadequate monitoring}: Production monitoring didn't track data quality metrics
+    \item \textbf{No checksums}: Individual record integrity wasn't validated
+    \item \textbf{Insufficient testing}: Edge cases (daylight saving) weren't tested
+\end{enumerate}
+
+\subsection{The Lesson}
+
+Silent data corruption is insidious. It doesn't raise exceptions. It doesn't fail schema validation. It degrades system performance gradually. This example motivates our corruption detection framework.
+
+\section{Data Corruption Detection}
+
+We implement comprehensive corruption detection using statistical methods and distribution analysis.
+
+\begin{lstlisting}[style=python, caption={Data corruption detection framework}]
+"""
+Data Corruption Detection
+
+Statistical methods for detecting data corruption and integrity violations.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+import logging
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+logger = logging.getLogger(__name__)
+
+
+class CorruptionType(Enum):
+    """Types of data corruption."""
+    DISTRIBUTION_SHIFT = "distribution_shift"
+    UNEXPECTED_NULLS = "unexpected_nulls"
+    TYPE_MISMATCH = "type_mismatch"
+    RANGE_VIOLATION = "range_violation"
+    CARDINALITY_CHANGE = "cardinality_change"
+    REFERENTIAL_INTEGRITY = "referential_integrity"
+    DUPLICATE_KEYS = "duplicate_keys"
+    ENCODING_ERROR = "encoding_error"
+
+
+@dataclass
+class CorruptionFinding:
+    """Detected corruption finding."""
+    corruption_type: CorruptionType
+    severity: str  # "critical", "high", "medium", "low"
+    column: Optional[str]
+    description: str
+    affected_rows: int
+    affected_percentage: float
+    evidence: Dict[str, Any]
+    recommendation: str
+
+
+@dataclass
+class CorruptionReport:
+    """Complete corruption detection report."""
+    timestamp: datetime = field(default_factory=datetime.now)
+    dataset_name: str = ""
+    total_rows: int = 0
+
+    findings: List[CorruptionFinding] = field(default_factory=list)
+    corruption_score: float = 0.0  # 0-100, higher = more corruption
+
+    def calculate_corruption_score(self) -> float:
+        """
+        Calculate overall corruption score.
+
+        Returns:
+            Corruption score (0-100)
+        """
+        if not self.findings:
+            return 0.0
+
+        severity_scores = {
+            "critical": 25.0,
+            "high": 15.0,
+            "medium": 8.0,
+            "low": 3.0
+        }
+
+        total_score = sum(
+            severity_scores.get(f.severity, 0.0)
+            for f in self.findings
+        )
+
+        # Normalize to 0-100
+        return min(100.0, total_score)
+
+    def get_critical_findings(self) -> List[CorruptionFinding]:
+        """Get critical and high severity findings."""
+        return [
+            f for f in self.findings
+            if f.severity in ["critical", "high"]
+        ]
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "dataset_name": self.dataset_name,
+            "total_rows": self.total_rows,
+            "corruption_score": self.corruption_score,
+            "findings_count": len(self.findings),
+            "critical_count": len(self.get_critical_findings()),
+            "findings": [
+                {
+                    "type": f.corruption_type.value,
+                    "severity": f.severity,
+                    "column": f.column,
+                    "description": f.description,
+                    "affected_percentage": f.affected_percentage,
+                    "evidence": f.evidence
+                }
+                for f in self.findings
+            ]
+        }
+
+
+class CorruptionDetector:
+    """Detect data corruption using statistical methods."""
+
+    def __init__(self, alpha: float = 0.01):
+        """
+        Initialize detector.
+
+        Args:
+            alpha: Significance level for statistical tests
+        """
+        self.alpha = alpha
+
+    def detect_distribution_corruption(
+        self,
+        reference: pd.Series,
+        current: pd.Series,
+        column_name: str
+    ) -> Optional[CorruptionFinding]:
+        """
+        Detect distribution corruption using KS test.
+
+        Args:
+            reference: Reference distribution
+            current: Current distribution
+            column_name: Column name
+
+        Returns:
+            CorruptionFinding if corruption detected
+        """
+        # Remove NaN
+        ref_clean = reference.dropna()
+        curr_clean = current.dropna()
+
+        if len(ref_clean) == 0 or len(curr_clean) == 0:
+            return None
+
+        # Perform KS test
+        statistic, p_value = stats.ks_2samp(ref_clean, curr_clean)
+
+        if p_value < self.alpha:
+            # Calculate distribution statistics
+            ref_mean = ref_clean.mean()
+            curr_mean = curr_clean.mean()
+            mean_diff_pct = abs(curr_mean - ref_mean) / abs(ref_mean) * 100
+
+            return CorruptionFinding(
+                corruption_type=CorruptionType.DISTRIBUTION_SHIFT,
+                severity="critical" if statistic > 0.3 else "high",
+                column=column_name,
+                description=f"Significant distribution shift detected",
+                affected_rows=len(current),
+                affected_percentage=100.0,
+                evidence={
+                    "ks_statistic": statistic,
+                    "p_value": p_value,
+                    "ref_mean": ref_mean,
+                    "curr_mean": curr_mean,
+                    "mean_diff_pct": mean_diff_pct
+                },
+                recommendation="Investigate data collection or transformation process"
+            )
+
+        return None
+
+    def detect_unexpected_nulls(
+        self,
+        reference: pd.Series,
+        current: pd.Series,
+        column_name: str,
+        tolerance: float = 0.05
+    ) -> Optional[CorruptionFinding]:
+        """
+        Detect unexpected increase in null values.
+
+        Args:
+            reference: Reference data
+            current: Current data
+            column_name: Column name
+            tolerance: Acceptable increase in null percentage
+
+        Returns:
+            CorruptionFinding if unexpected nulls detected
+        """
+        ref_null_pct = reference.isna().sum() / len(reference)
+        curr_null_pct = current.isna().sum() / len(current)
+
+        diff = curr_null_pct - ref_null_pct
+
+        if diff > tolerance:
+            affected_rows = int(diff * len(current))
+
+            return CorruptionFinding(
+                corruption_type=CorruptionType.UNEXPECTED_NULLS,
+                severity="critical" if diff > 0.2 else "high",
+                column=column_name,
+                description=f"Unexpected increase in null values",
+                affected_rows=affected_rows,
+                affected_percentage=diff * 100,
+                evidence={
+                    "reference_null_pct": ref_null_pct * 100,
+                    "current_null_pct": curr_null_pct * 100,
+                    "difference_pct": diff * 100
+                },
+                recommendation="Check data extraction and transformation logic"
+            )
+
+        return None
+
+    def detect_cardinality_corruption(
+        self,
+        reference: pd.Series,
+        current: pd.Series,
+        column_name: str,
+        tolerance: float = 0.2
+    ) -> Optional[CorruptionFinding]:
+        """
+        Detect unexpected changes in cardinality.
+
+        Args:
+            reference: Reference data
+            current: Current data
+            column_name: Column name
+            tolerance: Acceptable change ratio
+
+        Returns:
+            CorruptionFinding if cardinality corruption detected
+        """
+        ref_cardinality = reference.nunique()
+        curr_cardinality = current.nunique()
+
+        if ref_cardinality == 0:
+            return None
+
+        change_ratio = abs(curr_cardinality - ref_cardinality) / ref_cardinality
+
+        if change_ratio > tolerance:
+            severity = "critical" if change_ratio > 0.5 else "medium"
+
+            return CorruptionFinding(
+                corruption_type=CorruptionType.CARDINALITY_CHANGE,
+                severity=severity,
+                column=column_name,
+                description=f"Unexpected cardinality change",
+                affected_rows=len(current),
+                affected_percentage=change_ratio * 100,
+                evidence={
+                    "reference_cardinality": ref_cardinality,
+                    "current_cardinality": curr_cardinality,
+                    "change_ratio": change_ratio
+                },
+                recommendation="Verify categorical values and encoding"
+            )
+
+        return None
+
+    def detect_range_violations(
+        self,
+        current: pd.Series,
+        column_name: str,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None
+    ) -> Optional[CorruptionFinding]:
+        """
+        Detect values outside expected range.
+
+        Args:
+            current: Current data
+            column_name: Column name
+            min_value: Minimum allowed value
+            max_value: Maximum allowed value
+
+        Returns:
+            CorruptionFinding if range violations detected
+        """
+        violations = 0
+        clean_data = current.dropna()
+
+        if len(clean_data) == 0:
+            return None
+
+        if min_value is not None:
+            violations += (clean_data < min_value).sum()
+
+        if max_value is not None:
+            violations += (clean_data > max_value).sum()
+
+        if violations > 0:
+            violation_pct = violations / len(current) * 100
+
+            return CorruptionFinding(
+                corruption_type=CorruptionType.RANGE_VIOLATION,
+                severity="critical" if violation_pct > 5 else "high",
+                column=column_name,
+                description=f"Values outside expected range",
+                affected_rows=violations,
+                affected_percentage=violation_pct,
+                evidence={
+                    "min_value": min_value,
+                    "max_value": max_value,
+                    "violations": violations,
+                    "actual_min": clean_data.min(),
+                    "actual_max": clean_data.max()
+                },
+                recommendation="Validate data bounds and transformations"
+            )
+
+        return None
+
+    def detect_duplicate_keys(
+        self,
+        df: pd.DataFrame,
+        key_columns: List[str]
+    ) -> Optional[CorruptionFinding]:
+        """
+        Detect duplicate primary keys.
+
+        Args:
+            df: DataFrame to check
+            key_columns: Primary key columns
+
+        Returns:
+            CorruptionFinding if duplicates detected
+        """
+        duplicates = df[key_columns].duplicated().sum()
+
+        if duplicates > 0:
+            duplicate_pct = duplicates / len(df) * 100
+
+            return CorruptionFinding(
+                corruption_type=CorruptionType.DUPLICATE_KEYS,
+                severity="critical",
+                column=", ".join(key_columns),
+                description=f"Duplicate primary keys detected",
+                affected_rows=duplicates,
+                affected_percentage=duplicate_pct,
+                evidence={
+                    "key_columns": key_columns,
+                    "duplicate_count": duplicates
+                },
+                recommendation="Investigate data deduplication process"
+            )
+
+        return None
+
+    def run_full_scan(
+        self,
+        reference_df: pd.DataFrame,
+        current_df: pd.DataFrame,
+        dataset_name: str,
+        primary_keys: Optional[List[str]] = None,
+        value_ranges: Optional[Dict[str, Tuple[float, float]]] = None
+    ) -> CorruptionReport:
+        """
+        Run complete corruption detection scan.
+
+        Args:
+            reference_df: Reference dataset
+            current_df: Current dataset
+            dataset_name: Dataset name
+            primary_keys: Primary key columns
+            value_ranges: Expected value ranges per column
+
+        Returns:
+            CorruptionReport
+        """
+        logger.info(f"Starting corruption scan for {dataset_name}")
+
+        report = CorruptionReport(
+            dataset_name=dataset_name,
+            total_rows=len(current_df)
+        )
+
+        # Check common columns
+        common_cols = set(reference_df.columns) & set(current_df.columns)
+
+        for col in common_cols:
+            # Distribution corruption
+            if pd.api.types.is_numeric_dtype(current_df[col]):
+                finding = self.detect_distribution_corruption(
+                    reference_df[col],
+                    current_df[col],
+                    col
+                )
+                if finding:
+                    report.findings.append(finding)
+
+            # Unexpected nulls
+            finding = self.detect_unexpected_nulls(
+                reference_df[col],
+                current_df[col],
+                col
+            )
+            if finding:
+                report.findings.append(finding)
+
+            # Cardinality corruption
+            if pd.api.types.is_object_dtype(current_df[col]):
+                finding = self.detect_cardinality_corruption(
+                    reference_df[col],
+                    current_df[col],
+                    col
+                )
+                if finding:
+                    report.findings.append(finding)
+
+        # Range violations
+        if value_ranges:
+            for col, (min_val, max_val) in value_ranges.items():
+                if col in current_df.columns:
+                    finding = self.detect_range_violations(
+                        current_df[col],
+                        col,
+                        min_val,
+                        max_val
+                    )
+                    if finding:
+                        report.findings.append(finding)
+
+        # Duplicate keys
+        if primary_keys:
+            finding = self.detect_duplicate_keys(current_df, primary_keys)
+            if finding:
+                report.findings.append(finding)
+
+        # Calculate score
+        report.corruption_score = report.calculate_corruption_score()
+
+        logger.info(
+            f"Scan complete: {len(report.findings)} findings, "
+            f"corruption score: {report.corruption_score:.2f}"
+        )
+
+        return report
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create reference and corrupted datasets
+    np.random.seed(42)
+
+    reference_df = pd.DataFrame({
+        'customer_id': range(1000),
+        'age': np.random.normal(35, 10, 1000),
+        'purchase_amount': np.random.lognormal(4, 1, 1000),
+        'category': np.random.choice(['A', 'B', 'C'], 1000)
+    })
+
+    # Create corrupted version
+    current_df = reference_df.copy()
+
+    # Introduce corruption
+    current_df.loc[0:100, 'age'] = np.nan  # Unexpected nulls
+    current_df.loc[200:300, 'age'] = np.random.normal(60, 10, 101)  # Distribution shift
+    current_df = pd.concat([current_df, current_df.iloc[0:50]])  # Duplicate keys
+    current_df.loc[400:410, 'purchase_amount'] = -100  # Range violation
+
+    # Run corruption detection
+    detector = CorruptionDetector()
+    report = detector.run_full_scan(
+        reference_df=reference_df,
+        current_df=current_df,
+        dataset_name="customer_transactions",
+        primary_keys=['customer_id'],
+        value_ranges={
+            'age': (0, 120),
+            'purchase_amount': (0, 10000)
+        }
+    )
+
+    print(f"Corruption Detection Report")
+    print(f"=" * 60)
+    print(f"Dataset: {report.dataset_name}")
+    print(f"Corruption Score: {report.corruption_score:.2f}/100")
+    print(f"Findings: {len(report.findings)}")
+
+    print(f"\nCritical Findings:")
+    for finding in report.get_critical_findings():
+        print(f"\n[{finding.severity.upper()}] {finding.description}")
+        print(f"  Column: {finding.column}")
+        print(f"  Affected: {finding.affected_rows} rows ({finding.affected_percentage:.2f}%)")
+        print(f"  Evidence: {finding.evidence}")
+        print(f"  Recommendation: {finding.recommendation}")
+\end{lstlisting}
+
+\section{Industry-Specific Data Governance Scenarios}
+
+\subsection{Scenario 1: The Financial Data Corruption - Trading Algorithm Failures}
+
+\textbf{The Company}: QuantTrade Capital, an algorithmic trading firm managing \$2.3 billion in assets.
+
+\textbf{The System}: High-frequency trading algorithms consuming market data feeds from multiple exchanges, executing thousands of trades per second based on price movements, volume patterns, and order book depth.
+
+\textbf{The Corruption}:
+
+In February 2024, the data engineering team upgraded their market data ingestion pipeline to handle increased throughput. The migration involved:
+\begin{itemize}
+    \item Converting timestamp precision from milliseconds to microseconds
+    \item Migrating from a monolithic database to a distributed time-series database
+    \item Implementing new data compression to reduce storage costs by 40\%
+\end{itemize}
+
+The migration appeared successful. Data volumes matched. Schema validation passed. Latency improved by 15\%.
+
+\textbf{The Silent Failure}:
+
+Three weeks later, several trading algorithms began showing unusual behavior:
+\begin{itemize}
+    \item The momentum strategy stopped generating trades during the first 5 minutes after market open
+    \item The arbitrage detector missed 73\% of opportunities it historically captured
+    \item Risk limits triggered unexpectedly due to phantom portfolio volatility
+\end{itemize}
+
+Financial losses: \$8.4 million over 3 weeks before detection.
+
+\textbf{The Discovery}:
+
+A quantitative researcher noticed that bid-ask spreads in the stored data were statistically impossible---spreads were sometimes negative, implying buyers willing to pay less than sellers asking. This is theoretically impossible in functioning markets.
+
+Deep investigation revealed:
+
+\textbf{The Bug}: The new compression algorithm used lossy compression for price data, rounding prices to the nearest cent to improve compression ratios. However, in high-frequency trading, sub-cent price movements are critical. Options contracts and forex pairs require 4-6 decimal precision.
+
+Example corruption:
+\begin{itemize}
+    \item Original bid: \$142.3347, ask: \$142.3352
+    \item After compression: bid: \$142.33, ask: \$142.34
+    \item Apparent spread: 1 cent instead of 0.5 mills (0.0005)
+\end{itemize}
+
+This destroyed the signal-to-noise ratio for scalping strategies and made arbitrage detection impossible.
+
+\textbf{Scale}: 847 million price records (12.3\%) were corrupted with precision loss.
+
+\textbf{Impact}:
+\begin{itemize}
+    \item \textbf{Direct losses}: \$8.4 million in missed opportunities and bad trades
+    \item \textbf{Remediation cost}: \$1.2 million for data reconstruction from vendor sources
+    \item \textbf{Regulatory}: SEC inquiry into trading irregularities
+    \item \textbf{Reputational}: Loss of 2 institutional clients citing performance concerns
+\end{itemize}
+
+\textbf{Prevention Measures}:
+\begin{enumerate}
+    \item Implement min/max/mean value distribution testing pre/post migration
+    \item Add decimal precision validation for all numeric financial data
+    \item Require statistical similarity tests (Kolmogorov-Smirnov) for all migrations
+    \item Implement automated bid-ask spread validity checks
+    \item Create synthetic test scenarios with known-good data before production migration
+\end{enumerate}
+
+\subsection{Scenario 2: The Healthcare Privacy Breach - PII in Model Training}
+
+\textbf{The Organization}: MedAI Health, a healthcare AI startup building diagnostic assistance models for radiology.
+
+\textbf{The System}: Deep learning models trained on medical imaging data (X-rays, CT scans, MRIs) with associated clinical notes and patient metadata for context.
+
+\textbf{The Privacy Violation}:
+
+In July 2024, MedAI launched their chest X-ray pneumonia detection model to 15 hospital partners. The model achieved 94\% accuracy and was being evaluated for FDA approval.
+
+\textbf{The Compliance Failure}:
+
+During a routine security audit required for HIPAA compliance, auditors discovered that the model's training dataset contained Protected Health Information (PHI) that was inadvertently embedded in image metadata and filenames:
+\begin{itemize}
+    \item DICOM image metadata contained patient names, dates of birth, and medical record numbers
+    \item Image filenames included patient identifiers: \texttt{smith\_john\_19670523\_chest\_xray.dcm}
+    \item Clinical notes embedded in training labels contained physician names and clinic locations
+    \item Some CT scans had patient faces visible in scout images
+\end{itemize}
+
+\textbf{The Exposure}:
+
+The trained model weights potentially encoded PHI through:
+\begin{itemize}
+    \item Overfitting on patient-specific patterns linked to identifiable metadata
+    \item Model metadata files containing training data references with PHI in paths
+    \item Data augmentation logs showing original filenames with patient names
+    \item Version control commits exposing sample data paths with identifiers
+\end{itemize}
+
+\textbf{Scale}: 127,000 patient records (14\% of training set) contained some form of PHI.
+
+\textbf{Impact}:
+\begin{itemize}
+    \item \textbf{Regulatory}: \$2.8 million HIPAA fine from HHS Office for Civil Rights
+    \item \textbf{Legal}: Class action lawsuit from 127,000 affected patients
+    \item \textbf{Business}: All 15 hospital contracts suspended pending compliance review
+    \item \textbf{Remediation}: Complete model retraining after data sanitization (\$4.2M cost)
+    \item \textbf{FDA approval}: Application rejected, requiring restart of evaluation process
+    \item \textbf{Reputational}: Loss of investor confidence, Series B funding round failed
+\end{itemize}
+
+\textbf{Root Causes}:
+\begin{enumerate}
+    \item No automated PII detection in data ingestion pipeline
+    \item Manual data anonymization process (error-prone)
+    \item No validation that DICOM metadata was stripped before training
+    \item Insufficient data governance policies
+    \item No pre-training compliance audit
+    \item Development team lacked HIPAA training
+\end{enumerate}
+
+\textbf{Prevention Framework}:
+\begin{enumerate}
+    \item Implement automated PII detection using regex and ML-based scanners
+    \item Strip all DICOM metadata except essential clinical fields
+    \item Hash all patient identifiers at ingestion using irreversible one-way functions
+    \item Implement face detection and blurring for medical images
+    \item Create data catalog with automated PII tagging
+    \item Require compliance review before any model training
+    \item Implement data lineage tracking to audit PHI flow
+    \item Use differential privacy techniques for model training
+    \item Regular penetration testing for PHI leakage in models
+\end{enumerate}
+
+\subsection{Scenario 3: The Retail Seasonality Surprise - Model Degradation}
+
+\textbf{The Company}: FashionForward, an online fashion retailer with \$340 million annual revenue.
+
+\textbf{The System}: Demand forecasting model predicting inventory needs 6-8 weeks in advance, trained on 3 years of historical sales data. The model informs purchasing decisions for seasonal collections.
+
+\textbf{The Data Pattern Shift}:
+
+In March 2024, the model was retrained on the most recent 18 months of data (March 2022 - September 2023) to focus on recent trends. The data science team believed shorter windows would capture changing fashion preferences better.
+
+\textbf{The Hidden Seasonality}:
+
+The model was deployed in October 2024 for holiday season forecasting. It dramatically under-predicted demand for winter coats, sweaters, and boots while over-predicting summer dresses and sandals.
+
+\textbf{The Discovery}:
+
+In December, when actual sales showed 340\% prediction error, analysts investigated. They discovered:
+
+\textbf{The Problem}: The 18-month training window (March 2022 - September 2023) completely missed the holiday season (October-December). The model had never seen winter holiday buying patterns.
+
+Training data timeline:
+\begin{itemize}
+    \item March 2022 - Spring collection launch
+    \item June-August 2022 - Summer season
+    \item September 2022 - Back to school
+    \item October-December 2022 - MISSING (truncated)
+    \item January-September 2023 - Spring/Summer cycles
+\end{itemize}
+
+The model learned that "December" was a post-holiday clearance month (based on Dec 2021 data from the 3-year window), not a high-demand period.
+
+Additional compounding factors:
+\begin{itemize}
+    \item COVID-19 lockdowns in winter 2021-2022 suppressed winter clothing sales
+    \item The model trained on anomalous data without adjustment
+    \item No explicit seasonal features (month, quarter, holiday flags)
+    \item Feature engineering relied solely on time-series patterns
+\end{itemize}
+
+\textbf{Impact}:
+\begin{itemize}
+    \item \textbf{Stock-outs}: 67\% of winter items sold out by mid-November
+    \item \textbf{Lost revenue}: \$23.4 million in missed sales (items customers wanted but unavailable)
+    \item \textbf{Excess inventory}: \$8.7 million in unsold summer items taking warehouse space
+    \item \textbf{Discounting}: 40\% markdown on excess inventory, reducing margins by \$3.1 million
+    \item \textbf{Customer satisfaction}: NPS score dropped 18 points due to availability issues
+    \item \textbf{Emergency procurement}: Rush orders with 30\% price premium and air freight costs
+\end{itemize}
+
+Total financial impact: \$31.8 million (9.4\% of annual revenue).
+
+\textbf{The Data Quality Issues}:
+\begin{enumerate}
+    \item No validation that training data covered all seasonal patterns
+    \item No detection of temporal coverage gaps
+    \item No statistical tests for representation of all seasons
+    \item Insufficient domain knowledge integration (retail seasonality)
+    \item No validation against business calendar (holiday seasons)
+\end{enumerate}
+
+\textbf{Prevention Measures}:
+\begin{enumerate}
+    \item Implement temporal coverage validation ensuring all seasons/quarters represented
+    \item Add explicit seasonal features (month, quarter, holiday flags, weather data)
+    \item Require minimum N-year windows for annual seasonality (minimum 2 full years)
+    \item Create synthetic test scenarios for each season
+    \item Add business logic validators (e.g., December should predict high winter demand)
+    \item Implement ensemble models combining time-series and seasonal components
+    \item Add anomaly detection for COVID-affected periods with special handling
+    \item Create data quality dashboards showing temporal distribution of training data
+\end{enumerate}
+
+\subsection{Scenario 4: The IoT Sensor Malfunction - Manufacturing Quality Issues}
+
+\textbf{The Company}: PrecisionParts Manufacturing, automotive parts supplier producing 2.3 million components monthly for major auto manufacturers.
+
+\textbf{The System}: Automated quality control system using IoT sensors and computer vision to detect defects in real-time, rejecting parts that fail tolerances. ML model predicts failure likelihood based on 47 sensor readings (temperature, pressure, vibration, dimensions).
+
+\textbf{The Sensor Degradation}:
+
+In May 2024, the company installed 200 new high-precision sensors alongside existing sensors to improve detection accuracy. The sensors measured component dimensions at 0.001mm precision.
+
+\textbf{The Drift}:
+
+Over 8 weeks, several sensors began experiencing calibration drift due to heat exposure in the factory environment. The drift was gradual: 0.02mm per week on average.
+
+Sensor readings:
+\begin{itemize}
+    \item Week 1: True value 10.00mm, Sensor reads 10.00mm (accurate)
+    \item Week 4: True value 10.00mm, Sensor reads 10.06mm (+0.06mm drift)
+    \item Week 8: True value 10.00mm, Sensor reads 10.16mm (+0.16mm drift)
+\end{itemize}
+
+\textbf{The Quality Failure}:
+
+The QC system began:
+\begin{itemize}
+    \item Accepting defective parts (sensor drift made them appear in-spec)
+    \item Rejecting good parts (inverse drift on some sensors made good parts appear out-of-spec)
+    \item False positive rate increased from 2\% to 23\%
+    \item False negative rate increased from 0.5\% to 8\%
+\end{itemize}
+
+\textbf{The Discovery}:
+
+In July, a major automotive manufacturer reported abnormally high failure rates in assembled vehicles using PrecisionParts components. Field failure analysis showed door panels with improper fit, requiring vehicle recalls.
+
+Investigation revealed 127,000 defective parts had passed QC inspection due to sensor drift.
+
+\textbf{Impact}:
+\begin{itemize}
+    \item \textbf{Recall cost}: \$67 million shared liability for automotive recall (PrecisionParts responsible for \$18.4 million)
+    \item \textbf{Production waste}: \$4.2 million in good parts incorrectly rejected
+    \item \textbf{Warranty claims}: \$2.8 million in replacement parts
+    \item \textbf{Contract penalties}: \$5.1 million from auto manufacturer for quality violations
+    \item \textbf{Reputation}: Loss of "Preferred Supplier" status with largest customer
+    \item \textbf{Legal}: Ongoing litigation from end consumers affected by recalls
+\end{itemize}
+
+Total financial impact: \$30.5 million.
+
+\textbf{The Data Quality Issues}:
+\begin{enumerate}
+    \item No sensor drift detection monitoring
+    \item No validation against gold-standard reference measurements
+    \item No statistical process control charts for sensor readings
+    \item Insufficient calibration schedule (annual instead of monthly for high-heat sensors)
+    \item No anomaly detection for sensor behavior
+    \item Missing cross-sensor validation (comparing redundant sensors)
+\end{enumerate}
+
+\textbf{Prevention Framework}:
+\begin{enumerate}
+    \item Implement statistical process control (SPC) charts for all sensors with automatic drift detection
+    \item Daily calibration checks against certified reference standards
+    \item Multi-sensor fusion with outlier detection (if 1 of 3 sensors disagrees, flag for inspection)
+    \item Automated alerts when sensor readings drift beyond $\pm 0.01$mm from historical baseline
+    \item Time-series monitoring of sensor behavior with CUSUM charts for drift detection
+    \item Regular sensor replacement schedule based on operating hours and environmental exposure
+    \item Create digital twin of production line to validate sensor readings against physics models
+    \item Implement Bayesian uncertainty quantification for sensor measurements
+    \item Add environmental monitoring (temperature, humidity) to identify sensor stress conditions
+    \item Require dual confirmation: sensor + manual spot-check samples
+\end{enumerate}
+
+\section{Summary}
+
+This chapter provided a comprehensive framework for enterprise data management, versioning, and governance:
+
+\subsection{Core Frameworks}
+
+\begin{itemize}
+    \item \textbf{Data Quality Metrics}: Statistical validation, drift detection, and comprehensive quality assessment across 25+ dimensions with time-series analysis
+
+    \item \textbf{DVC Integration}: Version control for data, pipeline automation, and remote storage management for reproducible ML workflows
+
+    \item \textbf{Schema Management}: Registry with versioning, validation, and compatibility checking for safe schema evolution
+
+    \item \textbf{Real-time Monitoring}: SQLite-backed monitoring system with alerting, threshold management, and metric history
+
+    \item \textbf{Corruption Detection}: Statistical methods for detecting silent data corruption including distribution shifts, unexpected nulls, cardinality changes, and range violations
+\end{itemize}
+
+\subsection{Enterprise Data Governance}
+
+\begin{itemize}
+    \item \textbf{Data Lineage}: Automated lineage tracking with graph-based impact analysis, PII tracing, and data journey visualization enabling compliance auditing and change impact assessment
+
+    \item \textbf{Data Catalog}: Searchable catalog with automated metadata extraction, PII detection, and classification supporting data discovery and governance at enterprise scale
+
+    \item \textbf{Privacy Compliance}: Comprehensive GDPR, CCPA, and HIPAA compliance framework with automated PII detection, data retention enforcement, right-to-be-forgotten processing, and cross-border transfer validation
+
+    \item \textbf{Data Contracts}: Enforcement of data quality SLAs with automated validation, breaking change detection, and stakeholder notification
+\end{itemize}
+
+\subsection{Industry Lessons}
+
+The chapter presented five real-world scenarios demonstrating catastrophic data quality failures:
+
+\begin{enumerate}
+    \item \textbf{TechCommerce}: Silent timestamp corruption in data warehouse migration causing \$2.1M revenue loss
+
+    \item \textbf{QuantTrade Capital}: Lossy compression destroying price precision in financial data, causing \$8.4M trading losses
+
+    \item \textbf{MedAI Health}: PHI leakage in model training data resulting in \$2.8M HIPAA fine and loss of FDA approval
+
+    \item \textbf{FashionForward}: Seasonal data gaps causing \$31.8M in inventory failures
+
+    \item \textbf{PrecisionParts}: IoT sensor drift enabling defective parts to pass quality control, resulting in \$30.5M in recalls
+\end{enumerate}
+
+These scenarios collectively demonstrate that data quality failures are not mere technical issues---they represent existential business risks with multi-million dollar impacts, regulatory penalties, and reputational damage.
+
+\section{Exercises}
+
+\subsection{Exercise 1: Data Quality Assessment [Basic]}
+
+Perform a comprehensive quality assessment on a real dataset.
+
+\begin{enumerate}
+    \item Load a dataset (use your own or a public dataset)
+    \item Use \texttt{DataQualityAnalyzer} to analyze all columns
+    \item Generate a quality report with overall scores
+    \item Identify and document all critical issues
+    \item Create a remediation plan for top 3 issues
+\end{enumerate}
+
+\textbf{Deliverable}: Quality report with findings and remediation plan.
+
+\subsection{Exercise 2: DVC Pipeline Creation [Intermediate]}
+
+Create a complete DVC pipeline for an ML project.
+
+\begin{enumerate}
+    \item Initialize DVC in a Git repository
+    \item Add data files to DVC
+    \item Configure remote storage
+    \item Create a 3-stage pipeline: data preparation, training, evaluation
+    \item Add parameters and metrics tracking
+    \item Run the pipeline with \texttt{dvc repro}
+\end{enumerate}
+
+\textbf{Deliverable}: DVC pipeline configuration with documentation.
+
+\subsection{Exercise 3: Schema Evolution [Intermediate]}
+
+Design and implement backward-compatible schema evolution.
+
+\begin{enumerate}
+    \item Create a schema v1.0 with 5 fields
+    \item Register it in the schema registry
+    \item Evolve schema to v2.0 (add optional field)
+    \item Verify backward compatibility
+    \item Test that v1.0 data validates against v2.0 schema
+\end{enumerate}
+
+\textbf{Deliverable}: Schema versions with compatibility analysis.
+
+\subsection{Exercise 4: Quality Monitoring System [Advanced]}
+
+Build a complete quality monitoring system.
+
+\begin{enumerate}
+    \item Set up \texttt{QualityMonitor} with SQLite database
+    \item Define thresholds for 5+ metrics
+    \item Simulate a data pipeline generating metrics over time
+    \item Verify alerts are generated for threshold violations
+    \item Create a dashboard showing metric history
+\end{enumerate}
+
+\textbf{Deliverable}: Working monitoring system with alert examples.
+
+\subsection{Exercise 5: Corruption Detection [Advanced]}
+
+Simulate and detect data corruption.
+
+\begin{enumerate}
+    \item Create a clean reference dataset
+    \item Generate a corrupted version with distribution shifts, unexpected nulls, and range violations
+    \item Use \texttt{CorruptionDetector} to scan
+    \item Analyze all findings
+    \item Fix corruption issues
+    \item Re-scan to verify fixes
+\end{enumerate}
+
+\textbf{Deliverable}: Corruption report with before/after analysis.
+
+\subsection{Exercise 6: Drift Detection [Intermediate]}
+
+Implement drift detection across dataset versions.
+
+\begin{enumerate}
+    \item Create a reference dataset
+    \item Generate 3 evolved versions with varying degrees of drift
+    \item Use \texttt{DataDriftDetector} to compare each version
+    \item Analyze KS test results
+    \item Determine which versions have significant drift
+\end{enumerate}
+
+\textbf{Deliverable}: Drift analysis report with statistical evidence.
+
+\subsection{Exercise 7: End-to-End Data Pipeline [Advanced]}
+
+Build a complete data management pipeline.
+
+\begin{enumerate}
+    \item Set up DVC for version control
+    \item Create and register data schemas
+    \item Implement quality checks at each pipeline stage
+    \item Add monitoring with alerting
+    \item Run corruption detection on outputs
+    \item Document the complete pipeline
+\end{enumerate}
+
+\textbf{Deliverable}: Complete pipeline with documentation and quality reports.
+
+\subsection{Exercise 8: Data Lineage System [Advanced]}
+
+Implement comprehensive data lineage tracking.
+
+\begin{enumerate}
+    \item Create lineage graph for a multi-stage ML pipeline (5+ stages)
+    \item Define nodes for sources, transformations, features, and models
+    \item Implement upstream and downstream lineage queries
+    \item Perform impact analysis for a source data change
+    \item Identify all assets affected by PII sources
+    \item Validate lineage integrity (detect cycles, orphans)
+    \item Export lineage to visualization format
+\end{enumerate}
+
+\textbf{Deliverable}: Lineage graph with impact analysis report and visualization.
+
+\subsection{Exercise 9: Data Catalog with PII Detection [Intermediate]}
+
+Build enterprise data catalog with automated PII detection.
+
+\begin{enumerate}
+    \item Create 3-5 sample datasets with varying data types
+    \item Extract metadata automatically using MetadataExtractor
+    \item Implement PII detection on all columns
+    \item Register assets in DataCatalog
+    \item Perform searches with different filters (type, sensitivity, PII)
+    \item Generate catalog statistics report
+    \item Document all detected PII with confidence scores
+\end{enumerate}
+
+\textbf{Deliverable}: Data catalog with PII detection report showing sensitivity classification.
+
+\subsection{Exercise 10: GDPR Compliance Implementation [Advanced]}
+
+Implement GDPR right-to-be-forgotten workflow.
+
+\begin{enumerate}
+    \item Create customer dataset with PII (10,000+ records)
+    \item Implement automated PII detection across all columns
+    \item Add retention policy (e.g., 2 years for customer data)
+    \item Process data subject deletion request for specific customer
+    \item Enforce retention policy and anonymize expired records
+    \item Verify complete removal/anonymization of requested data
+    \item Generate compliance audit report
+\end{enumerate}
+
+\textbf{Deliverable}: GDPR compliance system with deletion verification and audit trail.
+
+\subsection{Exercise 11: Cross-Border Data Transfer Compliance [Intermediate]}
+
+Design cross-border data governance framework.
+
+\begin{enumerate}
+    \item Define datasets in multiple regions (EU, US, APAC)
+    \item Implement cross-border transfer validation logic
+    \item Test scenarios: EU->US (with PII), US->EU, APAC->EU
+    \item Document compliance requirements for each transfer
+    \item Implement data residency enforcement
+    \item Create exception handling for approved transfers (SCCs)
+\end{enumerate}
+
+\textbf{Deliverable}: Cross-border transfer compliance framework with test results.
+
+\subsection{Exercise 12: Real-Time Data Quality Monitoring [Advanced]}
+
+Build production-grade real-time quality monitoring.
+
+\begin{enumerate}
+    \item Set up QualityMonitor with SQLite backend
+    \item Define 10+ quality thresholds across multiple metrics
+    \item Simulate continuous data pipeline (streaming or batch)
+    \item Record metrics over time (minimum 48 hours simulation)
+    \item Generate alerts for threshold violations
+    \item Create time-series visualizations of quality metrics
+    \item Implement alert resolution workflow
+\end{enumerate}
+
+\textbf{Deliverable}: Real-time monitoring dashboard with alert history and metric trends.
+
+\subsection{Exercise 13: Data Corruption Forensics [Advanced]}
+
+Investigate and diagnose data corruption scenario.
+
+\begin{enumerate}
+    \item Create clean reference dataset (customer/sales data)
+    \item Introduce realistic corruption: timestamp shifts, precision loss, distribution changes
+    \item Run CorruptionDetector full scan
+    \item Analyze all findings and prioritize by severity
+    \item Create detailed forensics report: what, when, why, impact
+    \item Design remediation strategy
+    \item Implement fixes and verify with re-scan
+    \item Document prevention measures
+\end{enumerate}
+
+\textbf{Deliverable}: Forensics report with corruption analysis, remediation plan, and prevention strategies.
+
+\subsection{Exercise 14: Schema Evolution and Compatibility [Intermediate]}
+
+Implement safe schema evolution with compatibility testing.
+
+\begin{enumerate}
+    \item Design initial schema v1.0 for e-commerce orders
+    \item Create sample data conforming to v1.0
+    \item Evolve to v2.0: add optional fields (shipping\_method, gift\_message)
+    \item Test backward compatibility (v1.0 data validates against v2.0)
+    \item Evolve to v3.0: add required field (tax\_id) with default value
+    \item Test compatibility modes: BACKWARD, FORWARD, FULL
+    \item Simulate breaking change and verify rejection
+    \item Document schema evolution best practices
+\end{enumerate}
+
+\textbf{Deliverable}: Schema registry with 3 versions, compatibility test results, and evolution documentation.
+
+\subsection{Exercise 15: Enterprise Data Governance Audit [Advanced]}
+
+Conduct comprehensive data governance audit.
+
+\begin{enumerate}
+    \item Create multi-table dataset representing enterprise data warehouse
+    \item Implement data lineage tracking across all tables
+    \item Build data catalog with automated metadata extraction
+    \item Run PII detection scan across all assets
+    \item Identify data quality issues using DataQualityAnalyzer
+    \item Check compliance with retention policies
+    \item Perform corruption detection scan
+    \item Generate executive summary with:
+    \begin{itemize}
+        \item Total assets and data volume
+        \item PII exposure inventory
+        \item Quality score by asset
+        \item Compliance gaps
+        \item Recommended actions prioritized by risk
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Deliverable}: Comprehensive governance audit report suitable for executive presentation.
+
+\vspace{1cm}
+
+\textbf{Recommended Exercise Progression}:
+
+\begin{itemize}
+    \item \textbf{Foundations} (Complete first): Exercises 1, 2, 3, 6 establish core skills
+    \item \textbf{Enterprise Governance} (Intermediate): Exercises 8, 9, 11, 14 cover data governance
+    \item \textbf{Advanced Production} (Advanced): Exercises 4, 5, 7, 10, 12, 13, 15 prepare for production deployment
+\end{itemize}
+
+Complete at least Exercises 1, 3, 9, and 10 before proceeding to Chapter 4. The advanced exercises demonstrate enterprise-ready data management and governance practices essential for production ML systems.

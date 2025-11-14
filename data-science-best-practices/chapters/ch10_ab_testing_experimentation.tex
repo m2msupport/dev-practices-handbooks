@@ -1,0 +1,2327 @@
+\chapter{A/B Testing and Experimentation for ML}
+
+\section{Introduction}
+
+A/B testing validates whether a new ML model genuinely improves outcomes or merely optimizes for training metrics. A recommendation model with 92\% offline accuracy might decrease user engagement by 15\% in production. A fraud detection model with higher AUC might generate more false positives, damaging customer experience. The only way to measure real-world impact is rigorous experimentation.
+
+\subsection{The A/B Testing Imperative}
+
+Consider a ranking model that achieves 5\% higher NDCG in offline evaluation. The team deploys it to all users, celebrating the improvement. Two weeks later, revenue drops 8\% because the new model reduces product diversity, leading to browse abandonment. Proper A/B testing would have detected this before full deployment.
+
+\subsection{Why ML A/B Testing is Different}
+
+Traditional software A/B testing compares two static implementations. ML A/B testing introduces unique challenges:
+
+\begin{itemize}
+    \item \textbf{Model Uncertainty}: Predictions vary by confidence, requiring variance-aware analysis
+    \item \textbf{Continuous Learning}: Models may update during experiments, affecting validity
+    \item \textbf{Feature Dependencies}: Network effects cause user interactions to violate independence
+    \item \textbf{Delayed Outcomes}: Labels arrive days/weeks after predictions (e.g., loan defaults)
+    \item \textbf{Multiple Metrics}: Success requires balancing accuracy, latency, user satisfaction
+    \item \textbf{Heterogeneous Effects}: Models perform differently across user segments
+\end{itemize}
+
+\subsection{The Cost of Poor Experimentation}
+
+Industry evidence shows:
+\begin{itemize}
+    \item \textbf{70\% of A/B tests} are stopped before statistical significance
+    \item \textbf{False positives} from poor design cost \$200K+ in wasted development
+    \item \textbf{Sample size errors} extend tests by 2-3x, delaying launches
+    \item \textbf{Network effects} cause 30\% of conclusions to reverse when accounted for
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-grade experimentation frameworks:
+
+\begin{enumerate}
+    \item \textbf{Experimental Design}: Randomization, stratification, and balance validation
+    \item \textbf{Power Analysis}: Sample size calculation for desired sensitivity
+    \item \textbf{Multi-Armed Bandits}: Continuous optimization with Thompson sampling and UCB
+    \item \textbf{A/A Testing}: Validation of infrastructure and bias detection
+    \item \textbf{Network Effects}: Cluster randomization and interference modeling
+    \item \textbf{Statistical Analysis}: Proper testing with multiple comparison corrections
+    \item \textbf{Sequential Testing}: Early stopping with controlled error rates
+\end{enumerate}
+
+\section{Experimental Design}
+
+Rigorous experimental design ensures valid causal inference from A/B tests.
+
+\subsection{ExperimentDesign: Randomization and Stratification}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Experiment Design System}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable, Tuple
+from enum import Enum
+import numpy as np
+import pandas as pd
+from scipy import stats
+from sklearn.preprocessing import StandardScaler
+import logging
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+class RandomizationMethod(Enum):
+    """Methods for treatment assignment."""
+    SIMPLE = "simple"  # Simple random assignment
+    STRATIFIED = "stratified"  # Stratified by covariates
+    BLOCKED = "blocked"  # Block randomization
+    CLUSTER = "cluster"  # Cluster-level randomization
+    COVARIATE_ADAPTIVE = "covariate_adaptive"  # Minimize imbalance
+
+@dataclass
+class TreatmentArm:
+    """
+    Experimental treatment arm.
+
+    Attributes:
+        name: Arm identifier
+        allocation: Proportion of traffic (0-1)
+        model_config: Configuration for this arm
+        description: Human-readable description
+    """
+    name: str
+    allocation: float
+    model_config: Dict[str, Any]
+    description: str = ""
+
+    def __post_init__(self):
+        """Validate allocation."""
+        if not 0 <= self.allocation <= 1:
+            raise ValueError(
+                f"Allocation must be in [0, 1], got {self.allocation}"
+            )
+
+@dataclass
+class ExperimentConfig:
+    """
+    Complete experiment configuration.
+
+    Attributes:
+        name: Experiment identifier
+        arms: List of treatment arms
+        randomization_method: Method for assignment
+        stratification_vars: Variables for stratification
+        cluster_var: Variable for cluster randomization
+        min_sample_size: Minimum samples per arm
+        max_duration_days: Maximum experiment duration
+        metrics: Primary and secondary metrics to track
+    """
+    name: str
+    arms: List[TreatmentArm]
+    randomization_method: RandomizationMethod
+    stratification_vars: Optional[List[str]] = None
+    cluster_var: Optional[str] = None
+    min_sample_size: int = 1000
+    max_duration_days: int = 30
+    metrics: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate configuration."""
+        # Check allocations sum to 1
+        total_allocation = sum(arm.allocation for arm in self.arms)
+        if not np.isclose(total_allocation, 1.0):
+            raise ValueError(
+                f"Allocations must sum to 1.0, got {total_allocation}"
+            )
+
+        # Validate stratification requirements
+        if (self.randomization_method == RandomizationMethod.STRATIFIED
+            and not self.stratification_vars):
+            raise ValueError(
+                "Stratified randomization requires stratification_vars"
+            )
+
+        # Validate cluster requirements
+        if (self.randomization_method == RandomizationMethod.CLUSTER
+            and not self.cluster_var):
+            raise ValueError(
+                "Cluster randomization requires cluster_var"
+            )
+
+class ExperimentDesign:
+    """
+    Experimental design with proper randomization.
+
+    Supports multiple randomization strategies with balance validation.
+
+    Example:
+        >>> design = ExperimentDesign(config)
+        >>> assignments = design.assign_treatments(users_df)
+        >>> balance_report = design.validate_balance(users_df, assignments)
+    """
+
+    def __init__(self, config: ExperimentConfig, seed: Optional[int] = None):
+        """
+        Initialize experiment design.
+
+        Args:
+            config: Experiment configuration
+            seed: Random seed for reproducibility
+        """
+        self.config = config
+        self.seed = seed or 42
+        self.rng = np.random.RandomState(self.seed)
+
+        # Track assignments
+        self.assignments: Dict[str, str] = {}
+
+        # Balance tracking
+        self.balance_metrics: Dict[str, float] = {}
+
+        logger.info(
+            f"Initialized experiment: {config.name} "
+            f"with {len(config.arms)} arms"
+        )
+
+    def assign_treatments(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str = "user_id"
+    ) -> pd.Series:
+        """
+        Assign treatments to experimental units.
+
+        Args:
+            units: DataFrame with experimental units
+            unit_id_col: Column containing unit identifiers
+
+        Returns:
+            Series mapping unit_id to treatment arm
+        """
+        if self.config.randomization_method == RandomizationMethod.SIMPLE:
+            assignments = self._simple_randomization(units, unit_id_col)
+        elif self.config.randomization_method == RandomizationMethod.STRATIFIED:
+            assignments = self._stratified_randomization(units, unit_id_col)
+        elif self.config.randomization_method == RandomizationMethod.BLOCKED:
+            assignments = self._blocked_randomization(units, unit_id_col)
+        elif self.config.randomization_method == RandomizationMethod.CLUSTER:
+            assignments = self._cluster_randomization(units, unit_id_col)
+        else:  # COVARIATE_ADAPTIVE
+            assignments = self._covariate_adaptive_randomization(
+                units, unit_id_col
+            )
+
+        # Store assignments
+        self.assignments.update(assignments.to_dict())
+
+        logger.info(
+            f"Assigned {len(assignments)} units to treatments. "
+            f"Distribution: {assignments.value_counts().to_dict()}"
+        )
+
+        return assignments
+
+    def _simple_randomization(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str
+    ) -> pd.Series:
+        """
+        Simple random assignment.
+
+        Uses deterministic hashing for consistency across calls.
+        """
+        def assign_unit(unit_id: str) -> str:
+            # Deterministic hash-based assignment
+            hash_value = int(
+                hashlib.md5(
+                    f"{self.config.name}_{unit_id}".encode()
+                ).hexdigest(),
+                16
+            )
+            # Map to [0, 1]
+            uniform = (hash_value % 1000000) / 1000000
+
+            # Assign to arm based on allocation
+            cumulative = 0.0
+            for arm in self.config.arms:
+                cumulative += arm.allocation
+                if uniform < cumulative:
+                    return arm.name
+
+            # Fallback to last arm
+            return self.config.arms[-1].name
+
+        return units[unit_id_col].apply(assign_unit)
+
+    def _stratified_randomization(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str
+    ) -> pd.Series:
+        """
+        Stratified randomization by covariates.
+
+        Ensures balance within strata.
+        """
+        assignments = pd.Series(index=units.index, dtype=str)
+
+        # Create strata
+        strata_cols = self.config.stratification_vars
+        strata = units.groupby(strata_cols)
+
+        for stratum_key, stratum_df in strata:
+            # Randomize within stratum
+            stratum_assignments = self._simple_randomization(
+                stratum_df,
+                unit_id_col
+            )
+            assignments.loc[stratum_df.index] = stratum_assignments
+
+        return assignments
+
+    def _blocked_randomization(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str
+    ) -> pd.Series:
+        """
+        Block randomization for temporal balance.
+
+        Divides units into blocks and balances within each.
+        """
+        block_size = 100  # Units per block
+        n_arms = len(self.config.arms)
+
+        assignments = []
+
+        for start_idx in range(0, len(units), block_size):
+            end_idx = min(start_idx + block_size, len(units))
+            block = units.iloc[start_idx:end_idx]
+
+            # Create balanced block
+            block_assignments = []
+            for arm in self.config.arms:
+                n_in_arm = int(len(block) * arm.allocation)
+                block_assignments.extend([arm.name] * n_in_arm)
+
+            # Fill remaining with random arms
+            while len(block_assignments) < len(block):
+                arm = self.rng.choice(
+                    self.config.arms,
+                    p=[a.allocation for a in self.config.arms]
+                )
+                block_assignments.append(arm.name)
+
+            # Shuffle block
+            self.rng.shuffle(block_assignments)
+
+            assignments.extend(block_assignments[:len(block)])
+
+        return pd.Series(assignments, index=units.index)
+
+    def _cluster_randomization(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str
+    ) -> pd.Series:
+        """
+        Cluster-level randomization.
+
+        All units in a cluster get same treatment.
+        """
+        cluster_col = self.config.cluster_var
+
+        # Get unique clusters
+        clusters = units[cluster_col].unique()
+
+        # Assign clusters to treatments
+        cluster_assignments = {}
+        for cluster in clusters:
+            # Deterministic hash-based assignment
+            hash_value = int(
+                hashlib.md5(
+                    f"{self.config.name}_{cluster}".encode()
+                ).hexdigest(),
+                16
+            )
+            uniform = (hash_value % 1000000) / 1000000
+
+            cumulative = 0.0
+            for arm in self.config.arms:
+                cumulative += arm.allocation
+                if uniform < cumulative:
+                    cluster_assignments[cluster] = arm.name
+                    break
+            else:
+                cluster_assignments[cluster] = self.config.arms[-1].name
+
+        # Map units to cluster assignments
+        return units[cluster_col].map(cluster_assignments)
+
+    def _covariate_adaptive_randomization(
+        self,
+        units: pd.DataFrame,
+        unit_id_col: str
+    ) -> pd.Series:
+        """
+        Covariate-adaptive randomization (minimization).
+
+        Assigns treatments to minimize imbalance in covariates.
+        """
+        assignments = pd.Series(index=units.index, dtype=str)
+
+        # Standardize covariates
+        covariate_cols = self.config.stratification_vars or []
+        if not covariate_cols:
+            # Fall back to simple randomization
+            return self._simple_randomization(units, unit_id_col)
+
+        scaler = StandardScaler()
+        covariates_scaled = scaler.fit_transform(
+            units[covariate_cols].fillna(0)
+        )
+
+        # Track arm statistics
+        arm_stats = {
+            arm.name: {
+                'n': 0,
+                'covariate_sums': np.zeros(len(covariate_cols))
+            }
+            for arm in self.config.arms
+        }
+
+        # Assign each unit
+        for idx, (row_idx, row) in enumerate(units.iterrows()):
+            unit_covariates = covariates_scaled[idx]
+
+            # Compute imbalance for each arm
+            imbalances = {}
+            for arm in self.config.arms:
+                # Compute imbalance if assigned to this arm
+                new_n = arm_stats[arm.name]['n'] + 1
+                new_sums = (
+                    arm_stats[arm.name]['covariate_sums'] + unit_covariates
+                )
+                new_means = new_sums / new_n
+
+                # Compare with other arms
+                max_diff = 0.0
+                for other_arm in self.config.arms:
+                    if other_arm.name == arm.name:
+                        continue
+
+                    if arm_stats[other_arm.name]['n'] > 0:
+                        other_means = (
+                            arm_stats[other_arm.name]['covariate_sums']
+                            / arm_stats[other_arm.name]['n']
+                        )
+                        diff = np.abs(new_means - other_means).sum()
+                        max_diff = max(max_diff, diff)
+
+                imbalances[arm.name] = max_diff
+
+            # Choose arm with minimum imbalance
+            # With some randomness (80% minimize, 20% random)
+            if self.rng.random() < 0.8:
+                assigned_arm = min(imbalances, key=imbalances.get)
+            else:
+                assigned_arm = self.rng.choice(
+                    [arm.name for arm in self.config.arms],
+                    p=[arm.allocation for arm in self.config.arms]
+                )
+
+            assignments.loc[row_idx] = assigned_arm
+
+            # Update statistics
+            arm_stats[assigned_arm]['n'] += 1
+            arm_stats[assigned_arm]['covariate_sums'] += unit_covariates
+
+        return assignments
+
+    def validate_balance(
+        self,
+        units: pd.DataFrame,
+        assignments: pd.Series,
+        covariates: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate balance across treatment arms.
+
+        Args:
+            units: DataFrame with unit characteristics
+            assignments: Treatment assignments
+            covariates: List of covariates to check
+
+        Returns:
+            Dictionary with balance metrics
+        """
+        # Merge assignments with units
+        data = units.copy()
+        data['treatment'] = assignments
+
+        # Use stratification vars if covariates not specified
+        if covariates is None:
+            covariates = self.config.stratification_vars or []
+
+        if not covariates:
+            logger.warning("No covariates specified for balance check")
+            return {}
+
+        balance_results = {}
+
+        for covariate in covariates:
+            if covariate not in data.columns:
+                logger.warning(f"Covariate {covariate} not found")
+                continue
+
+            # Test balance
+            arm_groups = data.groupby('treatment')[covariate]
+
+            # Check if continuous or categorical
+            if pd.api.types.is_numeric_dtype(data[covariate]):
+                # Continuous: use ANOVA
+                groups = [
+                    group.dropna()
+                    for name, group in arm_groups
+                ]
+
+                if len(groups) >= 2 and all(len(g) > 0 for g in groups):
+                    f_stat, p_value = stats.f_oneway(*groups)
+
+                    balance_results[covariate] = {
+                        'type': 'continuous',
+                        'means': arm_groups.mean().to_dict(),
+                        'stds': arm_groups.std().to_dict(),
+                        'f_statistic': f_stat,
+                        'p_value': p_value,
+                        'balanced': p_value > 0.05
+                    }
+            else:
+                # Categorical: use chi-square
+                contingency = pd.crosstab(
+                    data['treatment'],
+                    data[covariate]
+                )
+
+                chi2, p_value, dof, expected = stats.chi2_contingency(
+                    contingency
+                )
+
+                balance_results[covariate] = {
+                    'type': 'categorical',
+                    'distributions': contingency.to_dict(),
+                    'chi2_statistic': chi2,
+                    'p_value': p_value,
+                    'balanced': p_value > 0.05
+                }
+
+        # Overall balance score
+        p_values = [
+            result['p_value']
+            for result in balance_results.values()
+            if 'p_value' in result
+        ]
+
+        if p_values:
+            # Minimum p-value indicates worst imbalance
+            balance_results['overall'] = {
+                'min_p_value': min(p_values),
+                'all_balanced': all(
+                    result.get('balanced', True)
+                    for result in balance_results.values()
+                ),
+                'n_covariates': len(p_values)
+            }
+
+        self.balance_metrics = balance_results
+
+        return balance_results
+
+    def get_assignment(self, unit_id: str) -> Optional[str]:
+        """
+        Get treatment assignment for a unit.
+
+        Args:
+            unit_id: Unit identifier
+
+        Returns:
+            Treatment arm name or None if not assigned
+        """
+        return self.assignments.get(unit_id)
+\end{lstlisting}
+
+\subsection{Balance Validation in Practice}
+
+\begin{lstlisting}[language=Python, caption={Validating Experimental Balance}]
+# Define experiment
+config = ExperimentConfig(
+    name="model_v2_test",
+    arms=[
+        TreatmentArm(
+            name="control",
+            allocation=0.5,
+            model_config={"model_version": "v1"},
+            description="Current production model"
+        ),
+        TreatmentArm(
+            name="treatment",
+            allocation=0.5,
+            model_config={"model_version": "v2"},
+            description="New model with additional features"
+        )
+    ],
+    randomization_method=RandomizationMethod.STRATIFIED,
+    stratification_vars=["country", "user_segment"],
+    min_sample_size=10000,
+    metrics={
+        "primary": "conversion_rate",
+        "secondary": "revenue_per_user"
+    }
+)
+
+# Create design
+design = ExperimentDesign(config, seed=42)
+
+# Assign treatments
+assignments = design.assign_treatments(users_df, unit_id_col="user_id")
+
+# Validate balance
+balance_report = design.validate_balance(
+    users_df,
+    assignments,
+    covariates=["age", "tenure_days", "country", "user_segment"]
+)
+
+# Check balance
+print("Balance Validation Results:")
+for covariate, result in balance_report.items():
+    if covariate == "overall":
+        continue
+
+    print(f"\n{covariate}:")
+    print(f"  Type: {result['type']}")
+    print(f"  P-value: {result['p_value']:.4f}")
+    print(f"  Balanced: {result['balanced']}")
+
+    if result['type'] == 'continuous':
+        print(f"  Means by arm: {result['means']}")
+
+if 'overall' in balance_report:
+    overall = balance_report['overall']
+    print(f"\nOverall Balance:")
+    print(f"  All balanced: {overall['all_balanced']}")
+    print(f"  Minimum p-value: {overall['min_p_value']:.4f}")
+
+# Flag for imbalance
+if not balance_report.get('overall', {}).get('all_balanced', True):
+    logger.warning("Imbalance detected - consider re-randomization")
+\end{lstlisting}
+
+\section{Statistical Power Analysis}
+
+Power analysis determines required sample size for detecting meaningful effects.
+
+\subsection{StatisticalPowerAnalyzer: Sample Size Calculation}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Power Analysis}]
+from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import numpy as np
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+class MetricType(Enum):
+    """Types of metrics for power analysis."""
+    CONTINUOUS = "continuous"  # Mean-based metrics
+    PROPORTION = "proportion"  # Conversion rates
+    COUNT = "count"  # Event counts
+    TIME_TO_EVENT = "time_to_event"  # Survival analysis
+
+@dataclass
+class PowerAnalysisResult:
+    """
+    Result of power analysis.
+
+    Attributes:
+        sample_size_per_arm: Required samples per treatment arm
+        total_sample_size: Total samples needed
+        power: Statistical power achieved
+        alpha: Significance level
+        effect_size: Detectable effect size
+        metric_type: Type of metric
+        assumptions: Assumptions used in calculation
+    """
+    sample_size_per_arm: int
+    total_sample_size: int
+    power: float
+    alpha: float
+    effect_size: float
+    metric_type: MetricType
+    assumptions: Dict[str, Any]
+
+class StatisticalPowerAnalyzer:
+    """
+    Calculate statistical power and required sample sizes.
+
+    Supports multiple metric types and accounts for practical
+    constraints like allocation ratios and expected uplift.
+
+    Example:
+        >>> analyzer = StatisticalPowerAnalyzer(
+        ...     alpha=0.05,
+        ...     power=0.80
+        ... )
+        >>> result = analyzer.calculate_sample_size(
+        ...     metric_type=MetricType.PROPORTION,
+        ...     baseline_value=0.10,
+        ...     mde=0.01  # 1pp absolute increase
+        ... )
+        >>> print(f"Need {result.sample_size_per_arm} per arm")
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.05,
+        power: float = 0.80,
+        n_arms: int = 2,
+        allocation_ratio: Optional[List[float]] = None
+    ):
+        """
+        Initialize power analyzer.
+
+        Args:
+            alpha: Significance level (Type I error rate)
+            power: Desired statistical power (1 - Type II error)
+            n_arms: Number of treatment arms
+            allocation_ratio: Traffic allocation per arm
+        """
+        self.alpha = alpha
+        self.power = power
+        self.n_arms = n_arms
+        self.allocation_ratio = allocation_ratio or [1/n_arms] * n_arms
+
+        if not np.isclose(sum(self.allocation_ratio), 1.0):
+            raise ValueError("Allocation ratios must sum to 1.0")
+
+        logger.info(
+            f"Initialized PowerAnalyzer: "
+            f"alpha={alpha}, power={power}, arms={n_arms}"
+        )
+
+    def calculate_sample_size(
+        self,
+        metric_type: MetricType,
+        baseline_value: float,
+        mde: float,
+        baseline_variance: Optional[float] = None,
+        alternative: str = "two-sided"
+    ) -> PowerAnalysisResult:
+        """
+        Calculate required sample size.
+
+        Args:
+            metric_type: Type of metric
+            baseline_value: Baseline metric value (control arm)
+            mde: Minimum detectable effect (absolute)
+            baseline_variance: Variance of metric (for continuous)
+            alternative: "two-sided" or "one-sided"
+
+        Returns:
+            Power analysis result with sample size
+        """
+        if metric_type == MetricType.CONTINUOUS:
+            result = self._power_continuous(
+                baseline_value,
+                mde,
+                baseline_variance,
+                alternative
+            )
+        elif metric_type == MetricType.PROPORTION:
+            result = self._power_proportion(
+                baseline_value,
+                mde,
+                alternative
+            )
+        elif metric_type == MetricType.COUNT:
+            result = self._power_count(
+                baseline_value,
+                mde,
+                alternative
+            )
+        else:  # TIME_TO_EVENT
+            result = self._power_survival(
+                baseline_value,
+                mde,
+                alternative
+            )
+
+        logger.info(
+            f"Power analysis complete: "
+            f"{result.sample_size_per_arm} per arm, "
+            f"{result.total_sample_size} total"
+        )
+
+        return result
+
+    def _power_continuous(
+        self,
+        baseline_mean: float,
+        mde: float,
+        baseline_std: Optional[float],
+        alternative: str
+    ) -> PowerAnalysisResult:
+        """
+        Power analysis for continuous metrics (t-test).
+
+        Uses formula: n = 2 * (z_alpha + z_beta)^2 * sigma^2 / delta^2
+        """
+        if baseline_std is None:
+            # Assume coefficient of variation = 1
+            baseline_std = abs(baseline_mean)
+
+        # Z-scores for alpha and power
+        z_alpha = stats.norm.ppf(
+            1 - self.alpha / (2 if alternative == "two-sided" else 1)
+        )
+        z_beta = stats.norm.ppf(self.power)
+
+        # Effect size (Cohen's d)
+        effect_size = mde / baseline_std
+
+        # Sample size per arm
+        n_per_arm = 2 * ((z_alpha + z_beta) / effect_size) ** 2
+
+        # Adjust for allocation ratio
+        # For unequal allocation: n1 = n * r / (1+r), n2 = n / (1+r)
+        # where r = n1/n2
+        if len(self.allocation_ratio) == 2:
+            ratio = self.allocation_ratio[1] / self.allocation_ratio[0]
+            n_control = n_per_arm * ratio / (1 + ratio)
+            n_treatment = n_per_arm / (1 + ratio)
+            n_per_arm = max(n_control, n_treatment)
+
+        n_per_arm = int(np.ceil(n_per_arm))
+        total_n = n_per_arm * self.n_arms
+
+        return PowerAnalysisResult(
+            sample_size_per_arm=n_per_arm,
+            total_sample_size=total_n,
+            power=self.power,
+            alpha=self.alpha,
+            effect_size=effect_size,
+            metric_type=MetricType.CONTINUOUS,
+            assumptions={
+                'baseline_mean': baseline_mean,
+                'baseline_std': baseline_std,
+                'mde': mde,
+                'alternative': alternative
+            }
+        )
+
+    def _power_proportion(
+        self,
+        baseline_rate: float,
+        mde: float,
+        alternative: str
+    ) -> PowerAnalysisResult:
+        """
+        Power analysis for proportion metrics (conversion rates).
+
+        Uses pooled proportion for variance estimation.
+        """
+        # Treatment rate
+        treatment_rate = baseline_rate + mde
+
+        # Pooled proportion
+        pooled_p = (baseline_rate + treatment_rate) / 2
+
+        # Pooled standard deviation
+        pooled_std = np.sqrt(2 * pooled_p * (1 - pooled_p))
+
+        # Z-scores
+        z_alpha = stats.norm.ppf(
+            1 - self.alpha / (2 if alternative == "two-sided" else 1)
+        )
+        z_beta = stats.norm.ppf(self.power)
+
+        # Sample size per arm
+        n_per_arm = ((z_alpha + z_beta) * pooled_std / mde) ** 2
+        n_per_arm = int(np.ceil(n_per_arm))
+
+        total_n = n_per_arm * self.n_arms
+
+        # Effect size (h - Cohen's h for proportions)
+        effect_size = 2 * (
+            np.arcsin(np.sqrt(treatment_rate))
+            - np.arcsin(np.sqrt(baseline_rate))
+        )
+
+        return PowerAnalysisResult(
+            sample_size_per_arm=n_per_arm,
+            total_sample_size=total_n,
+            power=self.power,
+            alpha=self.alpha,
+            effect_size=effect_size,
+            metric_type=MetricType.PROPORTION,
+            assumptions={
+                'baseline_rate': baseline_rate,
+                'treatment_rate': treatment_rate,
+                'mde': mde,
+                'alternative': alternative
+            }
+        )
+
+    def _power_count(
+        self,
+        baseline_rate: float,
+        mde: float,
+        alternative: str
+    ) -> PowerAnalysisResult:
+        """
+        Power analysis for count metrics (Poisson).
+
+        Assumes Poisson distribution for event counts.
+        """
+        treatment_rate = baseline_rate + mde
+
+        # For Poisson: variance = mean
+        pooled_var = (baseline_rate + treatment_rate) / 2
+
+        # Z-scores
+        z_alpha = stats.norm.ppf(
+            1 - self.alpha / (2 if alternative == "two-sided" else 1)
+        )
+        z_beta = stats.norm.ppf(self.power)
+
+        # Sample size per arm
+        n_per_arm = 2 * ((z_alpha + z_beta) ** 2) * pooled_var / (mde ** 2)
+        n_per_arm = int(np.ceil(n_per_arm))
+
+        total_n = n_per_arm * self.n_arms
+
+        # Effect size
+        effect_size = mde / np.sqrt(pooled_var)
+
+        return PowerAnalysisResult(
+            sample_size_per_arm=n_per_arm,
+            total_sample_size=total_n,
+            power=self.power,
+            alpha=self.alpha,
+            effect_size=effect_size,
+            metric_type=MetricType.COUNT,
+            assumptions={
+                'baseline_rate': baseline_rate,
+                'treatment_rate': treatment_rate,
+                'mde': mde,
+                'alternative': alternative
+            }
+        )
+
+    def _power_survival(
+        self,
+        baseline_hazard: float,
+        hazard_ratio: float,
+        alternative: str
+    ) -> PowerAnalysisResult:
+        """
+        Power analysis for time-to-event metrics.
+
+        Uses log-rank test assumptions.
+        """
+        # Log hazard ratio
+        log_hr = np.log(hazard_ratio)
+
+        # Z-scores
+        z_alpha = stats.norm.ppf(
+            1 - self.alpha / (2 if alternative == "two-sided" else 1)
+        )
+        z_beta = stats.norm.ppf(self.power)
+
+        # Number of events needed
+        n_events = 4 * ((z_alpha + z_beta) / log_hr) ** 2
+
+        # Convert to sample size (assumes ~70% event rate)
+        event_rate = 0.7
+        n_per_arm = int(np.ceil(n_events / (2 * event_rate)))
+
+        total_n = n_per_arm * self.n_arms
+
+        return PowerAnalysisResult(
+            sample_size_per_arm=n_per_arm,
+            total_sample_size=total_n,
+            power=self.power,
+            alpha=self.alpha,
+            effect_size=abs(log_hr),
+            metric_type=MetricType.TIME_TO_EVENT,
+            assumptions={
+                'baseline_hazard': baseline_hazard,
+                'hazard_ratio': hazard_ratio,
+                'assumed_event_rate': event_rate,
+                'alternative': alternative
+            }
+        )
+
+    def sensitivity_analysis(
+        self,
+        metric_type: MetricType,
+        baseline_value: float,
+        mde_range: List[float],
+        baseline_variance: Optional[float] = None
+    ) -> pd.DataFrame:
+        """
+        Sensitivity analysis across different effect sizes.
+
+        Args:
+            metric_type: Type of metric
+            baseline_value: Baseline metric value
+            mde_range: Range of MDEs to test
+            baseline_variance: Variance (for continuous)
+
+        Returns:
+            DataFrame with sample sizes for each MDE
+        """
+        results = []
+
+        for mde in mde_range:
+            result = self.calculate_sample_size(
+                metric_type=metric_type,
+                baseline_value=baseline_value,
+                mde=mde,
+                baseline_variance=baseline_variance
+            )
+
+            results.append({
+                'mde': mde,
+                'relative_lift': mde / baseline_value,
+                'sample_size_per_arm': result.sample_size_per_arm,
+                'total_sample_size': result.total_sample_size,
+                'effect_size': result.effect_size
+            })
+
+        return pd.DataFrame(results)
+\end{lstlisting}
+
+\subsection{Sample Size Calculation in Practice}
+
+\begin{lstlisting}[language=Python, caption={Practical Power Analysis}]
+# Initialize analyzer
+analyzer = StatisticalPowerAnalyzer(
+    alpha=0.05,  # 5% significance level
+    power=0.80,  # 80% power
+    n_arms=2
+)
+
+# Example 1: Conversion rate improvement
+conversion_result = analyzer.calculate_sample_size(
+    metric_type=MetricType.PROPORTION,
+    baseline_value=0.10,  # 10% baseline conversion
+    mde=0.01  # Want to detect 1pp increase (10% -> 11%)
+)
+
+print(f"Conversion Rate Test:")
+print(f"  Baseline: 10%")
+print(f"  MDE: 1pp (10% relative lift)")
+print(f"  Sample size per arm: {conversion_result.sample_size_per_arm:,}")
+print(f"  Total sample size: {conversion_result.total_sample_size:,}")
+
+# Example 2: Revenue per user (continuous)
+revenue_result = analyzer.calculate_sample_size(
+    metric_type=MetricType.CONTINUOUS,
+    baseline_value=50.0,  # $50 baseline
+    mde=2.5,  # Want to detect $2.5 increase (5% lift)
+    baseline_variance=625.0  # std = $25
+)
+
+print(f"\nRevenue per User Test:")
+print(f"  Baseline: $50")
+print(f"  MDE: $2.5 (5% lift)")
+print(f"  Sample size per arm: {revenue_result.sample_size_per_arm:,}")
+
+# Example 3: Sensitivity analysis
+print("\nSensitivity Analysis for Conversion Rate:")
+mde_range = [0.005, 0.01, 0.015, 0.02]  # 0.5pp to 2pp
+sensitivity_df = analyzer.sensitivity_analysis(
+    metric_type=MetricType.PROPORTION,
+    baseline_value=0.10,
+    mde_range=mde_range
+)
+
+print(sensitivity_df.to_string(index=False))
+
+# Example 4: Multiple metrics with Bonferroni correction
+# Testing 3 metrics, adjust alpha
+n_metrics = 3
+bonferroni_alpha = 0.05 / n_metrics
+
+analyzer_bonferroni = StatisticalPowerAnalyzer(
+    alpha=bonferroni_alpha,
+    power=0.80
+)
+
+adjusted_result = analyzer_bonferroni.calculate_sample_size(
+    metric_type=MetricType.PROPORTION,
+    baseline_value=0.10,
+    mde=0.01
+)
+
+print(f"\nWith Bonferroni correction for {n_metrics} metrics:")
+print(f"  Adjusted alpha: {bonferroni_alpha:.4f}")
+print(f"  Sample size per arm: {adjusted_result.sample_size_per_arm:,}")
+print(f"  Increase vs. single metric: "
+      f"{(adjusted_result.sample_size_per_arm / conversion_result.sample_size_per_arm - 1):.1%}")
+\end{lstlisting}
+
+\section{Multi-Armed Bandits}
+
+Multi-armed bandits balance exploration and exploitation for continuous optimization.
+
+\subsection{MultiArmedBandit: Thompson Sampling and UCB}
+
+\begin{lstlisting}[language=Python, caption={Multi-Armed Bandit Implementation}]
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+from abc import ABC, abstractmethod
+import numpy as np
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+class BanditAlgorithm(Enum):
+    """Multi-armed bandit algorithms."""
+    EPSILON_GREEDY = "epsilon_greedy"
+    UCB = "upper_confidence_bound"
+    THOMPSON_SAMPLING = "thompson_sampling"
+    EXP3 = "exp3"  # For adversarial settings
+
+@dataclass
+class ArmStatistics:
+    """
+    Statistics for a bandit arm.
+
+    Attributes:
+        name: Arm identifier
+        n_pulls: Number of times arm was pulled
+        n_successes: Number of successful outcomes
+        total_reward: Cumulative reward
+        alpha: Beta distribution alpha (successes + 1)
+        beta: Beta distribution beta (failures + 1)
+    """
+    name: str
+    n_pulls: int = 0
+    n_successes: int = 0
+    total_reward: float = 0.0
+
+    @property
+    def alpha(self) -> float:
+        """Beta distribution alpha parameter."""
+        return self.n_successes + 1
+
+    @property
+    def beta(self) -> float:
+        """Beta distribution beta parameter."""
+        return (self.n_pulls - self.n_successes) + 1
+
+    @property
+    def mean_reward(self) -> float:
+        """Empirical mean reward."""
+        return self.total_reward / self.n_pulls if self.n_pulls > 0 else 0.0
+
+    @property
+    def success_rate(self) -> float:
+        """Empirical success rate."""
+        return self.n_successes / self.n_pulls if self.n_pulls > 0 else 0.0
+
+class MultiArmedBandit(ABC):
+    """
+    Abstract base for multi-armed bandit algorithms.
+
+    Subclasses implement specific exploration strategies.
+    """
+
+    def __init__(self, arm_names: List[str], seed: Optional[int] = None):
+        """
+        Initialize bandit.
+
+        Args:
+            arm_names: Names of arms to choose from
+            seed: Random seed
+        """
+        self.arm_names = arm_names
+        self.arms = {
+            name: ArmStatistics(name=name)
+            for name in arm_names
+        }
+        self.rng = np.random.RandomState(seed)
+
+        self.total_pulls = 0
+        self.regret_history: List[float] = []
+
+    @abstractmethod
+    def select_arm(self) -> str:
+        """
+        Select an arm to pull.
+
+        Returns:
+            Name of selected arm
+        """
+        pass
+
+    def update(self, arm_name: str, reward: float, success: bool = True):
+        """
+        Update arm statistics after observation.
+
+        Args:
+            arm_name: Name of pulled arm
+            reward: Observed reward
+            success: Whether outcome was success (for binary rewards)
+        """
+        arm = self.arms[arm_name]
+        arm.n_pulls += 1
+        arm.total_reward += reward
+
+        if success:
+            arm.n_successes += 1
+
+        self.total_pulls += 1
+
+    def get_statistics(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get current statistics for all arms.
+
+        Returns:
+            Dictionary mapping arm names to statistics
+        """
+        return {
+            name: {
+                'n_pulls': arm.n_pulls,
+                'success_rate': arm.success_rate,
+                'mean_reward': arm.mean_reward,
+                'total_reward': arm.total_reward
+            }
+            for name, arm in self.arms.items()
+        }
+
+class ThompsonSampling(MultiArmedBandit):
+    """
+    Thompson Sampling for Bernoulli bandits.
+
+    Uses Beta-Bernoulli conjugate prior for Bayesian inference.
+
+    Example:
+        >>> bandit = ThompsonSampling(["model_a", "model_b", "model_c"])
+        >>> arm = bandit.select_arm()
+        >>> bandit.update(arm, reward=1.0, success=True)
+    """
+
+    def select_arm(self) -> str:
+        """
+        Select arm by sampling from posterior distributions.
+
+        Each arm's posterior is Beta(alpha, beta).
+        """
+        samples = {}
+
+        for name, arm in self.arms.items():
+            # Sample from Beta posterior
+            sample = self.rng.beta(arm.alpha, arm.beta)
+            samples[name] = sample
+
+        # Choose arm with highest sample
+        selected_arm = max(samples, key=samples.get)
+
+        logger.debug(
+            f"Thompson Sampling: selected {selected_arm}, "
+            f"samples={samples}"
+        )
+
+        return selected_arm
+
+    def get_posterior_probabilities(self) -> Dict[str, Tuple[float, float]]:
+        """
+        Get posterior mean and std for each arm.
+
+        Returns:
+            Dictionary mapping arm names to (mean, std)
+        """
+        posteriors = {}
+
+        for name, arm in self.arms.items():
+            # Beta distribution mean and variance
+            alpha, beta = arm.alpha, arm.beta
+            mean = alpha / (alpha + beta)
+            variance = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
+            std = np.sqrt(variance)
+
+            posteriors[name] = (mean, std)
+
+        return posteriors
+
+class UCB(MultiArmedBandit):
+    """
+    Upper Confidence Bound algorithm.
+
+    Selects arm with highest upper confidence bound:
+    UCB_i = mean_i + sqrt(2 * log(t) / n_i)
+
+    Example:
+        >>> bandit = UCB(["model_a", "model_b"], confidence=2.0)
+        >>> arm = bandit.select_arm()
+    """
+
+    def __init__(
+        self,
+        arm_names: List[str],
+        confidence: float = 2.0,
+        seed: Optional[int] = None
+    ):
+        """
+        Initialize UCB.
+
+        Args:
+            arm_names: Names of arms
+            confidence: Confidence parameter (higher = more exploration)
+            seed: Random seed
+        """
+        super().__init__(arm_names, seed)
+        self.confidence = confidence
+
+    def select_arm(self) -> str:
+        """
+        Select arm with highest UCB.
+
+        For arms never pulled, UCB = infinity (pull first).
+        """
+        ucb_values = {}
+
+        for name, arm in self.arms.items():
+            if arm.n_pulls == 0:
+                # Pull unpulled arms first
+                ucb_values[name] = float('inf')
+            else:
+                # UCB formula
+                exploitation = arm.mean_reward
+                exploration = self.confidence * np.sqrt(
+                    2 * np.log(self.total_pulls) / arm.n_pulls
+                )
+                ucb_values[name] = exploitation + exploration
+
+        selected_arm = max(ucb_values, key=ucb_values.get)
+
+        logger.debug(
+            f"UCB: selected {selected_arm}, UCBs={ucb_values}"
+        )
+
+        return selected_arm
+
+class EpsilonGreedy(MultiArmedBandit):
+    """
+    Epsilon-Greedy algorithm.
+
+    Explores randomly with probability epsilon, exploits otherwise.
+
+    Example:
+        >>> bandit = EpsilonGreedy(["model_a", "model_b"], epsilon=0.1)
+    """
+
+    def __init__(
+        self,
+        arm_names: List[str],
+        epsilon: float = 0.1,
+        decay: bool = False,
+        seed: Optional[int] = None
+    ):
+        """
+        Initialize epsilon-greedy.
+
+        Args:
+            arm_names: Names of arms
+            epsilon: Exploration probability
+            decay: Whether to decay epsilon over time
+            seed: Random seed
+        """
+        super().__init__(arm_names, seed)
+        self.epsilon = epsilon
+        self.decay = decay
+        self.initial_epsilon = epsilon
+
+    def select_arm(self) -> str:
+        """
+        Select arm using epsilon-greedy strategy.
+        """
+        # Decay epsilon if enabled
+        if self.decay and self.total_pulls > 0:
+            self.epsilon = self.initial_epsilon / (1 + self.total_pulls / 1000)
+
+        # Explore with probability epsilon
+        if self.rng.random() < self.epsilon:
+            # Random exploration
+            selected_arm = self.rng.choice(self.arm_names)
+            logger.debug(f"Epsilon-Greedy: exploring {selected_arm}")
+        else:
+            # Greedy exploitation
+            # Choose arm with highest mean reward
+            if self.total_pulls == 0:
+                # No data yet, choose randomly
+                selected_arm = self.rng.choice(self.arm_names)
+            else:
+                mean_rewards = {
+                    name: arm.mean_reward
+                    for name, arm in self.arms.items()
+                }
+                selected_arm = max(mean_rewards, key=mean_rewards.get)
+
+            logger.debug(f"Epsilon-Greedy: exploiting {selected_arm}")
+
+        return selected_arm
+
+class BanditExperiment:
+    """
+    Run bandit experiment with performance tracking.
+
+    Example:
+        >>> bandit = ThompsonSampling(["model_a", "model_b"])
+        >>> experiment = BanditExperiment(bandit, true_rewards={"model_a": 0.10, "model_b": 0.12})
+        >>> experiment.run(n_iterations=1000)
+        >>> print(experiment.get_summary())
+    """
+
+    def __init__(
+        self,
+        bandit: MultiArmedBandit,
+        true_rewards: Dict[str, float],
+        reward_noise: float = 0.0
+    ):
+        """
+        Initialize experiment.
+
+        Args:
+            bandit: Bandit algorithm to test
+            true_rewards: True mean rewards for each arm
+            reward_noise: Gaussian noise std for rewards
+        """
+        self.bandit = bandit
+        self.true_rewards = true_rewards
+        self.reward_noise = reward_noise
+
+        # Best arm
+        self.best_arm = max(true_rewards, key=true_rewards.get)
+        self.best_reward = true_rewards[self.best_arm]
+
+        # Tracking
+        self.cumulative_reward = 0.0
+        self.cumulative_regret = 0.0
+        self.arm_selection_history: List[str] = []
+
+    def run(self, n_iterations: int):
+        """
+        Run experiment for n iterations.
+
+        Args:
+            n_iterations: Number of iterations
+        """
+        for i in range(n_iterations):
+            # Select arm
+            arm = self.bandit.select_arm()
+            self.arm_selection_history.append(arm)
+
+            # Observe reward (with noise)
+            true_reward = self.true_rewards[arm]
+            observed_reward = true_reward + self.bandit.rng.normal(
+                0, self.reward_noise
+            )
+
+            # Clamp to [0, 1] for conversion rates
+            observed_reward = np.clip(observed_reward, 0, 1)
+
+            # Update bandit
+            success = observed_reward > 0.5  # Binary outcome
+            self.bandit.update(arm, observed_reward, success)
+
+            # Track performance
+            self.cumulative_reward += observed_reward
+
+            # Regret = reward of best arm - reward of chosen arm
+            regret = self.best_reward - true_reward
+            self.cumulative_regret += regret
+
+            if (i + 1) % 100 == 0:
+                logger.info(
+                    f"Iteration {i+1}: "
+                    f"Cumulative regret={self.cumulative_regret:.2f}, "
+                    f"Best arm selection rate="
+                    f"{self.arm_selection_history.count(self.best_arm) / (i+1):.1%}"
+                )
+
+    def get_summary(self) -> Dict[str, Any]:
+        """
+        Get experiment summary.
+
+        Returns:
+            Summary statistics
+        """
+        n_iterations = len(self.arm_selection_history)
+
+        # Selection rates
+        selection_rates = {}
+        for arm in self.bandit.arm_names:
+            count = self.arm_selection_history.count(arm)
+            selection_rates[arm] = count / n_iterations
+
+        # Bandit statistics
+        bandit_stats = self.bandit.get_statistics()
+
+        return {
+            'n_iterations': n_iterations,
+            'cumulative_reward': self.cumulative_reward,
+            'cumulative_regret': self.cumulative_regret,
+            'average_reward': self.cumulative_reward / n_iterations,
+            'average_regret': self.cumulative_regret / n_iterations,
+            'best_arm': self.best_arm,
+            'best_arm_selection_rate': selection_rates[self.best_arm],
+            'selection_rates': selection_rates,
+            'arm_statistics': bandit_stats
+        }
+\end{lstlisting}
+
+\subsection{Bandit Comparison}
+
+\begin{lstlisting}[language=Python, caption={Comparing Bandit Algorithms}]
+# True conversion rates for three models
+true_rewards = {
+    "model_a": 0.10,  # Baseline
+    "model_b": 0.11,  # 10% improvement
+    "model_c": 0.12   # 20% improvement (best)
+}
+
+# Test different algorithms
+algorithms = [
+    ("Thompson Sampling", ThompsonSampling(list(true_rewards.keys()), seed=42)),
+    ("UCB", UCB(list(true_rewards.keys()), confidence=2.0, seed=42)),
+    ("Epsilon-Greedy (0.1)", EpsilonGreedy(list(true_rewards.keys()), epsilon=0.1, seed=42)),
+    ("Epsilon-Greedy (Decay)", EpsilonGreedy(list(true_rewards.keys()), epsilon=0.3, decay=True, seed=42))
+]
+
+results = []
+
+for name, bandit in algorithms:
+    experiment = BanditExperiment(
+        bandit=bandit,
+        true_rewards=true_rewards,
+        reward_noise=0.1
+    )
+
+    experiment.run(n_iterations=2000)
+    summary = experiment.get_summary()
+
+    results.append({
+        'algorithm': name,
+        'cumulative_regret': summary['cumulative_regret'],
+        'average_regret': summary['average_regret'],
+        'best_arm_selection_rate': summary['best_arm_selection_rate'],
+        'final_exploitation_rate': summary['selection_rates']['model_c']
+    })
+
+# Display results
+results_df = pd.DataFrame(results)
+print("Bandit Algorithm Comparison:")
+print(results_df.to_string(index=False))
+
+# Thompson Sampling typically has lowest regret for this scenario
+\end{lstlisting}
+
+\section{A/A Testing and Bias Detection}
+
+A/A tests validate experimental infrastructure before running real tests.
+
+\subsection{A/A Testing Implementation}
+
+\begin{lstlisting}[language=Python, caption={A/A Testing for Infrastructure Validation}]
+from typing import Dict, List, Optional
+import numpy as np
+import pandas as pd
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AATestValidator:
+    """
+    A/A testing for infrastructure validation.
+
+    A/A tests assign users to identical treatments to validate
+    that randomization and measurement systems work correctly.
+
+    Example:
+        >>> validator = AATestValidator(alpha=0.05)
+        >>> result = validator.run_aa_test(control_data, treatment_data)
+        >>> if result['valid']:
+        ...     print("Infrastructure validated")
+    """
+
+    def __init__(self, alpha: float = 0.05, n_simulations: int = 1000):
+        """
+        Initialize A/A test validator.
+
+        Args:
+            alpha: Significance level
+            n_simulations: Number of simulations for FPR estimation
+        """
+        self.alpha = alpha
+        self.n_simulations = n_simulations
+
+    def run_aa_test(
+        self,
+        control_data: pd.Series,
+        treatment_data: pd.Series,
+        metric_name: str = "metric"
+    ) -> Dict[str, Any]:
+        """
+        Run A/A test comparing two identical treatments.
+
+        Args:
+            control_data: Data from "control" arm
+            treatment_data: Data from "treatment" arm
+            metric_name: Name of metric being tested
+
+        Returns:
+            Dictionary with validation results
+        """
+        # Test for difference (should find none)
+        if pd.api.types.is_numeric_dtype(control_data):
+            # Continuous metric: t-test
+            statistic, p_value = stats.ttest_ind(
+                control_data.dropna(),
+                treatment_data.dropna()
+            )
+            test_type = "t-test"
+        else:
+            # Categorical metric: chi-square
+            contingency = pd.crosstab(
+                pd.Series(["control"] * len(control_data) + ["treatment"] * len(treatment_data)),
+                pd.concat([control_data, treatment_data])
+            )
+            statistic, p_value, _, _ = stats.chi2_contingency(contingency)
+            test_type = "chi-square"
+
+        # Check if significant (bad for A/A test)
+        is_significant = p_value < self.alpha
+
+        # Compute effect size
+        if pd.api.types.is_numeric_dtype(control_data):
+            # Cohen's d
+            pooled_std = np.sqrt(
+                (control_data.var() + treatment_data.var()) / 2
+            )
+            effect_size = abs(
+                control_data.mean() - treatment_data.mean()
+            ) / pooled_std
+        else:
+            effect_size = None
+
+        result = {
+            'metric_name': metric_name,
+            'test_type': test_type,
+            'p_value': p_value,
+            'statistic': statistic,
+            'is_significant': is_significant,
+            'effect_size': effect_size,
+            'valid': not is_significant,
+            'control_mean': control_data.mean() if pd.api.types.is_numeric_dtype(control_data) else None,
+            'treatment_mean': treatment_data.mean() if pd.api.types.is_numeric_dtype(treatment_data) else None,
+            'control_n': len(control_data),
+            'treatment_n': len(treatment_data)
+        }
+
+        if is_significant:
+            logger.warning(
+                f"A/A test FAILED for {metric_name}: "
+                f"p-value={p_value:.4f} < {self.alpha} "
+                f"(found spurious difference)"
+            )
+        else:
+            logger.info(
+                f"A/A test PASSED for {metric_name}: "
+                f"p-value={p_value:.4f} >= {self.alpha}"
+            )
+
+        return result
+
+    def estimate_false_positive_rate(
+        self,
+        data: pd.Series
+    ) -> Dict[str, float]:
+        """
+        Estimate false positive rate through simulation.
+
+        Randomly splits data into two groups and tests for difference.
+        Should find ~alpha% significant results.
+
+        Args:
+            data: Combined data to split
+
+        Returns:
+            Dictionary with FPR estimates
+        """
+        significant_count = 0
+        p_values = []
+
+        for _ in range(self.n_simulations):
+            # Random split
+            indices = np.random.permutation(len(data))
+            mid = len(indices) // 2
+
+            group_a = data.iloc[indices[:mid]]
+            group_b = data.iloc[indices[mid:]]
+
+            # Test
+            if pd.api.types.is_numeric_dtype(data):
+                _, p_value = stats.ttest_ind(group_a, group_b)
+            else:
+                contingency = pd.crosstab(
+                    pd.Series(["a"] * len(group_a) + ["b"] * len(group_b)),
+                    pd.concat([group_a, group_b])
+                )
+                _, p_value, _, _ = stats.chi2_contingency(contingency)
+
+            p_values.append(p_value)
+
+            if p_value < self.alpha:
+                significant_count += 1
+
+        observed_fpr = significant_count / self.n_simulations
+
+        return {
+            'observed_fpr': observed_fpr,
+            'expected_fpr': self.alpha,
+            'fpr_within_bounds': abs(observed_fpr - self.alpha) < 2 * np.sqrt(self.alpha * (1 - self.alpha) / self.n_simulations),
+            'mean_p_value': np.mean(p_values),
+            'p_value_uniformity': stats.kstest(p_values, 'uniform').pvalue
+        }
+
+class BiasDetector:
+    """
+    Detect bias in randomization and measurement.
+
+    Checks for selection bias, measurement bias, and temporal bias.
+    """
+
+    def __init__(self):
+        """Initialize bias detector."""
+        pass
+
+    def check_selection_bias(
+        self,
+        assignments: pd.Series,
+        covariates: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """
+        Check for selection bias in treatment assignment.
+
+        Tests if covariates predict treatment assignment.
+
+        Args:
+            assignments: Treatment assignments
+            covariates: Covariate data
+
+        Returns:
+            Bias detection results
+        """
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import cross_val_score
+
+        # Encode assignments as binary (control=0, treatment=1)
+        unique_arms = assignments.unique()
+        if len(unique_arms) != 2:
+            logger.warning("Selection bias check requires 2 arms")
+            return {}
+
+        y = (assignments == unique_arms[1]).astype(int)
+
+        # Fit logistic regression
+        X = covariates.fillna(0)
+
+        # One-hot encode categorical variables
+        X_encoded = pd.get_dummies(X, drop_first=True)
+
+        model = LogisticRegression(random_state=42, max_iter=1000)
+
+        # Cross-validated AUC
+        auc_scores = cross_val_score(
+            model,
+            X_encoded,
+            y,
+            cv=5,
+            scoring='roc_auc'
+        )
+
+        mean_auc = auc_scores.mean()
+
+        # AUC ~0.5 indicates no bias
+        bias_detected = mean_auc > 0.55 or mean_auc < 0.45
+
+        return {
+            'bias_detected': bias_detected,
+            'mean_auc': mean_auc,
+            'auc_std': auc_scores.std(),
+            'interpretation': (
+                "No selection bias" if not bias_detected
+                else "Covariates predict treatment assignment"
+            )
+        }
+
+    def check_temporal_bias(
+        self,
+        data: pd.DataFrame,
+        timestamp_col: str,
+        treatment_col: str,
+        metric_col: str
+    ) -> Dict[str, Any]:
+        """
+        Check for temporal bias (time-varying effects).
+
+        Args:
+            data: Experiment data
+            timestamp_col: Column with timestamps
+            treatment_col: Column with treatment assignments
+            metric_col: Column with metric values
+
+        Returns:
+            Temporal bias results
+        """
+        # Split into time windows
+        data = data.sort_values(timestamp_col)
+        n_windows = 5
+
+        window_size = len(data) // n_windows
+        window_effects = []
+
+        for i in range(n_windows):
+            start_idx = i * window_size
+            end_idx = (i + 1) * window_size if i < n_windows - 1 else len(data)
+
+            window_data = data.iloc[start_idx:end_idx]
+
+            # Compute treatment effect in window
+            control = window_data[
+                window_data[treatment_col] == window_data[treatment_col].unique()[0]
+            ][metric_col]
+
+            treatment = window_data[
+                window_data[treatment_col] == window_data[treatment_col].unique()[1]
+            ][metric_col]
+
+            if len(control) > 0 and len(treatment) > 0:
+                effect = treatment.mean() - control.mean()
+                window_effects.append(effect)
+
+        # Test if effects vary across windows
+        if len(window_effects) > 1:
+            # High variance indicates temporal instability
+            effect_std = np.std(window_effects)
+            effect_mean = np.mean(window_effects)
+
+            # Coefficient of variation
+            cv = abs(effect_std / effect_mean) if effect_mean != 0 else float('inf')
+
+            temporal_bias = cv > 0.5  # 50% variation
+
+            return {
+                'temporal_bias_detected': temporal_bias,
+                'window_effects': window_effects,
+                'effect_mean': effect_mean,
+                'effect_std': effect_std,
+                'coefficient_of_variation': cv
+            }
+        else:
+            return {'error': 'Insufficient windows for analysis'}
+\end{lstlisting}
+
+\section{Sequential Testing and Early Stopping}
+
+Sequential testing enables stopping experiments early while controlling error rates.
+
+\subsection{Sequential Test Implementation}
+
+\begin{lstlisting}[language=Python, caption={Sequential Testing with Error Control}]
+from typing import Optional, Dict, Any, Tuple
+import numpy as np
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SequentialTest:
+    """
+    Sequential testing with early stopping.
+
+    Implements group sequential testing with alpha spending
+    functions to control Type I error.
+
+    Example:
+        >>> test = SequentialTest(
+        ...     alpha=0.05,
+        ...     power=0.80,
+        ...     n_looks=5
+        ... )
+        >>> for data_batch in batches:
+        ...     result = test.analyze(control_data, treatment_data)
+        ...     if result['decision'] != 'continue':
+        ...         break
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.05,
+        power: float = 0.80,
+        n_looks: int = 5,
+        spending_function: str = "obrien_fleming"
+    ):
+        """
+        Initialize sequential test.
+
+        Args:
+            alpha: Overall significance level
+            power: Desired power
+            n_looks: Number of planned analyses
+            spending_function: Alpha spending function
+                - "obrien_fleming": Conservative early, liberal late
+                - "pocock": Equal spending at each look
+                - "alpha_spending": Custom spending
+        """
+        self.alpha = alpha
+        self.power = power
+        self.n_looks = n_looks
+        self.spending_function = spending_function
+
+        # Compute alpha levels for each look
+        self.alpha_levels = self._compute_alpha_spending()
+
+        # Track looks
+        self.current_look = 0
+        self.decisions: List[Dict] = []
+
+        logger.info(
+            f"Initialized SequentialTest: "
+            f"n_looks={n_looks}, spending={spending_function}"
+        )
+
+    def _compute_alpha_spending(self) -> List[float]:
+        """
+        Compute alpha spending at each look.
+
+        Returns:
+            List of cumulative alpha spent at each look
+        """
+        looks = np.arange(1, self.n_looks + 1)
+
+        if self.spending_function == "pocock":
+            # Equal spending
+            alpha_spent = np.full(self.n_looks, self.alpha / self.n_looks)
+            cumulative = np.cumsum(alpha_spent)
+
+        elif self.spending_function == "obrien_fleming":
+            # O'Brien-Fleming spending
+            # More conservative early, spend more alpha later
+            information_fractions = looks / self.n_looks
+
+            cumulative = []
+            for t in information_fractions:
+                # O'Brien-Fleming alpha spending function
+                spent = 2 * (1 - stats.norm.cdf(
+                    stats.norm.ppf(1 - self.alpha / 2) / np.sqrt(t)
+                ))
+                cumulative.append(spent)
+
+            cumulative = np.array(cumulative)
+
+        else:
+            # Simple linear spending
+            cumulative = self.alpha * looks / self.n_looks
+
+        return cumulative.tolist()
+
+    def analyze(
+        self,
+        control_data: np.ndarray,
+        treatment_data: np.ndarray
+    ) -> Dict[str, Any]:
+        """
+        Analyze data at current look.
+
+        Args:
+            control_data: Control arm data
+            treatment_data: Treatment arm data
+
+        Returns:
+            Dictionary with decision and statistics
+        """
+        self.current_look += 1
+
+        if self.current_look > self.n_looks:
+            raise ValueError(
+                f"Exceeded planned looks: {self.current_look} > {self.n_looks}"
+            )
+
+        # Perform test
+        statistic, p_value = stats.ttest_ind(
+            control_data,
+            treatment_data
+        )
+
+        # Get alpha threshold for this look
+        alpha_threshold = self.alpha_levels[self.current_look - 1]
+
+        # Previous alpha spent
+        if self.current_look > 1:
+            previous_alpha = self.alpha_levels[self.current_look - 2]
+            incremental_alpha = alpha_threshold - previous_alpha
+        else:
+            incremental_alpha = alpha_threshold
+
+        # Decision
+        if p_value < incremental_alpha:
+            decision = "reject_null"  # Treatment effect detected
+        elif self.current_look == self.n_looks:
+            decision = "accept_null"  # Final look, no effect
+        else:
+            decision = "continue"  # Continue to next look
+
+        # Effect size
+        pooled_std = np.sqrt(
+            (np.var(control_data) + np.var(treatment_data)) / 2
+        )
+        effect_size = (np.mean(treatment_data) - np.mean(control_data)) / pooled_std
+
+        result = {
+            'look': self.current_look,
+            'decision': decision,
+            'p_value': p_value,
+            'alpha_threshold': incremental_alpha,
+            'cumulative_alpha_spent': alpha_threshold,
+            'statistic': statistic,
+            'effect_size': effect_size,
+            'control_mean': np.mean(control_data),
+            'treatment_mean': np.mean(treatment_data),
+            'control_n': len(control_data),
+            'treatment_n': len(treatment_data)
+        }
+
+        self.decisions.append(result)
+
+        logger.info(
+            f"Look {self.current_look}: "
+            f"decision={decision}, "
+            f"p={p_value:.4f}, "
+            f"alpha_threshold={incremental_alpha:.4f}"
+        )
+
+        return result
+
+    def get_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of sequential test.
+
+        Returns:
+            Summary statistics
+        """
+        return {
+            'n_looks_performed': self.current_look,
+            'n_looks_planned': self.n_looks,
+            'spending_function': self.spending_function,
+            'alpha_levels': self.alpha_levels,
+            'decisions': self.decisions,
+            'stopped_early': self.current_look < self.n_looks,
+            'final_decision': self.decisions[-1]['decision'] if self.decisions else None
+        }
+\end{lstlisting}
+
+\section{Real-World Scenario: A/B Test Misinterpretation}
+
+\subsection{The Problem}
+
+An e-commerce company ran an A/B test comparing two recommendation models:
+\begin{itemize}
+    \item \textbf{Control}: Collaborative filtering (10\% CTR)
+    \item \textbf{Treatment}: Deep learning model (10.5\% CTR)
+\end{itemize}
+
+After 3 days with 50,000 users, the treatment showed 5\% CTR improvement (p=0.03). The team declared victory and deployed to 100\% traffic.
+
+\textbf{Two weeks later}: Revenue dropped 12\%, and investigations revealed:
+\begin{itemize}
+    \item Test was underpowered (needed 80K users per arm)
+    \item Stopped early without sequential testing correction
+    \item Didn't account for multiple metrics (CTR, revenue, engagement)
+    \item Ignored 25\% drop in recommendation diversity
+    \item Weekend traffic spike created temporary effect
+\end{itemize}
+
+\textbf{Cost}: \$1.5M in lost revenue, 3 weeks to rollback and redesign.
+
+\subsection{The Solution}
+
+Proper experimental design would have prevented this:
+
+\begin{lstlisting}[language=Python, caption={Complete A/B Test Implementation}]
+# 1. Power analysis before starting
+analyzer = StatisticalPowerAnalyzer(alpha=0.05, power=0.80)
+
+power_result = analyzer.calculate_sample_size(
+    metric_type=MetricType.PROPORTION,
+    baseline_value=0.10,  # 10% CTR
+    mde=0.005  # Want to detect 0.5pp (5% relative lift)
+)
+
+print(f"Required sample size: {power_result.sample_size_per_arm:,} per arm")
+# Output: Required sample size: 76,200 per arm
+
+# Adjust for multiple metrics (Bonferroni)
+n_metrics = 3  # CTR, revenue, diversity
+adjusted_analyzer = StatisticalPowerAnalyzer(
+    alpha=0.05 / n_metrics,
+    power=0.80
+)
+
+adjusted_result = adjusted_analyzer.calculate_sample_size(
+    metric_type=MetricType.PROPORTION,
+    baseline_value=0.10,
+    mde=0.005
+)
+
+print(f"Adjusted for {n_metrics} metrics: {adjusted_result.sample_size_per_arm:,} per arm")
+# Output: Adjusted for 3 metrics: 101,450 per arm
+
+# 2. Proper randomization with balance validation
+config = ExperimentConfig(
+    name="recommendation_model_test",
+    arms=[
+        TreatmentArm("control", 0.5, {"model": "collaborative_filtering"}),
+        TreatmentArm("treatment", 0.5, {"model": "deep_learning"})
+    ],
+    randomization_method=RandomizationMethod.STRATIFIED,
+    stratification_vars=["country", "user_segment", "platform"],
+    min_sample_size=adjusted_result.sample_size_per_arm
+)
+
+design = ExperimentDesign(config)
+assignments = design.assign_treatments(users_df)
+
+# Validate balance
+balance = design.validate_balance(
+    users_df,
+    assignments,
+    covariates=["age", "tenure", "past_purchases", "country"]
+)
+
+if not balance['overall']['all_balanced']:
+    raise ValueError("Imbalance detected - check randomization")
+
+# 3. A/A test first to validate infrastructure
+aa_validator = AATestValidator()
+
+# Run A/A test with identical models
+aa_result = aa_validator.run_aa_test(
+    control_data=aa_control_ctr,
+    treatment_data=aa_treatment_ctr,
+    metric_name="CTR"
+)
+
+if not aa_result['valid']:
+    raise ValueError("A/A test failed - fix infrastructure before A/B test")
+
+# 4. Sequential testing for early stopping
+sequential_test = SequentialTest(
+    alpha=0.05 / n_metrics,  # Bonferroni correction
+    power=0.80,
+    n_looks=5,
+    spending_function="obrien_fleming"
+)
+
+# Run test with periodic looks
+for week in range(1, 6):
+    # Collect data
+    control_data = get_data(arm="control", week=week)
+    treatment_data = get_data(arm="treatment", week=week)
+
+    # Analyze
+    result = sequential_test.analyze(
+        control_data['ctr'],
+        treatment_data['ctr']
+    )
+
+    print(f"Week {week}: {result['decision']}")
+
+    if result['decision'] != 'continue':
+        break
+
+# 5. Multiple metric analysis with correction
+class ExperimentAnalyzer:
+    """Analyze multiple metrics with proper corrections."""
+
+    def __init__(self, alpha: float = 0.05):
+        self.alpha = alpha
+
+    def analyze_metrics(
+        self,
+        control_data: pd.DataFrame,
+        treatment_data: pd.DataFrame,
+        metrics: List[str]
+    ) -> Dict[str, Dict]:
+        """Analyze multiple metrics with Bonferroni correction."""
+        n_metrics = len(metrics)
+        adjusted_alpha = self.alpha / n_metrics
+
+        results = {}
+
+        for metric in metrics:
+            if pd.api.types.is_numeric_dtype(control_data[metric]):
+                stat, p_value = stats.ttest_ind(
+                    control_data[metric].dropna(),
+                    treatment_data[metric].dropna()
+                )
+
+                effect = (
+                    treatment_data[metric].mean()
+                    - control_data[metric].mean()
+                )
+                relative_effect = effect / control_data[metric].mean()
+            else:
+                # Chi-square for categorical
+                contingency = pd.crosstab(
+                    pd.concat([
+                        pd.Series(["control"] * len(control_data)),
+                        pd.Series(["treatment"] * len(treatment_data))
+                    ]),
+                    pd.concat([control_data[metric], treatment_data[metric]])
+                )
+                stat, p_value, _, _ = stats.chi2_contingency(contingency)
+                effect = None
+                relative_effect = None
+
+            results[metric] = {
+                'p_value': p_value,
+                'adjusted_alpha': adjusted_alpha,
+                'significant': p_value < adjusted_alpha,
+                'effect': effect,
+                'relative_effect': relative_effect,
+                'control_mean': control_data[metric].mean(),
+                'treatment_mean': treatment_data[metric].mean()
+            }
+
+        return results
+
+analyzer = ExperimentAnalyzer(alpha=0.05)
+
+final_results = analyzer.analyze_metrics(
+    control_data,
+    treatment_data,
+    metrics=['ctr', 'revenue_per_user', 'recommendation_diversity']
+)
+
+# Check all metrics
+for metric, result in final_results.items():
+    print(f"{metric}:")
+    print(f"  Control: {result['control_mean']:.4f}")
+    print(f"  Treatment: {result['treatment_mean']:.4f}")
+    print(f"  Effect: {result['relative_effect']:.2%}")
+    print(f"  P-value: {result['p_value']:.4f}")
+    print(f"  Significant: {result['significant']}")
+
+# Decision
+all_metrics_positive = all(
+    result['relative_effect'] > 0
+    for result in final_results.values()
+    if result['relative_effect'] is not None
+)
+
+primary_significant = final_results['ctr']['significant']
+
+if primary_significant and all_metrics_positive:
+    print("SHIP IT: Primary metric significant, all metrics positive")
+else:
+    print("DO NOT SHIP: Either not significant or negative secondary metrics")
+\end{lstlisting}
+
+\subsection{Outcome}
+
+With proper methodology:
+\begin{itemize}
+    \item Ran test for 4 weeks (sufficient power)
+    \item Detected diversity drop in Week 2
+    \item Modified model to preserve diversity
+    \item Re-ran test with improved model
+    \item Final launch improved CTR by 4\% and revenue by 7\%
+\end{itemize}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Stratified Randomization}
+
+Implement stratified randomization for a multi-country experiment. Ensure balance within each country and overall. Compare balance with simple randomization.
+
+\subsection{Exercise 2: Power Analysis Sensitivity}
+
+Conduct sensitivity analysis showing how sample size changes with:
+\begin{itemize}
+    \item Different MDE values (1\%, 3\%, 5\%, 10\%)
+    \item Different baseline rates (5\%, 10\%, 20\%)
+    \item Different power levels (70\%, 80\%, 90\%)
+    \item Multiple comparison corrections (2, 5, 10 metrics)
+\end{itemize}
+
+Create visualization showing trade-offs.
+
+\subsection{Exercise 3: Bandit Simulation}
+
+Simulate a 4-arm bandit problem with true conversion rates [0.08, 0.09, 0.10, 0.12]. Compare Thompson Sampling, UCB, and Epsilon-Greedy over 5000 iterations. Measure cumulative regret and convergence speed.
+
+\subsection{Exercise 4: A/A Test Infrastructure}
+
+Build A/A testing infrastructure that:
+\begin{itemize}
+    \item Runs continuous A/A tests in production
+    \item Estimates false positive rate
+    \item Detects infrastructure degradation
+    \item Alerts when FPR exceeds expected
+\end{itemize}
+
+\subsection{Exercise 5: Network Effects}
+
+Design a cluster randomization strategy for a social network where users influence each other. Implement graph-based clustering and validate that interference is minimized.
+
+\subsection{Exercise 6: Sequential Testing Simulation}
+
+Simulate sequential testing with different stopping rules. Compare:
+\begin{itemize}
+    \item Fixed horizon (no early stopping)
+    \item Pocock boundary
+    \item O'Brien-Fleming boundary
+    \item Alpha spending approach
+\end{itemize}
+
+Measure Type I error rate, power, and average sample size under null and alternative hypotheses.
+
+\subsection{Exercise 7: Multi-Metric Decision Framework}
+
+Build a framework that:
+\begin{itemize}
+    \item Tests multiple metrics (guardrail, primary, secondary)
+    \item Applies appropriate corrections
+    \item Handles directional hypotheses
+    \item Provides clear ship/no-ship decision
+    \item Generates stakeholder report
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+    \item \textbf{Plan Before Testing}: Power analysis and proper randomization prevent costly mistakes
+    \item \textbf{Validate Infrastructure}: A/A tests catch measurement and randomization bugs
+    \item \textbf{Control Error Rates}: Use Bonferroni or sequential testing for multiple comparisons
+    \item \textbf{Balance Exploration}: Multi-armed bandits optimize faster than fixed A/B tests
+    \item \textbf{Account for Network Effects}: Use cluster randomization when users influence each other
+    \item \textbf{Test All Metrics}: Don't optimize one metric at the expense of others
+    \item \textbf{Resist Early Stopping}: Wait for sufficient power unless using sequential methods
+\end{itemize}
+
+Rigorous experimentation distinguishes data-driven decisions from data-justified guesses. Proper A/B testing methodology ensures ML improvements translate to real business value.

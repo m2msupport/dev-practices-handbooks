@@ -1,0 +1,3036 @@
+\chapter{Experiment Tracking and Management}
+\label{ch:experiment_tracking}
+
+\section{Chapter Overview}
+
+Machine learning is inherently experimental. Data scientists run hundreds or thousands of experiments to find optimal models. Without rigorous experiment tracking, this exploration becomes chaotic: results are lost, optimal configurations are forgotten, and reproducibility becomes impossible.
+
+This chapter provides comprehensive frameworks for experiment tracking, hyperparameter optimization, and systematic comparison of results. We integrate industry-standard tools (MLflow, Optuna) with custom analytics to create a complete experiment management system.
+
+\subsection{Learning Objectives}
+
+By the end of this chapter, you will be able to:
+
+\begin{itemize}
+    \item Track experiments comprehensively using MLflow with complete metadata
+    \item Perform Bayesian hyperparameter optimization with Optuna
+    \item Compare experiments statistically to determine significant improvements
+    \item Define and search hyperparameter spaces efficiently
+    \item Measure and improve hyperparameter tuning efficiency
+    \item Generate experiment dashboards and visualizations
+    \item Manage the complete experiment lifecycle from design to deployment
+\end{itemize}
+
+\section{The Experiment Management Challenge}
+
+\subsection{The Cost of Poor Experiment Tracking}
+
+Consider these common scenarios:
+
+\begin{itemize}
+    \item A data scientist achieves 94\% accuracy but cannot reproduce it weeks later
+    \item A team runs 500 experiments but has no systematic way to find the best configuration
+    \item Hyperparameter tuning takes 10 days when it could take 2 days with better search strategies
+    \item Production model performance degrades, but no record exists of training conditions
+\end{itemize}
+
+Industry research shows:
+\begin{itemize}
+    \item 60\% of ML experiments are never properly logged
+    \item Teams waste an average of 20 hours per month searching for previous results
+    \item Random search often performs no better than grid search due to poor space definition
+    \item 40\% of ``breakthrough'' results cannot be reproduced due to incomplete tracking
+\end{itemize}
+
+\subsection{What to Track}
+
+A comprehensive experiment log should capture:
+
+\begin{enumerate}
+    \item \textbf{Code}: Git commit hash, branch, diff status
+    \item \textbf{Data}: Dataset version, size, schema hash, transformations
+    \item \textbf{Environment}: Python packages, hardware, OS, random seeds
+    \item \textbf{Hyperparameters}: All model and training hyperparameters
+    \item \textbf{Metrics}: Training and validation metrics over time
+    \item \textbf{Artifacts}: Model checkpoints, plots, predictions
+    \item \textbf{Metadata}: Execution time, resource usage, notes
+\end{enumerate}
+
+\section{MLflow Integration and Experiment Tracking}
+
+MLflow provides a standardized interface for experiment tracking. We create a protocol-based abstraction with MLflow backend implementation.
+
+\begin{lstlisting}[style=python, caption={Experiment tracking with MLflow integration}]
+"""
+Experiment Tracking System
+
+Protocol-based experiment tracking with MLflow backend implementation.
+"""
+
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Protocol, Union
+import json
+import logging
+import subprocess
+import hashlib
+
+import mlflow
+import mlflow.sklearn
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class ExperimentStatus(Enum):
+    """Experiment lifecycle status."""
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class GitMetadata:
+    """Git repository metadata."""
+    commit_hash: str
+    branch: str
+    is_dirty: bool
+    remote_url: Optional[str] = None
+    commit_message: Optional[str] = None
+    author: Optional[str] = None
+
+    @staticmethod
+    def capture() -> Optional['GitMetadata']:
+        """Capture current git metadata."""
+        try:
+            # Get commit hash
+            commit = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+
+            # Get branch
+            branch = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+
+            # Check if dirty
+            status = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+            is_dirty = len(status) > 0
+
+            # Get remote URL
+            try:
+                remote = subprocess.run(
+                    ['git', 'config', '--get', 'remote.origin.url'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                ).stdout.strip()
+            except subprocess.CalledProcessError:
+                remote = None
+
+            # Get commit message
+            try:
+                message = subprocess.run(
+                    ['git', 'log', '-1', '--pretty=%B'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                ).stdout.strip()
+            except subprocess.CalledProcessError:
+                message = None
+
+            return GitMetadata(
+                commit_hash=commit,
+                branch=branch,
+                is_dirty=is_dirty,
+                remote_url=remote,
+                commit_message=message
+            )
+
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("Git metadata not available")
+            return None
+
+
+@dataclass
+class HardwareMetadata:
+    """Hardware configuration metadata."""
+    cpu_count: int
+    total_memory_gb: float
+    gpu_available: bool
+    gpu_name: Optional[str] = None
+    gpu_memory_gb: Optional[float] = None
+
+    @staticmethod
+    def capture() -> 'HardwareMetadata':
+        """Capture hardware metadata."""
+        import multiprocessing
+
+        cpu_count = multiprocessing.cpu_count()
+
+        # Get memory
+        try:
+            import psutil
+            total_memory_gb = psutil.virtual_memory().total / (1024**3)
+        except ImportError:
+            total_memory_gb = 0.0
+
+        # Check for GPU
+        gpu_available = False
+        gpu_name = None
+        gpu_memory_gb = None
+
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            gpu_info = result.stdout.strip().split(',')
+            gpu_name = gpu_info[0].strip()
+            gpu_memory_gb = float(gpu_info[1].strip()) / 1024
+            gpu_available = True
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError):
+            pass
+
+        return HardwareMetadata(
+            cpu_count=cpu_count,
+            total_memory_gb=total_memory_gb,
+            gpu_available=gpu_available,
+            gpu_name=gpu_name,
+            gpu_memory_gb=gpu_memory_gb
+        )
+
+
+@dataclass
+class ExperimentMetadata:
+    """Complete experiment metadata."""
+    experiment_id: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    git: Optional[GitMetadata] = None
+    hardware: Optional[HardwareMetadata] = None
+    python_version: str = ""
+    dataset_name: str = ""
+    dataset_hash: Optional[str] = None
+    dataset_size: int = 0
+    random_seed: Optional[int] = None
+    notes: str = ""
+    tags: Dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for logging."""
+        result = {
+            "experiment_id": self.experiment_id,
+            "timestamp": self.timestamp.isoformat(),
+            "python_version": self.python_version,
+            "dataset_name": self.dataset_name,
+            "dataset_hash": self.dataset_hash,
+            "dataset_size": self.dataset_size,
+            "random_seed": self.random_seed,
+            "notes": self.notes,
+            "tags": self.tags
+        }
+
+        if self.git:
+            result["git"] = asdict(self.git)
+
+        if self.hardware:
+            result["hardware"] = asdict(self.hardware)
+
+        return result
+
+
+class ExperimentTracker(Protocol):
+    """Protocol for experiment tracking implementations."""
+
+    def start_experiment(
+        self,
+        name: str,
+        tags: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Start a new experiment."""
+        ...
+
+    def log_params(self, params: Dict[str, Any]) -> None:
+        """Log hyperparameters."""
+        ...
+
+    def log_metrics(
+        self,
+        metrics: Dict[str, float],
+        step: Optional[int] = None
+    ) -> None:
+        """Log metrics."""
+        ...
+
+    def log_artifact(self, artifact_path: Path) -> None:
+        """Log artifact file."""
+        ...
+
+    def end_experiment(self, status: ExperimentStatus) -> None:
+        """End the experiment."""
+        ...
+
+
+class MLflowTracker:
+    """MLflow-based experiment tracker."""
+
+    def __init__(
+        self,
+        tracking_uri: str = "./mlruns",
+        experiment_name: str = "default"
+    ):
+        """
+        Initialize MLflow tracker.
+
+        Args:
+            tracking_uri: MLflow tracking server URI
+            experiment_name: Name of the experiment
+        """
+        self.tracking_uri = tracking_uri
+        self.experiment_name = experiment_name
+        self.run_id: Optional[str] = None
+
+        # Set tracking URI
+        mlflow.set_tracking_uri(tracking_uri)
+
+        # Create or get experiment
+        try:
+            self.experiment_id = mlflow.create_experiment(experiment_name)
+        except:
+            self.experiment_id = mlflow.get_experiment_by_name(
+                experiment_name
+            ).experiment_id
+
+        logger.info(f"MLflow tracker initialized: {experiment_name}")
+
+    def start_experiment(
+        self,
+        name: str,
+        tags: Optional[Dict[str, str]] = None
+    ) -> str:
+        """
+        Start a new MLflow run.
+
+        Args:
+            name: Run name
+            tags: Optional tags
+
+        Returns:
+            Run ID
+        """
+        # Capture metadata
+        git_meta = GitMetadata.capture()
+        hw_meta = HardwareMetadata.capture()
+
+        # Start run
+        run = mlflow.start_run(
+            experiment_id=self.experiment_id,
+            run_name=name
+        )
+        self.run_id = run.info.run_id
+
+        # Log tags
+        if tags:
+            mlflow.set_tags(tags)
+
+        # Log metadata
+        if git_meta:
+            mlflow.set_tags({
+                "git.commit": git_meta.commit_hash,
+                "git.branch": git_meta.branch,
+                "git.dirty": str(git_meta.is_dirty)
+            })
+
+        if hw_meta:
+            mlflow.log_params({
+                "hardware.cpu_count": hw_meta.cpu_count,
+                "hardware.memory_gb": hw_meta.total_memory_gb,
+                "hardware.gpu_available": hw_meta.gpu_available
+            })
+
+        logger.info(f"Started experiment: {name} (run_id={self.run_id})")
+
+        return self.run_id
+
+    def log_params(self, params: Dict[str, Any]) -> None:
+        """
+        Log hyperparameters.
+
+        Args:
+            params: Dictionary of parameters
+        """
+        if self.run_id is None:
+            raise RuntimeError("No active experiment")
+
+        # Flatten nested dictionaries
+        flat_params = self._flatten_dict(params)
+        mlflow.log_params(flat_params)
+
+        logger.debug(f"Logged {len(flat_params)} parameters")
+
+    def log_metrics(
+        self,
+        metrics: Dict[str, float],
+        step: Optional[int] = None
+    ) -> None:
+        """
+        Log metrics.
+
+        Args:
+            metrics: Dictionary of metrics
+            step: Optional step number
+        """
+        if self.run_id is None:
+            raise RuntimeError("No active experiment")
+
+        mlflow.log_metrics(metrics, step=step)
+
+        logger.debug(f"Logged {len(metrics)} metrics at step {step}")
+
+    def log_artifact(self, artifact_path: Path) -> None:
+        """
+        Log artifact file.
+
+        Args:
+            artifact_path: Path to artifact
+        """
+        if self.run_id is None:
+            raise RuntimeError("No active experiment")
+
+        mlflow.log_artifact(str(artifact_path))
+
+        logger.debug(f"Logged artifact: {artifact_path}")
+
+    def log_model(
+        self,
+        model: Any,
+        artifact_path: str = "model"
+    ) -> None:
+        """
+        Log trained model.
+
+        Args:
+            model: Model object
+            artifact_path: Path within run artifacts
+        """
+        if self.run_id is None:
+            raise RuntimeError("No active experiment")
+
+        mlflow.sklearn.log_model(model, artifact_path)
+
+        logger.info(f"Logged model to {artifact_path}")
+
+    def end_experiment(self, status: ExperimentStatus) -> None:
+        """
+        End the current experiment.
+
+        Args:
+            status: Final status
+        """
+        if self.run_id is None:
+            return
+
+        if status == ExperimentStatus.FAILED:
+            mlflow.set_tag("status", "FAILED")
+
+        mlflow.end_run()
+
+        logger.info(f"Ended experiment: {self.run_id} ({status.value})")
+
+        self.run_id = None
+
+    @staticmethod
+    def _flatten_dict(
+        d: Dict[str, Any],
+        parent_key: str = '',
+        sep: str = '.'
+    ) -> Dict[str, Any]:
+        """Flatten nested dictionary."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+
+            if isinstance(v, dict):
+                items.extend(
+                    MLflowTracker._flatten_dict(v, new_key, sep=sep).items()
+                )
+            else:
+                items.append((new_key, v))
+
+        return dict(items)
+
+    def get_best_run(
+        self,
+        metric: str,
+        mode: str = "max"
+    ) -> Optional[mlflow.entities.Run]:
+        """
+        Get best run by metric.
+
+        Args:
+            metric: Metric name
+            mode: "max" or "min"
+
+        Returns:
+            Best run or None
+        """
+        runs = mlflow.search_runs(
+            experiment_ids=[self.experiment_id],
+            order_by=[f"metrics.{metric} {'DESC' if mode == 'max' else 'ASC'}"],
+            max_results=1
+        )
+
+        if len(runs) > 0:
+            return runs.iloc[0]
+
+        return None
+
+
+# Example usage
+if __name__ == "__main__":
+    import sys
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score, f1_score
+
+    # Initialize tracker
+    tracker = MLflowTracker(
+        experiment_name="rf_classification_example"
+    )
+
+    # Generate sample data
+    X, y = make_classification(
+        n_samples=1000,
+        n_features=20,
+        random_state=42
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.2,
+        random_state=42
+    )
+
+    # Start experiment
+    tracker.start_experiment(
+        name="rf_baseline",
+        tags={"model_type": "random_forest", "version": "v1"}
+    )
+
+    try:
+        # Log parameters
+        params = {
+            "n_estimators": 100,
+            "max_depth": 10,
+            "random_state": 42,
+            "model": {
+                "type": "RandomForest",
+                "criterion": "gini"
+            }
+        }
+        tracker.log_params(params)
+
+        # Train model
+        model = RandomForestClassifier(**{
+            k: v for k, v in params.items()
+            if k != "model"
+        })
+        model.fit(X_train, y_train)
+
+        # Evaluate
+        y_pred = model.predict(X_test)
+        metrics = {
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1_score": f1_score(y_test, y_pred)
+        }
+
+        # Log metrics
+        tracker.log_metrics(metrics)
+
+        # Log model
+        tracker.log_model(model)
+
+        # End successfully
+        tracker.end_experiment(ExperimentStatus.COMPLETED)
+
+        print(f"Experiment completed successfully")
+        print(f"Accuracy: {metrics['accuracy']:.4f}")
+
+    except Exception as e:
+        logger.error(f"Experiment failed: {e}")
+        tracker.end_experiment(ExperimentStatus.FAILED)
+        raise
+\end{lstlisting}
+
+\section{Bayesian Hyperparameter Optimization}
+
+Bayesian optimization intelligently explores hyperparameter space using probabilistic models. We integrate Optuna for state-of-the-art optimization with comprehensive tracking.
+
+\begin{lstlisting}[style=python, caption={Hyperparameter optimization with Optuna}]
+"""
+Hyperparameter Optimization
+
+Bayesian optimization using Optuna with experiment tracking integration.
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import logging
+import json
+from pathlib import Path
+
+import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class ParameterType(Enum):
+    """Hyperparameter types."""
+    FLOAT = "float"
+    INT = "int"
+    CATEGORICAL = "categorical"
+    LOG_FLOAT = "log_float"
+    LOG_INT = "log_int"
+
+
+@dataclass
+class ParameterSpec:
+    """Hyperparameter specification."""
+    name: str
+    param_type: ParameterType
+    low: Optional[Union[int, float]] = None
+    high: Optional[Union[int, float]] = None
+    choices: Optional[List[Any]] = None
+    log: bool = False
+
+    def suggest(self, trial: optuna.Trial) -> Any:
+        """
+        Suggest parameter value using Optuna trial.
+
+        Args:
+            trial: Optuna trial object
+
+        Returns:
+            Suggested parameter value
+        """
+        if self.param_type == ParameterType.FLOAT:
+            return trial.suggest_float(
+                self.name,
+                self.low,
+                self.high,
+                log=self.log
+            )
+
+        elif self.param_type == ParameterType.INT:
+            return trial.suggest_int(
+                self.name,
+                self.low,
+                self.high,
+                log=self.log
+            )
+
+        elif self.param_type == ParameterType.CATEGORICAL:
+            return trial.suggest_categorical(
+                self.name,
+                self.choices
+            )
+
+        elif self.param_type == ParameterType.LOG_FLOAT:
+            return trial.suggest_float(
+                self.name,
+                self.low,
+                self.high,
+                log=True
+            )
+
+        elif self.param_type == ParameterType.LOG_INT:
+            return trial.suggest_int(
+                self.name,
+                self.low,
+                self.high,
+                log=True
+            )
+
+        else:
+            raise ValueError(f"Unknown parameter type: {self.param_type}")
+
+
+@dataclass
+class SearchSpace:
+    """Complete hyperparameter search space."""
+    parameters: List[ParameterSpec]
+    name: str = "search_space"
+
+    def suggest_all(self, trial: optuna.Trial) -> Dict[str, Any]:
+        """
+        Suggest all parameters for a trial.
+
+        Args:
+            trial: Optuna trial
+
+        Returns:
+            Dictionary of suggested parameters
+        """
+        params = {}
+        for param_spec in self.parameters:
+            params[param_spec.name] = param_spec.suggest(trial)
+
+        return params
+
+    def to_dict(self) -> Dict:
+        """Export search space definition."""
+        return {
+            "name": self.name,
+            "parameters": [
+                {
+                    "name": p.name,
+                    "type": p.param_type.value,
+                    "low": p.low,
+                    "high": p.high,
+                    "choices": p.choices,
+                    "log": p.log
+                }
+                for p in self.parameters
+            ]
+        }
+
+
+@dataclass
+class OptimizationResult:
+    """Results from hyperparameter optimization."""
+    best_params: Dict[str, Any]
+    best_value: float
+    best_trial: int
+    n_trials: int
+    optimization_time: float
+    search_space: SearchSpace
+    all_trials: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        """Export results."""
+        return {
+            "best_params": self.best_params,
+            "best_value": self.best_value,
+            "best_trial": self.best_trial,
+            "n_trials": self.n_trials,
+            "optimization_time": self.optimization_time,
+            "search_space": self.search_space.to_dict(),
+            "n_completed_trials": len([
+                t for t in self.all_trials
+                if t['state'] == 'COMPLETE'
+            ])
+        }
+
+    def save(self, filepath: Path) -> None:
+        """Save results to file."""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Optimization results saved to {filepath}")
+
+
+class HyperparameterOptimizer:
+    """Bayesian hyperparameter optimization with Optuna."""
+
+    def __init__(
+        self,
+        search_space: SearchSpace,
+        direction: str = "maximize",
+        n_trials: int = 100,
+        timeout: Optional[int] = None,
+        n_jobs: int = 1,
+        sampler: Optional[optuna.samplers.BaseSampler] = None,
+        pruner: Optional[optuna.pruners.BasePruner] = None
+    ):
+        """
+        Initialize optimizer.
+
+        Args:
+            search_space: Hyperparameter search space
+            direction: "maximize" or "minimize"
+            n_trials: Number of trials
+            timeout: Timeout in seconds
+            n_jobs: Number of parallel jobs
+            sampler: Optuna sampler (TPE by default)
+            pruner: Optuna pruner (Median by default)
+        """
+        self.search_space = search_space
+        self.direction = direction
+        self.n_trials = n_trials
+        self.timeout = timeout
+        self.n_jobs = n_jobs
+
+        # Default sampler and pruner
+        self.sampler = sampler or TPESampler(seed=42)
+        self.pruner = pruner or MedianPruner()
+
+        # Create study
+        self.study = optuna.create_study(
+            direction=direction,
+            sampler=self.sampler,
+            pruner=self.pruner
+        )
+
+        logger.info(
+            f"Optimizer initialized: {direction}, "
+            f"{n_trials} trials, {n_jobs} jobs"
+        )
+
+    def optimize(
+        self,
+        objective_fn: Callable[[Dict[str, Any]], float],
+        callbacks: Optional[List[Callable]] = None
+    ) -> OptimizationResult:
+        """
+        Run hyperparameter optimization.
+
+        Args:
+            objective_fn: Function that takes parameters and returns metric
+            callbacks: Optional list of callbacks
+
+        Returns:
+            OptimizationResult
+        """
+        import time
+
+        start_time = time.time()
+
+        def objective(trial: optuna.Trial) -> float:
+            """Optuna objective function."""
+            # Suggest parameters
+            params = self.search_space.suggest_all(trial)
+
+            # Evaluate objective
+            try:
+                value = objective_fn(params)
+
+                # Store trial info
+                trial.set_user_attr("params", params)
+
+                return value
+
+            except Exception as e:
+                logger.error(f"Trial failed: {e}")
+                raise optuna.TrialPruned()
+
+        # Run optimization
+        self.study.optimize(
+            objective,
+            n_trials=self.n_trials,
+            timeout=self.timeout,
+            n_jobs=self.n_jobs,
+            callbacks=callbacks,
+            show_progress_bar=True
+        )
+
+        optimization_time = time.time() - start_time
+
+        # Extract all trial information
+        all_trials = []
+        for trial in self.study.trials:
+            all_trials.append({
+                "number": trial.number,
+                "value": trial.value,
+                "params": trial.params,
+                "state": trial.state.name,
+                "duration": trial.duration.total_seconds() if trial.duration else None
+            })
+
+        result = OptimizationResult(
+            best_params=self.study.best_params,
+            best_value=self.study.best_value,
+            best_trial=self.study.best_trial.number,
+            n_trials=len(self.study.trials),
+            optimization_time=optimization_time,
+            search_space=self.search_space,
+            all_trials=all_trials
+        )
+
+        logger.info(
+            f"Optimization complete: best_value={result.best_value:.4f}, "
+            f"time={optimization_time:.2f}s"
+        )
+
+        return result
+
+    def get_optimization_history(self) -> List[Tuple[int, float]]:
+        """
+        Get optimization history.
+
+        Returns:
+            List of (trial_number, value) tuples
+        """
+        return [
+            (trial.number, trial.value)
+            for trial in self.study.trials
+            if trial.value is not None
+        ]
+
+    def get_param_importances(self) -> Dict[str, float]:
+        """
+        Get parameter importances.
+
+        Returns:
+            Dictionary of parameter importances
+        """
+        try:
+            importances = optuna.importance.get_param_importances(self.study)
+            return dict(importances)
+        except:
+            logger.warning("Cannot compute parameter importances")
+            return {}
+
+
+# Example usage
+if __name__ == "__main__":
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import cross_val_score
+
+    # Generate sample data
+    X, y = make_classification(
+        n_samples=1000,
+        n_features=20,
+        random_state=42
+    )
+
+    # Define search space
+    search_space = SearchSpace(
+        name="random_forest_search",
+        parameters=[
+            ParameterSpec(
+                name="n_estimators",
+                param_type=ParameterType.INT,
+                low=10,
+                high=200
+            ),
+            ParameterSpec(
+                name="max_depth",
+                param_type=ParameterType.INT,
+                low=3,
+                high=20
+            ),
+            ParameterSpec(
+                name="min_samples_split",
+                param_type=ParameterType.INT,
+                low=2,
+                high=20
+            ),
+            ParameterSpec(
+                name="min_samples_leaf",
+                param_type=ParameterType.INT,
+                low=1,
+                high=10
+            ),
+            ParameterSpec(
+                name="max_features",
+                param_type=ParameterType.CATEGORICAL,
+                choices=["sqrt", "log2", None]
+            )
+        ]
+    )
+
+    # Define objective function
+    def objective(params: Dict[str, Any]) -> float:
+        """Objective function for optimization."""
+        model = RandomForestClassifier(
+            random_state=42,
+            **params
+        )
+
+        # Cross-validation score
+        scores = cross_val_score(
+            model,
+            X,
+            y,
+            cv=3,
+            scoring='accuracy'
+        )
+
+        return scores.mean()
+
+    # Run optimization
+    optimizer = HyperparameterOptimizer(
+        search_space=search_space,
+        direction="maximize",
+        n_trials=50
+    )
+
+    result = optimizer.optimize(objective)
+
+    print(f"\nOptimization Results:")
+    print(f"Best Value: {result.best_value:.4f}")
+    print(f"Best Parameters:")
+    for param, value in result.best_params.items():
+        print(f"  {param}: {value}")
+
+    print(f"\nParameter Importances:")
+    importances = optimizer.get_param_importances()
+    for param, importance in sorted(
+        importances.items(),
+        key=lambda x: x[1],
+        reverse=True
+    ):
+        print(f"  {param}: {importance:.4f}")
+\end{lstlisting}
+
+\section{Advanced Experiment Design}
+
+\subsection{Multi-Objective Optimization with Pareto Frontier Analysis}
+
+Real-world ML systems often require balancing multiple competing objectives: accuracy vs. latency, precision vs. recall, performance vs. model size. Multi-objective optimization finds the Pareto frontier---the set of solutions where improving one objective necessarily degrades another.
+
+\begin{lstlisting}[style=python, caption={Multi-objective optimization with Pareto frontier}]
+"""
+Multi-Objective Hyperparameter Optimization
+
+Optimize for multiple competing objectives simultaneously using Pareto frontier analysis.
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import logging
+import numpy as np
+import optuna
+from optuna.samplers import NSGAIISampler
+import matplotlib.pyplot as plt
+from scipy.spatial import ConvexHull
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MultiObjectiveResult:
+    """Results from multi-objective optimization."""
+    pareto_front: List[Dict[str, Any]]
+    all_trials: List[Dict[str, Any]]
+    n_pareto_solutions: int
+    dominated_count: int
+
+    def get_best_by_weight(
+        self,
+        weights: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """
+        Get best solution using weighted scalarization.
+
+        Args:
+            weights: Dictionary mapping objective names to weights
+
+        Returns:
+            Best solution according to weighted sum
+        """
+        best_solution = None
+        best_score = float('-inf')
+
+        for solution in self.pareto_front:
+            weighted_score = sum(
+                solution['objectives'][obj] * weight
+                for obj, weight in weights.items()
+            )
+
+            if weighted_score > best_score:
+                best_score = weighted_score
+                best_solution = solution
+
+        return best_solution
+
+
+class MultiObjectiveOptimizer:
+    """Multi-objective Bayesian optimization using NSGA-II."""
+
+    def __init__(
+        self,
+        search_space: 'SearchSpace',
+        objective_names: List[str],
+        directions: List[str],
+        n_trials: int = 100,
+        population_size: int = 50
+    ):
+        """
+        Initialize multi-objective optimizer.
+
+        Args:
+            search_space: Hyperparameter search space
+            objective_names: Names of objectives to optimize
+            directions: "maximize" or "minimize" for each objective
+            n_trials: Number of trials
+            population_size: NSGA-II population size
+        """
+        self.search_space = search_space
+        self.objective_names = objective_names
+        self.directions = directions
+        self.n_trials = n_trials
+
+        # Create multi-objective study
+        self.study = optuna.create_study(
+            directions=directions,
+            sampler=NSGAIISampler(population_size=population_size)
+        )
+
+        logger.info(
+            f"Multi-objective optimizer initialized: "
+            f"{len(objective_names)} objectives, {n_trials} trials"
+        )
+
+    def optimize(
+        self,
+        objective_fn: Callable[[Dict[str, Any]], Tuple[float, ...]]
+    ) -> MultiObjectiveResult:
+        """
+        Run multi-objective optimization.
+
+        Args:
+            objective_fn: Function returning tuple of objective values
+
+        Returns:
+            MultiObjectiveResult with Pareto frontier
+        """
+        def objective(trial: optuna.Trial) -> Tuple[float, ...]:
+            """Optuna multi-objective function."""
+            params = self.search_space.suggest_all(trial)
+
+            try:
+                objectives = objective_fn(params)
+                trial.set_user_attr("params", params)
+                return objectives
+            except Exception as e:
+                logger.error(f"Trial failed: {e}")
+                raise optuna.TrialPruned()
+
+        # Run optimization
+        self.study.optimize(
+            objective,
+            n_trials=self.n_trials,
+            show_progress_bar=True
+        )
+
+        # Extract Pareto front
+        pareto_trials = []
+        for trial in self.study.best_trials:  # Pareto-optimal trials
+            pareto_trials.append({
+                'params': trial.user_attrs.get('params', {}),
+                'objectives': dict(zip(self.objective_names, trial.values)),
+                'trial_number': trial.number
+            })
+
+        # Extract all trials
+        all_trials = []
+        for trial in self.study.trials:
+            if trial.values:
+                all_trials.append({
+                    'params': trial.params,
+                    'objectives': dict(zip(self.objective_names, trial.values)),
+                    'trial_number': trial.number,
+                    'is_pareto': trial in self.study.best_trials
+                })
+
+        result = MultiObjectiveResult(
+            pareto_front=pareto_trials,
+            all_trials=all_trials,
+            n_pareto_solutions=len(pareto_trials),
+            dominated_count=len(all_trials) - len(pareto_trials)
+        )
+
+        logger.info(
+            f"Optimization complete: {result.n_pareto_solutions} Pareto solutions, "
+            f"{result.dominated_count} dominated"
+        )
+
+        return result
+
+    def plot_pareto_front(
+        self,
+        result: MultiObjectiveResult,
+        obj1_idx: int = 0,
+        obj2_idx: int = 1,
+        save_path: Optional[str] = None
+    ) -> None:
+        """
+        Visualize Pareto frontier for 2 objectives.
+
+        Args:
+            result: Optimization result
+            obj1_idx: Index of first objective
+            obj2_idx: Index of second objective
+            save_path: Optional path to save figure
+        """
+        obj1_name = self.objective_names[obj1_idx]
+        obj2_name = self.objective_names[obj2_idx]
+
+        # Extract objective values
+        all_obj1 = [t['objectives'][obj1_name] for t in result.all_trials]
+        all_obj2 = [t['objectives'][obj2_name] for t in result.all_trials]
+
+        pareto_obj1 = [t['objectives'][obj1_name] for t in result.pareto_front]
+        pareto_obj2 = [t['objectives'][obj2_name] for t in result.pareto_front]
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # All trials
+        ax.scatter(
+            all_obj1,
+            all_obj2,
+            alpha=0.3,
+            s=50,
+            label='Dominated solutions',
+            color='gray'
+        )
+
+        # Pareto front
+        ax.scatter(
+            pareto_obj1,
+            pareto_obj2,
+            alpha=0.8,
+            s=100,
+            label='Pareto frontier',
+            color='red',
+            edgecolors='darkred',
+            linewidths=2
+        )
+
+        # Connect Pareto points
+        if len(pareto_obj1) > 1:
+            # Sort by first objective
+            sorted_indices = np.argsort(pareto_obj1)
+            sorted_obj1 = np.array(pareto_obj1)[sorted_indices]
+            sorted_obj2 = np.array(pareto_obj2)[sorted_indices]
+
+            ax.plot(
+                sorted_obj1,
+                sorted_obj2,
+                'r--',
+                alpha=0.5,
+                linewidth=2
+            )
+
+        ax.set_xlabel(obj1_name.replace('_', ' ').title(), fontsize=12)
+        ax.set_ylabel(obj2_name.replace('_', ' ').title(), fontsize=12)
+        ax.set_title('Multi-Objective Optimization: Pareto Frontier', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved Pareto front to {save_path}")
+
+        plt.show()
+
+
+# Example usage
+if __name__ == "__main__":
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import cross_val_score
+    import time
+
+    # Generate sample data
+    X, y = make_classification(
+        n_samples=5000,
+        n_features=20,
+        random_state=42
+    )
+
+    # Define search space
+    from dataclasses import dataclass
+    from enum import Enum
+
+    class ParameterType(Enum):
+        INT = "int"
+        CATEGORICAL = "categorical"
+
+    @dataclass
+    class ParameterSpec:
+        name: str
+        param_type: ParameterType
+        low: Optional[int] = None
+        high: Optional[int] = None
+        choices: Optional[List] = None
+
+        def suggest(self, trial):
+            if self.param_type == ParameterType.INT:
+                return trial.suggest_int(self.name, self.low, self.high)
+            elif self.param_type == ParameterType.CATEGORICAL:
+                return trial.suggest_categorical(self.name, self.choices)
+
+    @dataclass
+    class SearchSpace:
+        parameters: List[ParameterSpec]
+
+        def suggest_all(self, trial):
+            return {p.name: p.suggest(trial) for p in self.parameters}
+
+    search_space = SearchSpace(
+        parameters=[
+            ParameterSpec("n_estimators", ParameterType.INT, 10, 200),
+            ParameterSpec("max_depth", ParameterType.INT, 3, 20),
+            ParameterSpec("min_samples_split", ParameterType.INT, 2, 20)
+        ]
+    )
+
+    # Define multi-objective function
+    def objective(params: Dict[str, Any]) -> Tuple[float, float]:
+        """Optimize accuracy and inference time."""
+        model = RandomForestClassifier(random_state=42, **params)
+
+        # Objective 1: Accuracy (maximize)
+        scores = cross_val_score(model, X, y, cv=3, scoring='accuracy')
+        accuracy = scores.mean()
+
+        # Objective 2: Inference time (minimize - return negative for maximization)
+        model.fit(X, y)
+        start = time.time()
+        _ = model.predict(X[:1000])
+        inference_time = time.time() - start
+
+        # Return (accuracy, -inference_time) for maximization
+        return accuracy, -inference_time
+
+    # Run multi-objective optimization
+    optimizer = MultiObjectiveOptimizer(
+        search_space=search_space,
+        objective_names=['accuracy', 'neg_inference_time'],
+        directions=['maximize', 'maximize'],
+        n_trials=50,
+        population_size=20
+    )
+
+    result = optimizer.optimize(objective)
+
+    print(f"\nMulti-Objective Optimization Results:")
+    print(f"Pareto solutions: {result.n_pareto_solutions}")
+    print(f"Dominated solutions: {result.dominated_count}")
+
+    print(f"\nPareto Frontier (top 5 by accuracy):")
+    sorted_pareto = sorted(
+        result.pareto_front,
+        key=lambda x: x['objectives']['accuracy'],
+        reverse=True
+    )[:5]
+
+    for i, sol in enumerate(sorted_pareto, 1):
+        print(f"\n{i}. Accuracy: {sol['objectives']['accuracy']:.4f}, "
+              f"Time: {-sol['objectives']['neg_inference_time']:.4f}s")
+        print(f"   Params: {sol['params']}")
+
+    # Get best by weighted combination
+    best = result.get_best_by_weight({
+        'accuracy': 0.7,
+        'neg_inference_time': 0.3
+    })
+    print(f"\nBest by weight (0.7 accuracy + 0.3 speed):")
+    print(f"  Accuracy: {best['objectives']['accuracy']:.4f}")
+    print(f"  Time: {-best['objectives']['neg_inference_time']:.4f}s")
+    print(f"  Params: {best['params']}")
+
+    # Visualize
+    optimizer.plot_pareto_front(result)
+\end{lstlisting}
+
+\section{Experiment Comparison and Statistical Analysis}
+
+Comparing experiments rigorously requires statistical testing to determine if improvements are significant or due to random variation.
+
+\begin{lstlisting}[style=python, caption={Statistical experiment comparison framework}]
+"""
+Experiment Comparison and Statistical Analysis
+
+Statistical methods for comparing experiment results.
+"""
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+import logging
+
+import numpy as np
+from scipy import stats
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExperimentResult:
+    """Results from a single experiment."""
+    experiment_id: str
+    name: str
+    metrics: Dict[str, float]
+    cv_scores: Optional[np.ndarray] = None
+    params: Dict[str, any] = field(default_factory=dict)
+
+
+@dataclass
+class ComparisonResult:
+    """Result of comparing two experiments."""
+    experiment_a: str
+    experiment_b: str
+    metric: str
+    mean_a: float
+    mean_b: float
+    std_a: float
+    std_b: float
+    difference: float
+    percent_improvement: float
+    statistic: float
+    p_value: float
+    is_significant: bool
+    confidence_interval: Tuple[float, float]
+
+
+class ExperimentAnalyzer:
+    """Analyze and compare experiments statistically."""
+
+    def __init__(self, alpha: float = 0.05):
+        """
+        Initialize analyzer.
+
+        Args:
+            alpha: Significance level
+        """
+        self.alpha = alpha
+
+    def compare_two_experiments(
+        self,
+        exp_a: ExperimentResult,
+        exp_b: ExperimentResult,
+        metric: str
+    ) -> ComparisonResult:
+        """
+        Compare two experiments using t-test.
+
+        Args:
+            exp_a: First experiment
+            exp_b: Second experiment
+            metric: Metric to compare
+
+        Returns:
+            ComparisonResult
+        """
+        # Get CV scores
+        scores_a = exp_a.cv_scores
+        scores_b = exp_b.cv_scores
+
+        if scores_a is None or scores_b is None:
+            raise ValueError("CV scores required for comparison")
+
+        mean_a = np.mean(scores_a)
+        mean_b = np.mean(scores_b)
+        std_a = np.std(scores_a, ddof=1)
+        std_b = np.std(scores_b, ddof=1)
+
+        # Perform t-test
+        statistic, p_value = stats.ttest_ind(scores_a, scores_b)
+
+        # Calculate difference
+        difference = mean_b - mean_a
+        percent_improvement = (difference / mean_a) * 100
+
+        # Confidence interval for difference
+        se_diff = np.sqrt(
+            (std_a ** 2 / len(scores_a)) +
+            (std_b ** 2 / len(scores_b))
+        )
+        ci = stats.t.interval(
+            1 - self.alpha,
+            len(scores_a) + len(scores_b) - 2,
+            loc=difference,
+            scale=se_diff
+        )
+
+        is_significant = p_value < self.alpha
+
+        logger.info(
+            f"Comparison: {exp_a.name} vs {exp_b.name}\n"
+            f"  Mean A: {mean_a:.4f} +/- {std_a:.4f}\n"
+            f"  Mean B: {mean_b:.4f} +/- {std_b:.4f}\n"
+            f"  Difference: {difference:.4f} ({percent_improvement:+.2f}%)\n"
+            f"  p-value: {p_value:.4f}\n"
+            f"  Significant: {is_significant}"
+        )
+
+        return ComparisonResult(
+            experiment_a=exp_a.name,
+            experiment_b=exp_b.name,
+            metric=metric,
+            mean_a=mean_a,
+            mean_b=mean_b,
+            std_a=std_a,
+            std_b=std_b,
+            difference=difference,
+            percent_improvement=percent_improvement,
+            statistic=statistic,
+            p_value=p_value,
+            is_significant=is_significant,
+            confidence_interval=ci
+        )
+
+    def rank_experiments(
+        self,
+        experiments: List[ExperimentResult],
+        metric: str
+    ) -> pd.DataFrame:
+        """
+        Rank experiments by metric.
+
+        Args:
+            experiments: List of experiments
+            metric: Metric to rank by
+
+        Returns:
+            DataFrame with rankings
+        """
+        results = []
+
+        for exp in experiments:
+            if exp.cv_scores is not None:
+                mean_score = np.mean(exp.cv_scores)
+                std_score = np.std(exp.cv_scores, ddof=1)
+            else:
+                mean_score = exp.metrics.get(metric, 0.0)
+                std_score = 0.0
+
+            results.append({
+                "experiment": exp.name,
+                "mean": mean_score,
+                "std": std_score,
+                "params": exp.params
+            })
+
+        df = pd.DataFrame(results)
+        df = df.sort_values("mean", ascending=False).reset_index(drop=True)
+        df['rank'] = range(1, len(df) + 1)
+
+        return df[['rank', 'experiment', 'mean', 'std', 'params']]
+
+
+# Example usage
+if __name__ == "__main__":
+    # Create sample experiment results
+    exp1 = ExperimentResult(
+        experiment_id="exp1",
+        name="Baseline",
+        metrics={"accuracy": 0.85},
+        cv_scores=np.array([0.84, 0.85, 0.86, 0.84, 0.85]),
+        params={"n_estimators": 100}
+    )
+
+    exp2 = ExperimentResult(
+        experiment_id="exp2",
+        name="Optimized",
+        metrics={"accuracy": 0.88},
+        cv_scores=np.array([0.87, 0.88, 0.89, 0.87, 0.88]),
+        params={"n_estimators": 150}
+    )
+
+    # Compare experiments
+    analyzer = ExperimentAnalyzer()
+    comparison = analyzer.compare_two_experiments(
+        exp1,
+        exp2,
+        metric="accuracy"
+    )
+
+    print(f"\nComparison Result:")
+    print(f"Experiment A: {comparison.experiment_a}")
+    print(f"  Mean: {comparison.mean_a:.4f} +/- {comparison.std_a:.4f}")
+    print(f"Experiment B: {comparison.experiment_b}")
+    print(f"  Mean: {comparison.mean_b:.4f} +/- {comparison.std_b:.4f}")
+    print(f"Improvement: {comparison.percent_improvement:+.2f}%")
+    print(f"p-value: {comparison.p_value:.4f}")
+    print(f"Significant: {comparison.is_significant}")
+\end{lstlisting}
+
+\section{A Motivating Example: Hyperparameter Tuning Efficiency}
+
+\subsection{The Context}
+
+DataAnalytica, a data science consultancy, was building a fraud detection system for a major financial institution. The project had a tight deadline: 6 weeks from kickoff to production deployment.
+
+The team spent the first 3 weeks on data engineering and feature development. Week 4 was allocated for model selection and hyperparameter tuning. The lead data scientist, Marcus, planned to use grid search across 5 algorithms with comprehensive hyperparameter spaces.
+
+\subsection{The Naive Approach}
+
+Marcus defined his grid search:
+
+\begin{itemize}
+    \item \textbf{Random Forest}: 4 values $\times$ 4 values $\times$ 3 values $\times$ 3 values = 144 configurations
+    \item \textbf{Gradient Boosting}: 5 $\times$ 4 $\times$ 3 $\times$ 4 = 240 configurations
+    \item \textbf{XGBoost}: 6 $\times$ 5 $\times$ 4 $\times$ 3 = 360 configurations
+    \item \textbf{LightGBM}: 5 $\times$ 4 $\times$ 4 $\times$ 3 = 240 configurations
+    \item \textbf{CatBoost}: 4 $\times$ 4 $\times$ 3 $\times$ 3 = 144 configurations
+\end{itemize}
+
+Total: 1,128 configurations. With 5-fold cross-validation on a dataset of 2 million records, each configuration took approximately 8 minutes.
+
+Total time required: $1,128 \times 8 = 9,024$ minutes = 150 hours = 6.25 days of continuous computation.
+
+Marcus started the grid search on Monday morning. By Friday afternoon, only 60\% had completed. He was running out of time.
+
+\subsection{The Crisis}
+
+On Friday, Marcus reported to the project manager: ``I need 4 more days to finish hyperparameter tuning.'' The manager responded: ``We present to the client on Monday. Whatever you have by Sunday night is what we demo.''
+
+Marcus panicked. He stopped the grid search, took the best result so far (XGBoost with partially explored hyperparameters), and prepared for the demo. The model achieved 91.2\% AUC.
+
+\subsection{The Solution}
+
+After the demo (which went adequately but not impressively), Marcus consulted with a senior engineer who specialized in experiment management. The engineer introduced him to Bayesian optimization with Optuna.
+
+They redesigned the approach:
+
+\begin{enumerate}
+    \item \textbf{Intelligent search}: Bayesian optimization instead of grid search
+    \item \textbf{Early stopping}: Pruning unpromising trials
+    \item \textbf{Parallel execution}: 8 workers on cloud infrastructure
+    \item \textbf{Smart initialization}: Starting from domain knowledge
+    \item \textbf{Multi-fidelity}: Using subsets for quick evaluation
+\end{enumerate}
+
+\subsection{The Results}
+
+With the new approach:
+
+\begin{itemize}
+    \item \textbf{Time to good result}: 18 hours (vs. 150+ hours)
+    \item \textbf{Final AUC}: 93.7\% (vs. 91.2\%)
+    \item \textbf{Trials needed}: 320 (vs. 1,128 planned)
+    \item \textbf{Cost savings}: 88\% reduction in compute time
+    \item \textbf{Performance gain}: +2.5 percentage points AUC
+\end{itemize}
+
+\subsection{The Analysis}
+
+Why was the new approach so much better?
+
+\begin{enumerate}
+    \item \textbf{Intelligent sampling}: TPE sampler focused on promising regions
+    \item \textbf{Early stopping}: MedianPruner stopped bad trials early (saved 40\% of time)
+    \item \textbf{Parallelization}: 8 workers vs. 1 (8x speedup where applicable)
+    \item \textbf{Smart space definition}: Log-scale for learning rates, focusing ranges based on literature
+    \item \textbf{Multi-fidelity}: Using 20\% data subset for initial screening
+\end{enumerate}
+
+\subsection{The Lesson}
+
+Hyperparameter tuning efficiency is not just about speed---it is about finding better solutions faster. The frameworks in this chapter enable:
+
+\begin{itemize}
+    \item Systematic exploration with Bayesian methods
+    \item Comprehensive tracking of all experiments
+    \item Statistical validation of improvements
+    \item Reproducibility of optimal configurations
+\end{itemize}
+
+\section{Experiment Dashboard Generation}
+
+Visualization is critical for understanding experiment results and communicating findings to stakeholders.
+
+\begin{lstlisting}[style=python, caption={Experiment dashboard generation}]
+"""
+Experiment Dashboard Generation
+
+Visualization tools for experiment analysis and reporting.
+"""
+
+from typing import List, Optional, Tuple
+import logging
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Set style
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (12, 8)
+
+
+class ExperimentDashboard:
+    """Generate visualizations for experiment analysis."""
+
+    @staticmethod
+    def plot_optimization_history(
+        history: List[Tuple[int, float]],
+        title: str = "Optimization History",
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot optimization history.
+
+        Args:
+            history: List of (trial_number, value) tuples
+            title: Plot title
+            save_path: Optional path to save figure
+        """
+        trials, values = zip(*history)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot all trials
+        ax.scatter(trials, values, alpha=0.5, label='All trials')
+
+        # Plot running best
+        running_best = []
+        best_so_far = float('-inf')
+        for value in values:
+            best_so_far = max(best_so_far, value)
+            running_best.append(best_so_far)
+
+        ax.plot(trials, running_best, 'r-', linewidth=2, label='Best so far')
+
+        ax.set_xlabel('Trial Number', fontsize=12)
+        ax.set_ylabel('Objective Value', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved optimization history to {save_path}")
+
+        plt.show()
+
+    @staticmethod
+    def plot_param_importances(
+        importances: dict,
+        title: str = "Parameter Importances",
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot parameter importances.
+
+        Args:
+            importances: Dictionary of parameter importances
+            title: Plot title
+            save_path: Optional path to save figure
+        """
+        # Sort by importance
+        sorted_items = sorted(
+            importances.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        params, values = zip(*sorted_items)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        colors = plt.cm.viridis(np.linspace(0, 1, len(params)))
+        ax.barh(params, values, color=colors)
+
+        ax.set_xlabel('Importance', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='x')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved parameter importances to {save_path}")
+
+        plt.show()
+
+    @staticmethod
+    def plot_experiment_comparison(
+        experiments: pd.DataFrame,
+        metric: str = 'mean',
+        title: str = "Experiment Comparison",
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot experiment comparison.
+
+        Args:
+            experiments: DataFrame with experiment results
+            metric: Metric column to plot
+            title: Plot title
+            save_path: Optional path to save figure
+        """
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        x = range(len(experiments))
+        y = experiments[metric]
+
+        if 'std' in experiments.columns:
+            yerr = experiments['std']
+        else:
+            yerr = None
+
+        ax.bar(x, y, yerr=yerr, capsize=5, alpha=0.7)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            experiments['experiment'],
+            rotation=45,
+            ha='right'
+        )
+
+        ax.set_ylabel(metric.capitalize(), fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # Add value labels on top of bars
+        for i, (value, exp) in enumerate(zip(y, experiments['experiment'])):
+            ax.text(
+                i,
+                value,
+                f'{value:.4f}',
+                ha='center',
+                va='bottom',
+                fontsize=9
+            )
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved experiment comparison to {save_path}")
+
+        plt.show()
+
+    @staticmethod
+    def plot_parallel_coordinates(
+        trials_df: pd.DataFrame,
+        params: List[str],
+        objective: str,
+        n_best: int = 10,
+        title: str = "Hyperparameter Parallel Coordinates",
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot parallel coordinates for hyperparameters.
+
+        Args:
+            trials_df: DataFrame with trial results
+            params: List of parameter names
+            objective: Objective column name
+            n_best: Number of best trials to highlight
+            title: Plot title
+            save_path: Optional path to save figure
+        """
+        from pandas.plotting import parallel_coordinates
+
+        # Select best trials
+        best_trials = trials_df.nlargest(n_best, objective)
+
+        # Prepare data
+        plot_df = best_trials[params + [objective]].copy()
+
+        # Normalize parameters to [0, 1]
+        for param in params:
+            min_val = plot_df[param].min()
+            max_val = plot_df[param].max()
+            if max_val > min_val:
+                plot_df[param] = (plot_df[param] - min_val) / (max_val - min_val)
+
+        # Add rank column for coloring
+        plot_df['rank'] = range(1, len(plot_df) + 1)
+
+        fig, ax = plt.subplots(figsize=(14, 6))
+
+        parallel_coordinates(
+            plot_df,
+            'rank',
+            cols=params,
+            ax=ax,
+            colormap='viridis'
+        )
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_ylabel('Normalized Value', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend(title='Trial Rank', bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved parallel coordinates to {save_path}")
+
+        plt.show()
+
+    @staticmethod
+    def create_summary_dashboard(
+        optimization_history: List[Tuple[int, float]],
+        param_importances: dict,
+        experiments_df: pd.DataFrame,
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Create comprehensive summary dashboard.
+
+        Args:
+            optimization_history: Optimization history
+            param_importances: Parameter importances
+            experiments_df: DataFrame with experiments
+            save_path: Optional path to save figure
+        """
+        fig = plt.figure(figsize=(16, 10))
+        gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+
+        # Optimization history
+        ax1 = fig.add_subplot(gs[0, :])
+        trials, values = zip(*optimization_history)
+        ax1.scatter(trials, values, alpha=0.5, label='All trials')
+
+        running_best = []
+        best_so_far = float('-inf')
+        for value in values:
+            best_so_far = max(best_so_far, value)
+            running_best.append(best_so_far)
+
+        ax1.plot(trials, running_best, 'r-', linewidth=2, label='Best so far')
+        ax1.set_xlabel('Trial Number', fontsize=11)
+        ax1.set_ylabel('Objective Value', fontsize=11)
+        ax1.set_title('Optimization History', fontsize=12, fontweight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Parameter importances
+        ax2 = fig.add_subplot(gs[1, 0])
+        sorted_items = sorted(
+            param_importances.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        params, imp_values = zip(*sorted_items)
+        colors = plt.cm.viridis(np.linspace(0, 1, len(params)))
+        ax2.barh(params, imp_values, color=colors)
+        ax2.set_xlabel('Importance', fontsize=11)
+        ax2.set_title('Parameter Importances', fontsize=12, fontweight='bold')
+        ax2.grid(True, alpha=0.3, axis='x')
+
+        # Experiment comparison
+        ax3 = fig.add_subplot(gs[1, 1])
+        x = range(len(experiments_df))
+        y = experiments_df['mean']
+        yerr = experiments_df.get('std', None)
+        ax3.bar(x, y, yerr=yerr, capsize=5, alpha=0.7)
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(
+            experiments_df['experiment'],
+            rotation=45,
+            ha='right',
+            fontsize=9
+        )
+        ax3.set_ylabel('Mean Score', fontsize=11)
+        ax3.set_title('Experiment Comparison', fontsize=12, fontweight='bold')
+        ax3.grid(True, alpha=0.3, axis='y')
+
+        fig.suptitle(
+            'Experiment Optimization Summary',
+            fontsize=16,
+            fontweight='bold',
+            y=0.98
+        )
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved summary dashboard to {save_path}")
+
+        plt.show()
+
+
+# Example usage
+if __name__ == "__main__":
+    # Generate sample data
+    np.random.seed(42)
+
+    # Optimization history
+    n_trials = 100
+    trials = list(range(n_trials))
+    values = np.random.rand(n_trials) * 0.3 + 0.7
+    values = np.maximum.accumulate(values) + np.random.randn(n_trials) * 0.01
+    history = list(zip(trials, values))
+
+    # Parameter importances
+    importances = {
+        'learning_rate': 0.35,
+        'max_depth': 0.28,
+        'n_estimators': 0.22,
+        'min_samples_split': 0.10,
+        'min_samples_leaf': 0.05
+    }
+
+    # Experiments
+    experiments = pd.DataFrame({
+        'experiment': ['Baseline', 'Tuned v1', 'Tuned v2', 'Optimized'],
+        'mean': [0.82, 0.85, 0.87, 0.89],
+        'std': [0.03, 0.025, 0.02, 0.018]
+    })
+
+    # Create dashboard
+    dashboard = ExperimentDashboard()
+    dashboard.create_summary_dashboard(
+        history,
+        importances,
+        experiments,
+        save_path=Path("experiment_dashboard.png")
+    )
+\end{lstlisting}
+
+\section{Experiment Lifecycle Management}
+
+Managing experiments from conception to deployment requires systematic workflows and clear stage gates.
+
+\begin{lstlisting}[style=python, caption={Experiment lifecycle management}]
+"""
+Experiment Lifecycle Management
+
+Complete lifecycle from design through deployment.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class ExperimentStage(Enum):
+    """Experiment lifecycle stages."""
+    DESIGN = "design"
+    RUNNING = "running"
+    ANALYSIS = "analysis"
+    VALIDATION = "validation"
+    APPROVED = "approved"
+    DEPLOYED = "deployed"
+    MONITORING = "monitoring"
+    DEPRECATED = "deprecated"
+
+
+@dataclass
+class StageGate:
+    """Requirements for stage transition."""
+    from_stage: ExperimentStage
+    to_stage: ExperimentStage
+    requirements: List[str]
+    approvers: List[str]
+
+
+class ExperimentLifecycle:
+    """Manage experiment lifecycle and stage transitions."""
+
+    def __init__(self):
+        """Initialize lifecycle manager."""
+        self.stages = {}
+        self.current_stage = ExperimentStage.DESIGN
+        self.stage_history = [(ExperimentStage.DESIGN, datetime.now())]
+
+        # Define stage gates
+        self.gates = [
+            StageGate(
+                from_stage=ExperimentStage.DESIGN,
+                to_stage=ExperimentStage.RUNNING,
+                requirements=[
+                    "Hypothesis documented",
+                    "Metrics defined",
+                    "Success criteria established",
+                    "Resources allocated"
+                ],
+                approvers=["tech_lead"]
+            ),
+            StageGate(
+                from_stage=ExperimentStage.RUNNING,
+                to_stage=ExperimentStage.ANALYSIS,
+                requirements=[
+                    "All trials completed",
+                    "Results logged",
+                    "No critical errors"
+                ],
+                approvers=[]
+            ),
+            StageGate(
+                from_stage=ExperimentStage.ANALYSIS,
+                to_stage=ExperimentStage.VALIDATION,
+                requirements=[
+                    "Statistical analysis complete",
+                    "Best model identified",
+                    "Improvement quantified"
+                ],
+                approvers=["data_scientist"]
+            ),
+            StageGate(
+                from_stage=ExperimentStage.VALIDATION,
+                to_stage=ExperimentStage.APPROVED,
+                requirements=[
+                    "Validation metrics exceed baseline",
+                    "Statistical significance confirmed",
+                    "No data leakage detected",
+                    "Reproducibility verified"
+                ],
+                approvers=["senior_data_scientist"]
+            ),
+            StageGate(
+                from_stage=ExperimentStage.APPROVED,
+                to_stage=ExperimentStage.DEPLOYED,
+                requirements=[
+                    "Integration tests passed",
+                    "Performance benchmarks met",
+                    "Documentation complete",
+                    "Rollback plan documented"
+                ],
+                approvers=["ml_engineer", "tech_lead"]
+            )
+        ]
+
+    def can_transition(
+        self,
+        to_stage: ExperimentStage,
+        completed_requirements: List[str],
+        approvals: List[str]
+    ) -> tuple[bool, List[str]]:
+        """
+        Check if experiment can transition to new stage.
+
+        Args:
+            to_stage: Target stage
+            completed_requirements: List of completed requirements
+            approvals: List of approver roles who approved
+
+        Returns:
+            Tuple of (can_transition, missing_items)
+        """
+        # Find appropriate gate
+        gate = None
+        for g in self.gates:
+            if (g.from_stage == self.current_stage and
+                g.to_stage == to_stage):
+                gate = g
+                break
+
+        if gate is None:
+            return False, [f"No gate defined from {self.current_stage.value} to {to_stage.value}"]
+
+        missing = []
+
+        # Check requirements
+        for req in gate.requirements:
+            if req not in completed_requirements:
+                missing.append(f"Requirement: {req}")
+
+        # Check approvals
+        for approver in gate.approvers:
+            if approver not in approvals:
+                missing.append(f"Approval from: {approver}")
+
+        can_transition = len(missing) == 0
+
+        return can_transition, missing
+
+    def transition(
+        self,
+        to_stage: ExperimentStage,
+        completed_requirements: List[str],
+        approvals: List[str]
+    ) -> bool:
+        """
+        Transition to new stage.
+
+        Args:
+            to_stage: Target stage
+            completed_requirements: Completed requirements
+            approvals: Approvals received
+
+        Returns:
+            True if transition successful
+        """
+        can_transition, missing = self.can_transition(
+            to_stage,
+            completed_requirements,
+            approvals
+        )
+
+        if not can_transition:
+            logger.error(
+                f"Cannot transition to {to_stage.value}. Missing:\n" +
+                "\n".join(f"  - {m}" for m in missing)
+            )
+            return False
+
+        self.current_stage = to_stage
+        self.stage_history.append((to_stage, datetime.now()))
+
+        logger.info(f"Transitioned to stage: {to_stage.value}")
+
+        return True
+
+
+# Example usage
+if __name__ == "__main__":
+    lifecycle = ExperimentLifecycle()
+
+    print(f"Current stage: {lifecycle.current_stage.value}")
+
+    # Try to transition to running
+    success = lifecycle.transition(
+        ExperimentStage.RUNNING,
+        completed_requirements=[
+            "Hypothesis documented",
+            "Metrics defined",
+            "Success criteria established",
+            "Resources allocated"
+        ],
+        approvals=["tech_lead"]
+    )
+
+    print(f"Transition successful: {success}")
+    print(f"Current stage: {lifecycle.current_stage.value}")
+
+    # Check what's needed for next stage
+    can_move, missing = lifecycle.can_transition(
+        ExperimentStage.ANALYSIS,
+        completed_requirements=["All trials completed"],
+        approvals=[]
+    )
+
+    print(f"\nCan move to ANALYSIS: {can_move}")
+    if not can_move:
+        print("Missing:")
+        for item in missing:
+            print(f"  - {item}")
+\end{lstlisting}
+
+\section{Industry Scenarios: Experiment Management Failures}
+
+\subsection{Scenario 1: The Hyperparameter Hell - \$100K/Month on Random Search}
+
+\textbf{The Company}: CloudML, a machine learning platform-as-a-service startup, providing AutoML solutions to enterprise customers.
+
+\textbf{The System}: Automated hyperparameter tuning infrastructure running on AWS, providing customers with optimized models for their datasets.
+
+\textbf{The Approach}:
+
+CloudML's engineering team, led by VP of Engineering Sarah Chen, implemented a "brute-force" hyper parameter tuning system in Q3 2023:
+\begin{itemize}
+    \item Random search with 500-1000 trials per customer project
+    \item No early stopping or intelligent search strategies
+    \item Full cross-validation (5-fold) on complete datasets for every trial
+    \item Dedicated GPU instances (p3.2xlarge, \$3.06/hour) per trial
+    \item Average 8 hours per trial for deep learning models
+\end{itemize}
+
+\textbf{The Cost Explosion}:
+
+By November 2023, CloudML was serving 45 enterprise customers. Monthly compute costs for hyperparameter tuning:
+
+\begin{itemize}
+    \item \textbf{Per customer average}: 750 trials $\times$ 8 hours $\times$ \$3.06/hour = \$18,360
+    \item \textbf{45 customers}: 45 $\times$ \$18,360 = \$826,200/month
+    \item \textbf{Actual utilization}: Only 60\% GPU utilization due to I/O bottlenecks
+    \item \textbf{Wastage}: 40\% of compute spent on dominated solutions
+\end{itemize}
+
+The CFO flagged this during Q4 financial review: "We're spending \$826K/month on compute that we can't bill back to customers at this rate. Our gross margins are negative."
+
+\textbf{The Investigation}:
+
+Sarah commissioned an analysis of experiment efficiency:
+
+\textbf{Finding 1: Random search inefficiency}
+\begin{itemize}
+    \item 85\% of trials were worse than the median result
+    \item Top 10\% of results were found in first 100 trials
+    \item Remaining 650 trials provided diminishing returns
+\end{itemize}
+
+\textbf{Finding 2: No early stopping}
+\begin{itemize}
+    \item 47\% of trials could be stopped after 1 epoch (vs. full 50 epochs)
+    \item Average 6.2 hours wasted per prunable trial
+    \item Potential savings: \$388K/month
+\end{itemize}
+
+\textbf{Finding 3: Redundant cross-validation}
+\begin{itemize}
+    \item 5-fold CV used for every trial evaluation
+    \item Single train/val split would be sufficient for 90\% of trials
+    \item Full CV only needed for top 10 candidates
+    \item Potential 4x speedup
+\end{itemize}
+
+\textbf{The Solution}:
+
+Sarah's team implemented a comprehensive optimization strategy:
+
+\begin{enumerate}
+    \item \textbf{Bayesian Optimization}: Replaced random search with TPE sampler
+    \begin{itemize}
+        \item Reduced trials from 750 to 150 for same quality
+        \item Intelligent exploration of promising regions
+    \end{itemize}
+
+    \item \textbf{Successive Halving}: Multi-fidelity optimization
+    \begin{itemize}
+        \item 100 trials with 10\% data
+        \item Top 20 with 50\% data
+        \item Top 5 with 100\% data + full CV
+        \item 8x reduction in computation
+    \end{itemize}
+
+    \item \textbf{Early Stopping}: Median pruner with patience
+    \begin{itemize}
+        \item Stop trials underperforming median after 5 epochs
+        \item Average pruning at epoch 3.2 (vs. 50)
+        \item 12x speedup for pruned trials
+    \end{itemize}
+
+    \item \textbf{Resource Optimization}:
+    \begin{itemize}
+        \item Spot instances with graceful checkpointing
+        \item Mixed precision training (FP16)
+        \item Batch size auto-tuning
+    \end{itemize}
+\end{enumerate}
+
+\textbf{The Results (3 months after implementation)}:
+
+\begin{itemize}
+    \item \textbf{Cost reduction}: \$826K/month $\rightarrow$ \$147K/month (82\% reduction)
+    \item \textbf{Time to result}: 8 hours/trial $\rightarrow$ 1.2 hours/trial (85\% faster)
+    \item \textbf{Model quality}: +2.3\% average accuracy improvement
+    \item \textbf{Trials needed}: 750 $\rightarrow$ 150 (80\% reduction)
+    \item \textbf{Annual savings}: \$(826-147)K $\times$ 12 = \$8.15M/year
+\end{itemize}
+
+\textbf{Business Impact}:
+\begin{itemize}
+    \item Gross margins improved from -15\% to +42\%
+    \item Freed \$679K/month for R\&D investment
+    \item Customer satisfaction +18 NPS points (faster results)
+    \item Competitive advantage: 5x faster tuning than competitors
+\end{itemize}
+
+\textbf{Lessons Learned}:
+
+\begin{enumerate}
+    \item \textbf{Intelligent search $>>$ brute force}: Bayesian optimization with 150 trials outperformed 750 random trials
+    \item \textbf{Multi-fidelity is critical}: Don't use full data for early exploration
+    \item \textbf{Early stopping saves 40-60\%}: Most bad configurations reveal themselves early
+    \item \textbf{Measure everything}: They didn't know they had a problem until they measured cost per experiment
+    \item \textbf{Business alignment}: ML engineering decisions have P\&L impact
+\end{enumerate}
+
+\subsection{Scenario 2: The Reproducibility Crisis - Award-Winning Results Unreproducible}
+
+\textbf{The Organization}: DataScience University Research Lab, led by Prof. Michael Zhang, specializing in medical imaging AI.
+
+\textbf{The Achievement}:
+
+In March 2024, PhD student Lisa Huang submitted a paper to CVPR (top computer vision conference): "NovelNet: 96.8\% Accuracy in Rare Disease Detection from X-rays"---a 4.2\% improvement over state-of-the-art.
+
+The paper was accepted in May 2024. Major achievement for the lab. Lisa graduated and joined Google Research.
+
+\textbf{The Crisis}:
+
+In July 2024, three independent research groups attempted to reproduce Lisa's results:
+\begin{itemize}
+    \item Stanford group: 89.3\% accuracy (7.5 points lower)
+    \item MIT group: 90.1\% accuracy (6.7 points lower)
+    \item ETH Zurich group: 91.2\% accuracy (5.6 points lower)
+\end{itemize}
+
+All groups contacted Prof. Zhang: "We can't reproduce your results. Can you share your exact setup?"
+
+\textbf{The Investigation}:
+
+Prof. Zhang asked Lisa (now at Google) to help reproduce her own results. She tried for 2 weeks. Best she could achieve: 92.1\% accuracy.
+
+She couldn't reproduce her own published results.
+
+\textbf{The Forensics}:
+
+Prof. Zhang's lab hired an ML engineering consultant to investigate. They found:
+
+\textbf{Missing Information in Paper}:
+\begin{itemize}
+    \item Data preprocessing steps not fully documented
+    \item 7 hyperparameters not reported in paper
+    \item Data augmentation sequence not specified
+    \item Validation/test split procedure unclear
+    \item Random seed not recorded
+\end{itemize}
+
+\textbf{Experiment Tracking Gaps}:
+\begin{itemize}
+    \item Lisa ran 847 experiments over 6 months
+    \item Only 23 were logged in spreadsheet
+    \item Spreadsheet had conflicting entries
+    \item No systematic hyperparameter tracking
+    \item Git commits didn't match experiment dates
+\end{itemize}
+
+\textbf{The Smoking Gun}:
+
+After extensive code archaeology, they discovered:
+
+\textbf{Data Leakage}: Lisa's data preprocessing inadvertently leaked information from test set into training:
+\begin{itemize}
+    \item Normalization computed on entire dataset (train + test) before split
+    \item This leaked test set statistics into training
+    \item Gave model unfair advantage: +4.7\% accuracy boost
+\end{itemize}
+
+\textbf{Lucky Random Seed}:
+\begin{itemize}
+    \item Lisa tried different random seeds during development
+    \item Seed 42 gave 96.8\%, seed 43 gave 93.1\%, seed 44 gave 94.2\%
+    \item She (unconsciously) cherry-picked the best seed
+    \item Didn't report this sensitivity in paper
+\end{itemize}
+
+\textbf{Undocumented Hyperparameters}:
+\begin{itemize}
+    \item 7 key hyperparameters not in paper
+    \item She tuned them extensively but didn't document final values
+    \item Defaults from framework didn't match her final settings
+\end{itemize}
+
+\textbf{The Fallout}:
+
+\begin{itemize}
+    \item \textbf{Paper retraction}: CVPR required paper withdrawal (September 2024)
+    \item \textbf{Reputational damage}: Prof. Zhang's lab credibility severely damaged
+    \item \textbf{Funding impact}: \$2.4M NIH grant renewal rejected citing "concerns about research rigor"
+    \item \textbf{Career impact}: Lisa's Google onboarding questioned; she had to redo her work
+    \item \textbf{Wasted effort}: 5+ research groups wasted 100+ person-hours trying to reproduce
+\end{itemize}
+
+\textbf{The Solution}:
+
+Prof. Zhang mandated strict experiment tracking protocols:
+
+\begin{enumerate}
+    \item \textbf{MLflow for everything}:
+    \begin{itemize}
+        \item All experiments logged automatically
+        \item Git commit, random seed, environment captured
+        \item No manual spreadsheets
+    \end{itemize}
+
+    \item \textbf{Reproducibility checklist}:
+    \begin{itemize}
+        \item Docker containers for all experiments
+        \item All hyperparameters in config files (version controlled)
+        \item Data versioning with DVC
+        \item Exact package versions in requirements.txt
+    \end{itemize}
+
+    \item \textbf{Validation protocol}:
+    \begin{itemize}
+        \item Independent person must reproduce results before paper submission
+        \item Code review for data leakage
+        \item Multiple random seeds required (report mean $\pm$ std)
+    \end{itemize}
+
+    \item \textbf{Publication requirements}:
+    \begin{itemize}
+        \item All hyperparameters documented
+        \item Code and data released on paper acceptance
+        \item Reproduction instructions tested by external collaborator
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Lessons Learned}:
+
+\begin{enumerate}
+    \item \textbf{Manual tracking fails at scale}: 847 experiments cannot be tracked in spreadsheets
+    \item \textbf{Reproducibility requires discipline}: Must capture everything automatically
+    \item \textbf{Data leakage is subtle}: Even experienced researchers make mistakes
+    \item \textbf{Random seed sensitivity matters}: Must report across multiple seeds
+    \item \textbf{External validation is essential}: Independent reproduction before publication
+    \item \textbf{Automation over discipline}: Don't rely on researchers to "remember" to log---make it automatic
+\end{enumerate}
+
+\subsection{Scenario 3: The Resource Wars - Crashing Shared GPU Clusters}
+
+\textbf{The Company}: FinTech Innovations, a financial services firm with 3 ML teams (fraud detection, risk modeling, trading algorithms).
+
+\textbf{The Infrastructure}:
+
+Shared GPU cluster:
+\begin{itemize}
+    \item 40x NVIDIA A100 GPUs (80GB each)
+    \item Kubernetes-based job scheduling
+    \item No resource quotas or priority systems
+    \item First-come-first-served allocation
+\end{itemize}
+
+\textbf{The Conflict (October 2023)}:
+
+All three teams had Q4 deadlines:
+\begin{itemize}
+    \item \textbf{Fraud team}: Deploy new model by Oct 31 (regulatory deadline)
+    \item \textbf{Risk team}: Update credit models by Nov 15 (compliance requirement)
+    \item \textbf{Trading team}: Optimize strategies before earnings season (Nov 1)
+\end{itemize}
+
+\textbf{The Chaos}:
+
+Week of October 23:
+\begin{itemize}
+    \item \textbf{Monday 9am}: Trading team starts hyperparameter sweep (500 trials)
+    \item \textbf{Monday 2pm}: Fraud team launches optimization (800 trials)
+    \item \textbf{Tuesday 8am}: Risk team starts training (600 trials)
+\end{itemize}
+
+Total: 1,900 concurrent jobs competing for 40 GPUs.
+
+\textbf{The Crashes}:
+
+\begin{itemize}
+    \item Kubernetes scheduler overwhelmed
+    \item OOM (Out of Memory) errors from job contention
+    \item Network saturation from data loading
+    \item 72\% of jobs failed or timed out
+    \item Cluster rebooted 4 times that week
+\end{itemize}
+
+\textbf{The Escalation}:
+
+\begin{itemize}
+    \item Trading team VP to CTO: "Fraud team is hogging GPUs!"
+    \item Fraud team director: "We have regulatory deadline---we get priority!"
+    \item Risk team manager: "We've been waiting for GPUs for 3 days!"
+    \item DevOps team: "Cluster is unstable, we're shutting it down for maintenance"
+\end{itemize}
+
+\textbf{The Cost}:
+
+\begin{itemize}
+    \item \textbf{Fraud team}: Missed regulatory deadline, \$500K fine from regulators
+    \item \textbf{Trading team}: Sub-optimal models deployed, \$1.2M estimated opportunity cost
+    \item \textbf{Risk team}: Manual process used instead, 120 person-hours overtime
+    \item \textbf{IT cost}: Emergency cloud GPU rental (\$45K for 1 week)
+    \item \textbf{Organizational cost}: Inter-team conflict, CTO escalation to CEO
+\end{itemize}
+
+\textbf{The Solution}:
+
+CTO mandated Enterprise Experiment Management System (implemented December 2023):
+
+\begin{enumerate}
+    \item \textbf{Resource Quotas}:
+    \begin{itemize}
+        \item Each team: 15 GPUs baseline
+        \item 10 GPUs shared pool (first-come-first-served)
+        \item Fair-share scheduling within team quotas
+    \end{itemize}
+
+    \item \textbf{Priority System}:
+    \begin{itemize}
+        \item P0 (Critical): Regulatory/compliance deadlines
+        \item P1 (High): Production model updates
+        \item P2 (Normal): Research experiments
+        \item P3 (Low): Exploratory work
+    \end{itemize}
+
+    \item \textbf{Experiment Approval Workflow}:
+    \begin{itemize}
+        \item Large jobs (>10 GPUs, >24 hours) require approval
+        \item Justification: business impact, deadline, resource estimate
+        \item Tech lead review and allocation scheduling
+    \end{itemize}
+
+    \item \textbf{Cost Tracking \& Budgets}:
+    \begin{itemize}
+        \item Each experiment tagged with cost estimate
+        \item Team quarterly GPU budgets: \$150K each
+        \item Real-time cost dashboard
+        \item Alerts at 80\% budget utilization
+    \end{itemize}
+
+    \item \textbf{Experiment Coordination Calendar}:
+    \begin{itemize}
+        \item Teams reserve GPU capacity in advance
+        \item Visible to all teams (avoid conflicts)
+        \item Automated capacity planning
+    \end{itemize}
+
+    \item \textbf{Auto-Scaling Policies}:
+    \begin{itemize}
+        \item Cloud burst for spikes (AWS/GCP)
+        \item Cost cap: \$10K/week for cloud burst
+        \item Automatic spot instance utilization
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Results (Q1 2024 vs. Q4 2023)}:
+
+\begin{itemize}
+    \item \textbf{Cluster crashes}: 16/quarter $\rightarrow$ 0/quarter
+    \item \textbf{Job failure rate}: 72\% $\rightarrow$ 8\%
+    \item \textbf{GPU utilization}: 43\% $\rightarrow$ 87\% (more efficient)
+    \item \textbf{Inter-team conflicts}: 23 escalations $\rightarrow$ 2 escalations
+    \item \textbf{Average queue time}: 14 hours $\rightarrow$ 2.5 hours
+    \item \textbf{Emergency cloud costs}: \$45K/quarter $\rightarrow$ \$8K/quarter
+\end{itemize}
+
+\textbf{Lessons Learned}:
+
+\begin{enumerate}
+    \item \textbf{Shared resources need governance}: Free-for-all doesn't scale beyond 2 teams
+    \item \textbf{Visibility prevents conflicts}: Experiment calendar avoided resource collisions
+    \item \textbf{Priority systems are essential}: Not all experiments are equally important
+    \item \textbf{Cost awareness changes behavior}: Teams optimized when they saw costs
+    \item \textbf{Approval workflows for large jobs}: Prevents one team monopolizing resources
+    \item \textbf{Auto-scaling as relief valve}: Cloud burst prevents complete blockage
+\end{enumerate}
+
+\subsection{Scenario 4: The Compliance Audit - Missing Experiment Documentation}
+
+\textbf{The Company}: HealthAI Diagnostics, FDA-regulated medical device company developing AI for cancer screening.
+
+\textbf{The Product}: AI system for analyzing mammograms, detecting early-stage breast cancer (Class III medical device).
+
+\textbf{The FDA Submission}:
+
+January 2024: HealthAI submitted 510(k) premarket notification to FDA for their AI diagnostic system.
+
+FDA requirement: Complete documentation of model development, validation, and deployment process.
+
+\textbf{The Audit (March 2024)}:
+
+FDA sent Document Request List (DRL) with 247 questions, including:
+
+\begin{enumerate}
+    \item Provide complete list of all models evaluated during development
+    \item Document all hyperparameters tested for final model
+    \item Explain how final hyperparameters were selected
+    \item Provide training/validation/test split procedures
+    \item Document all data preprocessing steps
+    \item List all software versions used (Python, libraries, frameworks)
+    \item Provide change log of model updates during development
+    \item Explain how you validated model isn't overfitting
+    \item Document all decisions made during development with rationale
+    \item Demonstrate reproducibility of training process
+\end{enumerate}
+
+\textbf{The Discovery}:
+
+HealthAI's ML team had run 2,340 experiments over 18 months (June 2022 - December 2023).
+
+Their documentation:
+\begin{itemize}
+    \item 47 experiments logged in Google Sheets
+    \item Inconsistent parameter naming
+    \item No git commit associations
+    \item Missing dates for 18 experiments
+    \item Final model parameters: "We think these are right..."
+    \item No systematic experiment tracking
+\end{itemize}
+
+\textbf{The Panic}:
+
+FDA deadline: 30 days to respond to DRL. HealthAI couldn't answer 80\% of questions.
+
+Options:
+\begin{enumerate}
+    \item Withdraw 510(k) application (6-12 month delay for refiling)
+    \item Request extension (signals problems to FDA)
+    \item Reconstruct experiment history (nearly impossible)
+\end{enumerate}
+
+\textbf{The Recovery Effort}:
+
+HealthAI assembled crisis team:
+\begin{itemize}
+    \item 5 ML engineers (code archaeology)
+    \item 2 regulatory affairs specialists
+    \item 1 external FDA consultant (\$500/hour)
+    \item 3-week sprint to reconstruct history
+\end{itemize}
+
+Reconstruction process:
+\begin{enumerate}
+    \item \textbf{Git log mining}: Extracted 1,847 commits related to model training
+    \item \textbf{Cloud billing analysis}: Cross-referenced GPU charges with training dates
+    \item \textbf{Model artifact forensics}: Analyzed saved model files for hyperparameter metadata
+    \item \textbf{Email archaeology}: Searched 18 months of email for experiment discussions
+    \item \textbf{Re-running experiments}: Attempted to reproduce final model from discovered parameters
+\end{enumerate}
+
+\textbf{The Outcome}:
+
+\begin{itemize}
+    \item Reconstructed 1,203 of 2,340 experiments (51\%)
+    \item Remaining 1,137 experiments: "best effort" documentation
+    \item FDA accepted submission with 34 follow-up questions
+    \item Approval delayed by 4 months (July 2024 vs. March 2024)
+    \item Competitive disadvantage: Competitor approved 2 months earlier
+\end{itemize}
+
+\textbf{The Cost}:
+
+\begin{itemize}
+    \item \textbf{Recovery effort}: 3 weeks $\times$ 8 people = 960 person-hours = \$384K labor cost
+    \item \textbf{FDA consultant}: \$500/hr $\times$ 120 hours = \$60K
+    \item \textbf{Delay cost}: 4 months $\times$ \$2M/month projected revenue = \$8M opportunity cost
+    \item \textbf{Competitive loss}: Competitor gained market share during delay
+    \item \textbf{Reputation}: FDA flagged HealthAI for "enhanced scrutiny" on future submissions
+\end{itemize}
+
+\textbf{The Prevention}:
+
+HealthAI implemented rigorous experiment governance (August 2024):
+
+\begin{enumerate}
+    \item \textbf{MLflow + DVC Integration}:
+    \begin{itemize}
+        \item Every experiment automatically logged
+        \item Git commit hash, timestamp, hyperparameters captured
+        \item Model artifacts versioned with DVC
+        \item Cannot train without logging (enforcement)
+    \end{itemize}
+
+    \item \textbf{Regulatory Compliance Checklist}:
+    \begin{itemize}
+        \item 21 CFR Part 11 compliance (electronic records)
+        \item Audit trail for all experiments
+        \item Digital signatures for approved experiments
+        \item Tamper-proof storage
+    \end{itemize}
+
+    \item \textbf{Experiment Review Board}:
+    \begin{itemize}
+        \item Weekly review of all experiments
+        \item Approval required before model deployment
+        \item Decision rationale documented
+        \item Regulatory specialist on review board
+    \end{itemize}
+
+    \item \textbf{Automated Documentation}:
+    \begin{itemize}
+        \item Experiment reports generated automatically
+        \item FDA-ready format
+        \item Quarterly compliance exports
+        \item Simulation of FDA audit with mock DRLs
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Lessons Learned}:
+
+\begin{enumerate}
+    \item \textbf{Regulated industries need audit trails from day 1}: Cannot retrofit documentation later
+    \item \textbf{Compliance is not optional}: FDA expects complete experiment history
+    \item \textbf{Automatic $>$ manual}: Spreadsheets don't scale, don't enforce compliance
+    \item \textbf{Think about audits during development}: Not 6 months before submission
+    \item \textbf{Cost of poor tracking}: \$8M+ delay cost vs. \$50K MLflow infrastructure
+    \item \textbf{Experiment governance = business enabler}: Not bureaucratic overhead
+\end{enumerate}
+
+\section{Summary}
+
+This chapter provided research-grade frameworks for experiment tracking and management with enterprise governance:
+
+\subsection{Core Technical Frameworks}
+
+\begin{itemize}
+    \item \textbf{MLflow Integration}: Protocol-based experiment tracking with complete metadata capture including git commits, hardware info, and comprehensive logging
+
+    \item \textbf{Bayesian Optimization}: Optuna integration with intelligent hyperparameter search, early stopping, and parallel execution achieving 5-10x efficiency vs. grid search
+
+    \item \textbf{Multi-Objective Optimization}: NSGA-II implementation for Pareto frontier analysis, enabling optimization of competing objectives (accuracy vs. latency, performance vs. model size)
+
+    \item \textbf{Statistical Comparison}: Rigorous t-tests and confidence intervals for comparing experiments with significance testing, preventing false discovery from random variation
+
+    \item \textbf{Dashboard Generation}: Publication-quality visualization tools for optimization history, parameter importances, Pareto frontiers, and experiment comparisons
+
+    \item \textbf{Lifecycle Management}: Stage gates and approval workflows from experiment design through deployment, ensuring quality and governance
+\end{itemize}
+
+\subsection{Industry Lessons}
+
+The chapter presented five real-world scenarios demonstrating the business impact of experiment management:
+
+\begin{enumerate}
+    \item \textbf{DataAnalytica (original example)}: 88\% reduction in tuning time (150h $\rightarrow$ 18h) while improving model performance by 2.5 percentage points through Bayesian optimization and early stopping
+
+    \item \textbf{CloudML - Hyperparameter Hell}: \$8.15M annual savings (82\% cost reduction from \$826K/month to \$147K/month) by replacing random search with Bayesian optimization, multi-fidelity evaluation, and early stopping
+
+    \item \textbf{University Research Lab - Reproducibility Crisis}: Paper retraction and \$2.4M grant loss due to inability to reproduce results, caused by insufficient experiment tracking and data leakage
+
+    \item \textbf{FinTech Innovations - Resource Wars}: \$500K regulatory fine and \$1.2M opportunity cost from cluster crashes resolved through enterprise resource quotas, priority systems, and cost tracking
+
+    \item \textbf{HealthAI - Compliance Audit}: \$8M revenue delay (\$384K recovery cost + \$60K consulting + \$8M opportunity) from incomplete FDA documentation, prevented through automated experiment governance
+\end{enumerate}
+
+\subsection{Key Takeaways}
+
+\textbf{Technical Efficiency}:
+\begin{itemize}
+    \item Bayesian optimization outperforms random/grid search by 5-10x in time and quality
+    \item Early stopping saves 40-60\% of compute by pruning unpromising trials early
+    \item Multi-fidelity optimization (successive halving) reduces computation 8x while maintaining quality
+    \item Multi-objective optimization reveals trade-offs invisible to single-objective approaches
+\end{itemize}
+
+\textbf{Enterprise Governance}:
+\begin{itemize}
+    \item Comprehensive tracking prevents loss of valuable results and enables reproducibility
+    \item Resource quotas and priority systems prevent team conflicts and cluster crashes
+    \item Cost tracking changes behavior: teams optimize when they see dollar impacts
+    \item Compliance documentation must be automated from day 1---cannot be retrofitted
+\end{itemize}
+
+\textbf{Business Impact}:
+\begin{itemize}
+    \item Poor experiment management has multi-million dollar consequences (costs, delays, fines)
+    \item Intelligent optimization directly improves gross margins (CloudML: -15\% to +42\%)
+    \item Reproducibility failures damage reputation and competitiveness
+    \item Experiment governance is a business enabler, not bureaucratic overhead
+\end{itemize}
+
+\textbf{Best Practices}:
+\begin{itemize}
+    \item Statistical validation ensures improvements are not due to chance
+    \item Visualization aids understanding and stakeholder communication
+    \item Lifecycle management ensures quality gates are met before deployment
+    \item Automation over discipline: don't rely on humans to "remember" to log
+    \item Measure everything: can't optimize what you don't measure
+\end{itemize}
+
+\section{Exercises}
+
+\subsection{Exercise 1: MLflow Experiment Tracking [Basic]}
+
+Set up complete experiment tracking with MLflow.
+
+\begin{enumerate}
+    \item Initialize MLflow with a tracking server
+    \item Create an experiment for a classification task
+    \item Log hyperparameters, metrics, and model artifacts
+    \item Capture git and hardware metadata
+    \item Query and compare multiple runs
+    \item Visualize results in MLflow UI
+\end{enumerate}
+
+\textbf{Deliverable}: MLflow experiment with 5+ tracked runs.
+
+\subsection{Exercise 2: Hyperparameter Optimization [Intermediate]}
+
+Implement Bayesian optimization for a model.
+
+\begin{enumerate}
+    \item Define a comprehensive search space for Random Forest
+    \item Implement objective function with cross-validation
+    \item Run Optuna optimization for 50 trials
+    \item Analyze parameter importances
+    \item Compare best Bayesian result with grid search baseline
+    \item Generate optimization history plot
+\end{enumerate}
+
+\textbf{Deliverable}: Optimization report with best parameters and visualizations.
+
+\subsection{Exercise 3: Statistical Experiment Comparison [Intermediate]}
+
+Rigorously compare two model configurations.
+
+\begin{enumerate}
+    \item Train two models with different hyperparameters
+    \item Collect cross-validation scores for each
+    \item Use \texttt{ExperimentAnalyzer} for statistical comparison
+    \item Calculate confidence intervals
+    \item Determine if improvement is statistically significant
+    \item Write up results with statistical evidence
+\end{enumerate}
+
+\textbf{Deliverable}: Statistical comparison report with p-values and confidence intervals.
+
+\subsection{Exercise 4: Experiment Dashboard [Advanced]}
+
+Create a comprehensive experiment dashboard.
+
+\begin{enumerate}
+    \item Run hyperparameter optimization (20+ trials)
+    \item Generate optimization history plot
+    \item Create parameter importance visualization
+    \item Generate experiment comparison chart
+    \item Build parallel coordinates plot
+    \item Combine into summary dashboard
+\end{enumerate}
+
+\textbf{Deliverable}: Multi-panel dashboard saved as high-resolution image.
+
+\subsection{Exercise 5: Efficiency Analysis [Advanced]}
+
+Measure and improve hyperparameter tuning efficiency.
+
+\begin{enumerate}
+    \item Define baseline: grid search with 100 configurations
+    \item Measure time and best result for baseline
+    \item Implement Bayesian optimization with same budget
+    \item Implement early stopping with pruning
+    \item Compare time savings and performance gains
+    \item Calculate ROI of optimization improvements
+\end{enumerate}
+
+\textbf{Deliverable}: Efficiency analysis report with time/performance trade-offs.
+
+\subsection{Exercise 6: Multi-Algorithm Comparison [Advanced]}
+
+Compare multiple algorithms systematically.
+
+\begin{enumerate}
+    \item Select 3 different algorithms
+    \item Define appropriate search spaces for each
+    \item Run optimization for each algorithm
+    \item Collect cross-validation results
+    \item Perform pairwise statistical comparisons
+    \item Rank algorithms with statistical evidence
+    \item Recommend best algorithm with justification
+\end{enumerate}
+
+\textbf{Deliverable}: Multi-algorithm comparison report with rankings.
+
+\subsection{Exercise 7: End-to-End Experiment Management [Advanced]}
+
+Implement complete experiment lifecycle.
+
+\begin{enumerate}
+    \item Design experiment with hypothesis and success criteria
+    \item Set up MLflow tracking
+    \item Run Bayesian optimization
+    \item Analyze results statistically
+    \item Generate comprehensive dashboard
+    \item Document lifecycle progression through stage gates
+    \item Create deployment-ready artifact
+\end{enumerate}
+
+\textbf{Deliverable}: Complete experiment package ready for production review.
+
+\subsection{Exercise 8: Multi-Objective Optimization [Advanced]}
+
+Optimize for competing objectives.
+
+\begin{enumerate}
+    \item Define 2-3 competing objectives (e.g., accuracy, latency, model size)
+    \item Implement multi-objective evaluation function
+    \item Run NSGA-II optimization with Optuna
+    \item Extract Pareto frontier
+    \item Visualize trade-offs with Pareto front plot
+    \item Select solution using weighted scalarization
+    \item Compare with single-objective baseline
+    \item Document trade-off analysis
+\end{enumerate}
+
+\textbf{Deliverable}: Pareto frontier analysis with trade-off visualization and solution selection justification.
+
+\subsection{Exercise 9: Experiment Cost Optimization [Intermediate]}
+
+Measure and optimize experiment costs.
+
+\begin{enumerate}
+    \item Instrument experiments with cost tracking (compute hours, GPU hours)
+    \item Run baseline optimization (100 trials, full data)
+    \item Implement early stopping with MedianPruner
+    \item Add multi-fidelity optimization (successive halving)
+    \item Compare costs: baseline vs. optimized
+    \item Measure quality degradation (if any)
+    \item Calculate ROI of optimization strategies
+    \item Create cost dashboard with recommendations
+\end{enumerate}
+
+\textbf{Deliverable}: Cost analysis report showing \% savings and quality trade-offs.
+
+\subsection{Exercise 10: Reproducibility Audit [Advanced]}
+
+Validate experiment reproducibility.
+
+\begin{enumerate}
+    \item Select 3 past experiments to reproduce
+    \item Document current reproducibility status (what's missing?)
+    \item Implement comprehensive tracking: git hash, random seeds, environment
+    \item Create Docker container with exact environment
+    \item Version control all hyperparameters
+    \item Attempt independent reproduction
+    \item Measure reproduction accuracy (metric differences)
+    \item Create reproducibility checklist
+\end{enumerate}
+
+\textbf{Deliverable}: Reproducibility report with delta analysis and prevention checklist.
+
+\subsection{Exercise 11: Experiment Resource Management [Advanced]}
+
+Design multi-team resource allocation system.
+
+\begin{enumerate}
+    \item Simulate 3 teams sharing GPU cluster (40 GPUs)
+    \item Define resource quotas per team
+    \item Implement priority-based scheduling
+    \item Create experiment approval workflow for large jobs
+    \item Add cost tracking with budget alerts
+    \item Simulate resource contention scenario
+    \item Measure queue times and utilization
+    \item Generate resource usage reports
+\end{enumerate}
+
+\textbf{Deliverable}: Resource management system with simulation results showing conflict resolution.
+
+\subsection{Exercise 12: Experiment Compliance Documentation [Advanced]}
+
+Create FDA/regulatory-ready experiment documentation.
+
+\begin{enumerate}
+    \item Select model development project (real or simulated)
+    \item Implement MLflow with comprehensive metadata capture
+    \item Track all experiments (50+ trials)
+    \item Document decision rationale for hyperparameter selection
+    \item Create model development report with:
+    \begin{itemize}
+        \item Complete experiment history
+        \item All hyperparameters tested
+        \item Selection criteria and justification
+        \item Reproducibility validation
+        \item Software bill of materials (SBOM)
+    \end{itemize}
+    \item Simulate regulatory audit questions
+    \item Demonstrate traceability from data to final model
+\end{enumerate}
+
+\textbf{Deliverable}: Compliance documentation package suitable for FDA 510(k) submission.
+
+\vspace{1cm}
+
+\textbf{Recommended Exercise Progression}:
+
+\begin{itemize}
+    \item \textbf{Foundations} (Complete first): Exercises 1, 2, 3 establish core experiment tracking skills
+    \item \textbf{Optimization} (Intermediate): Exercises 5, 8, 9 focus on efficiency and multi-objective optimization
+    \item \textbf{Enterprise} (Advanced): Exercises 4, 7, 10, 11, 12 demonstrate enterprise-grade governance and compliance
+    \item \textbf{Research} (Advanced): Exercises 6, 8 prepare for research publication and multi-objective problems
+\end{itemize}
+
+Complete at least Exercises 1, 2, 3, and 9 before proceeding to Chapter 5. The advanced exercises (10, 11, 12) are essential for regulated industries and enterprise ML teams.

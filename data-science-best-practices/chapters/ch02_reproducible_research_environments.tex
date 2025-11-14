@@ -1,0 +1,2290 @@
+\chapter{Reproducible Research and Environments}
+\label{ch:reproducibility}
+
+\section{Chapter Overview}
+
+Reproducibility is the cornerstone of scientific validity and engineering reliability. A result that cannot be reproduced cannot be debugged, validated, or trusted. Yet reproducibility remains one of the most challenging aspects of data science and machine learning engineering.
+
+This chapter addresses the complete lifecycle of reproducible research: from capturing environment state to recreating results years later. We provide production-grade tools for environment management, dependency tracking, computational reproducibility, and validation.
+
+\subsection{Learning Objectives}
+
+By the end of this chapter, you will be able to:
+
+\begin{itemize}
+    \item Capture complete environment snapshots with cryptographic validation
+    \item Manage dependencies across pip, conda, and security vulnerability databases
+    \item Ensure computational reproducibility through seed management and hardware tracking
+    \item Write bootstrap scripts that recreate environments from scratch
+    \item Conduct post-incident reproducibility audits
+    \item Integrate reproducibility practices with Git, Docker, and CI/CD systems
+    \item Measure and score reproducibility across projects
+\end{itemize}
+
+\section{The Reproducibility Crisis in Data Science}
+
+\subsection{Defining Reproducibility}
+
+The term ``reproducibility'' has multiple interpretations. We adopt the following taxonomy:
+
+\begin{itemize}
+    \item \textbf{Computational Reproducibility}: Running the same code on the same data produces identical results
+    \item \textbf{Replicability}: Independent analysis of the same data reaches the same conclusions
+    \item \textbf{Robustness}: Results hold under different analysis choices
+    \item \textbf{Generalizability}: Findings extend to new data and contexts
+\end{itemize}
+
+This chapter focuses primarily on \textit{computational reproducibility}---the foundation upon which all other forms of reproducibility are built.
+
+\subsection{Why Reproducibility Fails}
+
+Data science projects fail to reproduce for several reasons:
+
+\begin{enumerate}
+    \item \textbf{Environment Drift}: Dependencies update, breaking compatibility
+    \item \textbf{Missing Dependencies}: Implicit dependencies not captured
+    \item \textbf{Hardware Differences}: GPU vs. CPU, different architectures
+    \item \textbf{Random Variation}: Unfixed random seeds
+    \item \textbf{Data Versioning}: Data changes without version tracking
+    \item \textbf{Undocumented Steps}: Manual preprocessing not captured in code
+    \item \textbf{Configuration Drift}: Environment variables, system settings
+\end{enumerate}
+
+\subsection{The Cost of Irreproducibility}
+
+Consider these impacts:
+
+\begin{itemize}
+    \item A pharmaceutical company spent \$2.3M re-running clinical trial analyses because original results couldn't be reproduced
+    \item Academic researchers estimate 50\% of time is spent reproducing their own prior work
+    \item 70\% of researchers have tried and failed to reproduce another scientist's experiments
+    \item Model retraining in production often yields different results, eroding stakeholder trust
+\end{itemize}
+
+\section{Environment Snapshot System}
+
+A complete environment snapshot captures all information necessary to recreate computational conditions. Our implementation provides cryptographic validation and version tracking.
+
+\begin{lstlisting}[style=python, caption={Complete environment snapshot system}]
+"""
+Environment Snapshot System
+
+Captures complete computational environment state with cryptographic
+validation for perfect reproducibility.
+"""
+
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+import hashlib
+import json
+import logging
+import os
+import platform
+import subprocess
+import sys
+
+logger = logging.getLogger(__name__)
+
+
+class PackageManager(Enum):
+    """Supported package managers."""
+    PIP = "pip"
+    CONDA = "conda"
+    POETRY = "poetry"
+    PIPENV = "pipenv"
+
+
+class OperatingSystem(Enum):
+    """Operating system types."""
+    LINUX = "linux"
+    WINDOWS = "windows"
+    MACOS = "darwin"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class Package:
+    """Representation of an installed package."""
+    name: str
+    version: str
+    manager: PackageManager
+    hash_value: Optional[str] = None
+    dependencies: List[str] = field(default_factory=list)
+
+    def to_requirement_string(self) -> str:
+        """Convert to requirement specifier."""
+        if self.hash_value:
+            return f"{self.name}=={self.version} --hash=sha256:{self.hash_value}"
+        return f"{self.name}=={self.version}"
+
+
+@dataclass
+class HardwareInfo:
+    """Hardware configuration information."""
+    cpu_model: str
+    cpu_count: int
+    total_memory_gb: float
+    gpu_available: bool
+    gpu_devices: List[str] = field(default_factory=list)
+    gpu_drivers: Dict[str, str] = field(default_factory=dict)
+    architecture: str = ""
+
+    def fingerprint(self) -> str:
+        """Generate hardware fingerprint for compatibility checking."""
+        components = [
+            self.architecture,
+            str(self.cpu_count),
+            f"{self.total_memory_gb:.1f}GB",
+            "GPU" if self.gpu_available else "CPU",
+        ]
+        return hashlib.sha256("-".join(components).encode()).hexdigest()[:16]
+
+
+@dataclass
+class EnvironmentSnapshot:
+    """Complete snapshot of computational environment."""
+
+    # Identification
+    snapshot_id: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    description: str = ""
+    created_by: str = ""
+    project_name: str = ""
+
+    # Python environment
+    python_version: str = ""
+    python_executable: str = ""
+    virtual_env: Optional[str] = None
+
+    # Packages
+    packages: List[Package] = field(default_factory=list)
+    system_packages: List[str] = field(default_factory=list)
+
+    # Operating system
+    os_type: OperatingSystem = OperatingSystem.UNKNOWN
+    os_version: str = ""
+    kernel_version: str = ""
+
+    # Hardware
+    hardware: Optional[HardwareInfo] = None
+
+    # Environment variables (filtered for security)
+    env_vars: Dict[str, str] = field(default_factory=dict)
+
+    # Git information
+    git_commit: Optional[str] = None
+    git_branch: Optional[str] = None
+    git_remote: Optional[str] = None
+    git_dirty: bool = False
+
+    # Additional metadata
+    metadata: Dict[str, str] = field(default_factory=dict)
+
+    def compute_hash(self) -> str:
+        """
+        Compute cryptographic hash of snapshot for validation.
+
+        Returns:
+            SHA-256 hash of snapshot contents
+        """
+        # Create deterministic representation
+        content = {
+            "python_version": self.python_version,
+            "packages": sorted([
+                f"{p.name}=={p.version}" for p in self.packages
+            ]),
+            "os_type": self.os_type.value,
+            "os_version": self.os_version,
+        }
+
+        json_str = json.dumps(content, sort_keys=True)
+        return hashlib.sha256(json_str.encode()).hexdigest()
+
+    def to_dict(self) -> Dict:
+        """Convert snapshot to dictionary for serialization."""
+        return {
+            "snapshot_id": self.snapshot_id,
+            "timestamp": self.timestamp.isoformat(),
+            "description": self.description,
+            "created_by": self.created_by,
+            "project_name": self.project_name,
+            "python_version": self.python_version,
+            "python_executable": self.python_executable,
+            "virtual_env": self.virtual_env,
+            "packages": [
+                {
+                    "name": p.name,
+                    "version": p.version,
+                    "manager": p.manager.value,
+                    "hash": p.hash_value
+                }
+                for p in self.packages
+            ],
+            "system_packages": self.system_packages,
+            "os_type": self.os_type.value,
+            "os_version": self.os_version,
+            "kernel_version": self.kernel_version,
+            "hardware": asdict(self.hardware) if self.hardware else None,
+            "env_vars": self.env_vars,
+            "git_commit": self.git_commit,
+            "git_branch": self.git_branch,
+            "git_remote": self.git_remote,
+            "git_dirty": self.git_dirty,
+            "metadata": self.metadata,
+            "snapshot_hash": self.compute_hash()
+        }
+
+    def save(self, filepath: Path) -> None:
+        """
+        Save snapshot to JSON file.
+
+        Args:
+            filepath: Path to save snapshot
+
+        Raises:
+            IOError: If file cannot be written
+        """
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(self.to_dict(), f, indent=2)
+            logger.info(f"Snapshot saved to {filepath}")
+        except IOError as e:
+            logger.error(f"Failed to save snapshot: {e}")
+            raise
+
+    @classmethod
+    def load(cls, filepath: Path) -> 'EnvironmentSnapshot':
+        """
+        Load snapshot from JSON file.
+
+        Args:
+            filepath: Path to load snapshot from
+
+        Returns:
+            EnvironmentSnapshot instance
+
+        Raises:
+            IOError: If file cannot be read
+            ValueError: If file format is invalid
+        """
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+
+            packages = [
+                Package(
+                    name=p["name"],
+                    version=p["version"],
+                    manager=PackageManager(p["manager"]),
+                    hash_value=p.get("hash")
+                )
+                for p in data.get("packages", [])
+            ]
+
+            hardware = None
+            if data.get("hardware"):
+                hardware = HardwareInfo(**data["hardware"])
+
+            return cls(
+                snapshot_id=data["snapshot_id"],
+                timestamp=datetime.fromisoformat(data["timestamp"]),
+                description=data.get("description", ""),
+                created_by=data.get("created_by", ""),
+                project_name=data.get("project_name", ""),
+                python_version=data.get("python_version", ""),
+                python_executable=data.get("python_executable", ""),
+                virtual_env=data.get("virtual_env"),
+                packages=packages,
+                system_packages=data.get("system_packages", []),
+                os_type=OperatingSystem(data.get("os_type", "unknown")),
+                os_version=data.get("os_version", ""),
+                kernel_version=data.get("kernel_version", ""),
+                hardware=hardware,
+                env_vars=data.get("env_vars", {}),
+                git_commit=data.get("git_commit"),
+                git_branch=data.get("git_branch"),
+                git_remote=data.get("git_remote"),
+                git_dirty=data.get("git_dirty", False),
+                metadata=data.get("metadata", {})
+            )
+        except (IOError, KeyError, ValueError) as e:
+            logger.error(f"Failed to load snapshot: {e}")
+            raise
+
+
+class EnvironmentCapture:
+    """Tool for capturing environment snapshots."""
+
+    @staticmethod
+    def capture_python_info() -> Tuple[str, str, Optional[str]]:
+        """Capture Python interpreter information."""
+        version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        executable = sys.executable
+
+        # Detect virtual environment
+        venv = os.environ.get('VIRTUAL_ENV') or os.environ.get('CONDA_DEFAULT_ENV')
+
+        return version, executable, venv
+
+    @staticmethod
+    def capture_packages_pip() -> List[Package]:
+        """Capture pip-installed packages."""
+        packages = []
+
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'list', '--format=json'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            pip_list = json.loads(result.stdout)
+
+            for item in pip_list:
+                packages.append(Package(
+                    name=item['name'],
+                    version=item['version'],
+                    manager=PackageManager.PIP
+                ))
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to capture pip packages: {e}")
+
+        return packages
+
+    @staticmethod
+    def capture_packages_conda() -> List[Package]:
+        """Capture conda-installed packages."""
+        packages = []
+
+        try:
+            result = subprocess.run(
+                ['conda', 'list', '--json'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            conda_list = json.loads(result.stdout)
+
+            for item in conda_list:
+                packages.append(Package(
+                    name=item['name'],
+                    version=item['version'],
+                    manager=PackageManager.CONDA
+                ))
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as e:
+            logger.debug(f"Conda not available or failed: {e}")
+
+        return packages
+
+    @staticmethod
+    def capture_os_info() -> Tuple[OperatingSystem, str, str]:
+        """Capture operating system information."""
+        system = platform.system().lower()
+
+        os_map = {
+            'linux': OperatingSystem.LINUX,
+            'windows': OperatingSystem.WINDOWS,
+            'darwin': OperatingSystem.MACOS,
+        }
+
+        os_type = os_map.get(system, OperatingSystem.UNKNOWN)
+        os_version = platform.version()
+        kernel_version = platform.release()
+
+        return os_type, os_version, kernel_version
+
+    @staticmethod
+    def capture_hardware_info() -> HardwareInfo:
+        """Capture hardware configuration."""
+        import multiprocessing
+
+        cpu_model = platform.processor() or platform.machine()
+        cpu_count = multiprocessing.cpu_count()
+
+        # Estimate memory (requires psutil for accuracy)
+        try:
+            import psutil
+            total_memory_gb = psutil.virtual_memory().total / (1024**3)
+        except ImportError:
+            total_memory_gb = 0.0
+            logger.warning("psutil not available, memory info unavailable")
+
+        # Check for GPU
+        gpu_available = False
+        gpu_devices = []
+        gpu_drivers = {}
+
+        # Try NVIDIA
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            gpu_devices = result.stdout.strip().split('\n')
+            gpu_available = len(gpu_devices) > 0
+
+            # Get driver version
+            driver_result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            gpu_drivers['nvidia'] = driver_result.stdout.strip().split('\n')[0]
+
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.debug("NVIDIA GPU not detected")
+
+        return HardwareInfo(
+            cpu_model=cpu_model,
+            cpu_count=cpu_count,
+            total_memory_gb=total_memory_gb,
+            gpu_available=gpu_available,
+            gpu_devices=gpu_devices,
+            gpu_drivers=gpu_drivers,
+            architecture=platform.machine()
+        )
+
+    @staticmethod
+    def capture_git_info() -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+        """Capture Git repository information."""
+        try:
+            # Get commit hash
+            commit_result = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            commit = commit_result.stdout.strip()
+
+            # Get branch
+            branch_result = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            branch = branch_result.stdout.strip()
+
+            # Get remote
+            remote_result = subprocess.run(
+                ['git', 'config', '--get', 'remote.origin.url'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            remote = remote_result.stdout.strip()
+
+            # Check if dirty
+            status_result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            dirty = len(status_result.stdout.strip()) > 0
+
+            return commit, branch, remote, dirty
+
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.debug("Git information not available")
+            return None, None, None, False
+
+    @staticmethod
+    def capture_env_vars(
+        include_patterns: Optional[List[str]] = None,
+        exclude_sensitive: bool = True
+    ) -> Dict[str, str]:
+        """
+        Capture environment variables with filtering.
+
+        Args:
+            include_patterns: Patterns to include (e.g., ['PROJECT_*', 'MODEL_*'])
+            exclude_sensitive: Exclude potentially sensitive variables
+
+        Returns:
+            Dictionary of environment variables
+        """
+        import fnmatch
+
+        sensitive_patterns = [
+            '*KEY*', '*SECRET*', '*PASSWORD*', '*TOKEN*',
+            '*CREDENTIAL*', '*AUTH*', 'AWS_*', 'AZURE_*'
+        ]
+
+        env_vars = {}
+
+        for key, value in os.environ.items():
+            # Check if should be excluded
+            if exclude_sensitive:
+                if any(fnmatch.fnmatch(key.upper(), pattern)
+                       for pattern in sensitive_patterns):
+                    continue
+
+            # Check if matches include patterns
+            if include_patterns:
+                if any(fnmatch.fnmatch(key, pattern)
+                       for pattern in include_patterns):
+                    env_vars[key] = value
+            else:
+                # Include common non-sensitive variables
+                if key in ['PATH', 'PYTHONPATH', 'LANG', 'HOME', 'USER']:
+                    env_vars[key] = value
+
+        return env_vars
+
+    @classmethod
+    def capture_full_snapshot(
+        cls,
+        snapshot_id: str,
+        description: str = "",
+        project_name: str = "",
+        created_by: str = "",
+        include_env_patterns: Optional[List[str]] = None
+    ) -> EnvironmentSnapshot:
+        """
+        Capture complete environment snapshot.
+
+        Args:
+            snapshot_id: Unique identifier for snapshot
+            description: Human-readable description
+            project_name: Name of project
+            created_by: Creator identifier
+            include_env_patterns: Environment variable patterns to include
+
+        Returns:
+            Complete EnvironmentSnapshot
+        """
+        logger.info(f"Capturing environment snapshot: {snapshot_id}")
+
+        # Capture all components
+        python_version, python_executable, venv = cls.capture_python_info()
+        packages_pip = cls.capture_packages_pip()
+        packages_conda = cls.capture_packages_conda()
+        packages = packages_pip + packages_conda
+
+        os_type, os_version, kernel_version = cls.capture_os_info()
+        hardware = cls.capture_hardware_info()
+        git_commit, git_branch, git_remote, git_dirty = cls.capture_git_info()
+        env_vars = cls.capture_env_vars(include_patterns=include_env_patterns)
+
+        snapshot = EnvironmentSnapshot(
+            snapshot_id=snapshot_id,
+            description=description,
+            project_name=project_name,
+            created_by=created_by,
+            python_version=python_version,
+            python_executable=python_executable,
+            virtual_env=venv,
+            packages=packages,
+            os_type=os_type,
+            os_version=os_version,
+            kernel_version=kernel_version,
+            hardware=hardware,
+            env_vars=env_vars,
+            git_commit=git_commit,
+            git_branch=git_branch,
+            git_remote=git_remote,
+            git_dirty=git_dirty
+        )
+
+        logger.info(f"Snapshot captured: {len(packages)} packages, "
+                   f"hash={snapshot.compute_hash()[:8]}")
+
+        return snapshot
+
+
+# Example usage
+if __name__ == "__main__":
+    # Capture current environment
+    snapshot = EnvironmentCapture.capture_full_snapshot(
+        snapshot_id="prod-model-v1.2.3",
+        description="Production model training environment",
+        project_name="customer_churn_prediction",
+        created_by="data-science-team",
+        include_env_patterns=['PROJECT_*', 'MODEL_*']
+    )
+
+    # Save snapshot
+    snapshot.save(Path("environment_snapshot.json"))
+
+    # Display summary
+    print(f"Snapshot ID: {snapshot.snapshot_id}")
+    print(f"Python: {snapshot.python_version}")
+    print(f"Packages: {len(snapshot.packages)}")
+    print(f"OS: {snapshot.os_type.value} {snapshot.os_version}")
+    print(f"Git: {snapshot.git_commit[:8] if snapshot.git_commit else 'N/A'}")
+    print(f"Hash: {snapshot.compute_hash()[:16]}")
+
+    # Load and verify
+    loaded = EnvironmentSnapshot.load(Path("environment_snapshot.json"))
+    assert loaded.compute_hash() == snapshot.compute_hash()
+    print("\nSnapshot verification: SUCCESS")
+\end{lstlisting}
+
+\section{Dependency Management}
+
+Managing dependencies is critical for reproducibility. We need to pin exact versions, track transitive dependencies, and scan for security vulnerabilities.
+
+\subsection{Dependency Pinning Strategies}
+
+\textbf{Pip with pip-compile}:
+
+\begin{lstlisting}[style=shell, caption={Using pip-tools for dependency pinning}]
+# requirements.in - high-level dependencies
+numpy>=1.20
+pandas>=1.3
+scikit-learn>=1.0
+
+# Generate pinned requirements
+pip-compile requirements.in --output-file requirements.txt
+
+# With hashes for security
+pip-compile requirements.in --generate-hashes --output-file requirements.txt
+\end{lstlisting}
+
+\textbf{Conda environments}:
+
+\begin{lstlisting}[style=yaml, caption={Conda environment specification}]
+# environment.yml
+name: ml-project
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9.7
+  - numpy=1.21.2
+  - pandas=1.3.3
+  - scikit-learn=1.0.1
+  - pip:
+    - mlflow==1.20.2
+    - dvc==2.8.3
+\end{lstlisting}
+
+\subsection{Dependency Audit and Security Scanning}
+
+\begin{lstlisting}[style=python, caption={Dependency auditing and vulnerability scanning}]
+"""
+Dependency Audit and Security Scanner
+
+Analyzes dependencies for security vulnerabilities, license issues,
+and compatibility problems.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Dict, List, Optional, Set
+import json
+import logging
+import re
+import subprocess
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class VulnerabilitySeverity(Enum):
+    """Severity levels for vulnerabilities."""
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    UNKNOWN = "unknown"
+
+
+class LicenseType(Enum):
+    """Common license categories."""
+    PERMISSIVE = "permissive"  # MIT, Apache, BSD
+    COPYLEFT = "copyleft"      # GPL, AGPL
+    PROPRIETARY = "proprietary"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class Vulnerability:
+    """Security vulnerability information."""
+    cve_id: str
+    package_name: str
+    affected_version: str
+    severity: VulnerabilitySeverity
+    description: str
+    fixed_version: Optional[str] = None
+    published_date: Optional[datetime] = None
+    cvss_score: Optional[float] = None
+
+
+@dataclass
+class DependencyInfo:
+    """Extended dependency information."""
+    name: str
+    version: str
+    license: str = "Unknown"
+    license_type: LicenseType = LicenseType.UNKNOWN
+    dependencies: List[str] = field(default_factory=list)
+    vulnerabilities: List[Vulnerability] = field(default_factory=list)
+    latest_version: Optional[str] = None
+    outdated: bool = False
+
+
+@dataclass
+class DependencyAuditReport:
+    """Complete dependency audit report."""
+    timestamp: datetime = field(default_factory=datetime.now)
+    total_packages: int = 0
+    vulnerable_packages: int = 0
+    outdated_packages: int = 0
+    vulnerabilities: List[Vulnerability] = field(default_factory=list)
+    dependencies: List[DependencyInfo] = field(default_factory=list)
+    license_summary: Dict[str, int] = field(default_factory=dict)
+    risk_score: float = 0.0
+
+    def calculate_risk_score(self) -> float:
+        """
+        Calculate overall risk score (0-100).
+
+        Higher scores indicate higher risk.
+        """
+        if self.total_packages == 0:
+            return 0.0
+
+        # Vulnerability scoring
+        vuln_scores = {
+            VulnerabilitySeverity.CRITICAL: 10.0,
+            VulnerabilitySeverity.HIGH: 7.0,
+            VulnerabilitySeverity.MEDIUM: 4.0,
+            VulnerabilitySeverity.LOW: 2.0,
+        }
+
+        vuln_score = sum(
+            vuln_scores.get(v.severity, 0.0)
+            for v in self.vulnerabilities
+        )
+
+        # Outdated packages (minor risk)
+        outdated_score = self.outdated_packages * 0.5
+
+        # Normalize to 0-100
+        raw_score = vuln_score + outdated_score
+        normalized = min(100, (raw_score / self.total_packages) * 20)
+
+        return normalized
+
+    def get_critical_vulnerabilities(self) -> List[Vulnerability]:
+        """Get all critical and high severity vulnerabilities."""
+        return [
+            v for v in self.vulnerabilities
+            if v.severity in [VulnerabilitySeverity.CRITICAL, VulnerabilitySeverity.HIGH]
+        ]
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "total_packages": self.total_packages,
+            "vulnerable_packages": self.vulnerable_packages,
+            "outdated_packages": self.outdated_packages,
+            "risk_score": self.risk_score,
+            "critical_vulnerabilities": len(self.get_critical_vulnerabilities()),
+            "vulnerabilities": [
+                {
+                    "cve_id": v.cve_id,
+                    "package": v.package_name,
+                    "version": v.affected_version,
+                    "severity": v.severity.value,
+                    "description": v.description,
+                    "fixed_version": v.fixed_version
+                }
+                for v in self.vulnerabilities
+            ],
+            "license_summary": self.license_summary
+        }
+
+    def save(self, filepath: Path) -> None:
+        """Save audit report to file."""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Audit report saved to {filepath}")
+
+
+class DependencyAuditor:
+    """Tool for auditing dependencies."""
+
+    PERMISSIVE_LICENSES = {
+        'MIT', 'Apache-2.0', 'Apache', 'BSD', 'BSD-3-Clause',
+        'BSD-2-Clause', 'ISC', 'Python-2.0'
+    }
+
+    COPYLEFT_LICENSES = {
+        'GPL', 'GPLv2', 'GPLv3', 'AGPL', 'AGPLv3', 'LGPL'
+    }
+
+    @classmethod
+    def classify_license(cls, license_name: str) -> LicenseType:
+        """Classify license type."""
+        license_upper = license_name.upper()
+
+        if any(lic.upper() in license_upper for lic in cls.PERMISSIVE_LICENSES):
+            return LicenseType.PERMISSIVE
+        elif any(lic.upper() in license_upper for lic in cls.COPYLEFT_LICENSES):
+            return LicenseType.COPYLEFT
+        elif 'PROPRIETARY' in license_upper:
+            return LicenseType.PROPRIETARY
+        else:
+            return LicenseType.UNKNOWN
+
+    @staticmethod
+    def scan_with_safety() -> List[Vulnerability]:
+        """
+        Scan dependencies using Safety CLI.
+
+        Returns:
+            List of vulnerabilities found
+        """
+        vulnerabilities = []
+
+        try:
+            result = subprocess.run(
+                ['safety', 'check', '--json'],
+                capture_output=True,
+                text=True
+            )
+
+            # Parse JSON output (even on non-zero exit)
+            if result.stdout:
+                data = json.loads(result.stdout)
+
+                for item in data:
+                    vulnerabilities.append(Vulnerability(
+                        cve_id=item.get('cve', 'UNKNOWN'),
+                        package_name=item['package'],
+                        affected_version=item['installed_version'],
+                        severity=VulnerabilitySeverity(
+                            item.get('severity', 'unknown').lower()
+                        ),
+                        description=item.get('advisory', ''),
+                        fixed_version=item.get('fixed_version')
+                    ))
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as e:
+            logger.warning(f"Safety scan failed: {e}")
+
+        return vulnerabilities
+
+    @staticmethod
+    def check_outdated_packages() -> List[Tuple[str, str, str]]:
+        """
+        Check for outdated packages.
+
+        Returns:
+            List of (package, current_version, latest_version) tuples
+        """
+        outdated = []
+
+        try:
+            result = subprocess.run(
+                ['pip', 'list', '--outdated', '--format=json'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            data = json.loads(result.stdout)
+
+            for item in data:
+                outdated.append((
+                    item['name'],
+                    item['version'],
+                    item['latest_version']
+                ))
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to check outdated packages: {e}")
+
+        return outdated
+
+    @staticmethod
+    def get_package_licenses() -> Dict[str, str]:
+        """
+        Get licenses for all installed packages.
+
+        Returns:
+            Dictionary mapping package names to licenses
+        """
+        licenses = {}
+
+        try:
+            result = subprocess.run(
+                ['pip-licenses', '--format=json'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            data = json.loads(result.stdout)
+
+            for item in data:
+                licenses[item['Name']] = item.get('License', 'Unknown')
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as e:
+            logger.warning(f"Failed to get licenses (pip-licenses not installed?): {e}")
+
+        return licenses
+
+    @classmethod
+    def run_full_audit(cls) -> DependencyAuditReport:
+        """
+        Run complete dependency audit.
+
+        Returns:
+            DependencyAuditReport with all findings
+        """
+        logger.info("Starting dependency audit...")
+
+        # Get installed packages
+        result = subprocess.run(
+            ['pip', 'list', '--format=json'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        packages_data = json.loads(result.stdout)
+
+        # Scan for vulnerabilities
+        vulnerabilities = cls.scan_with_safety()
+
+        # Check for outdated packages
+        outdated = cls.check_outdated_packages()
+        outdated_set = {name for name, _, _ in outdated}
+        outdated_versions = {name: latest for name, _, latest in outdated}
+
+        # Get licenses
+        licenses = cls.get_package_licenses()
+
+        # Build dependency info
+        dependencies = []
+        vuln_by_package = {}
+
+        for v in vulnerabilities:
+            if v.package_name not in vuln_by_package:
+                vuln_by_package[v.package_name] = []
+            vuln_by_package[v.package_name].append(v)
+
+        for pkg in packages_data:
+            name = pkg['name']
+            version = pkg['version']
+            license_name = licenses.get(name, 'Unknown')
+
+            dep_info = DependencyInfo(
+                name=name,
+                version=version,
+                license=license_name,
+                license_type=cls.classify_license(license_name),
+                vulnerabilities=vuln_by_package.get(name, []),
+                latest_version=outdated_versions.get(name),
+                outdated=name in outdated_set
+            )
+
+            dependencies.append(dep_info)
+
+        # Calculate license summary
+        license_summary = {}
+        for dep in dependencies:
+            lic_type = dep.license_type.value
+            license_summary[lic_type] = license_summary.get(lic_type, 0) + 1
+
+        # Create report
+        report = DependencyAuditReport(
+            total_packages=len(dependencies),
+            vulnerable_packages=len(vuln_by_package),
+            outdated_packages=len(outdated_set),
+            vulnerabilities=vulnerabilities,
+            dependencies=dependencies,
+            license_summary=license_summary
+        )
+
+        report.risk_score = report.calculate_risk_score()
+
+        logger.info(f"Audit complete: {report.total_packages} packages, "
+                   f"{report.vulnerable_packages} vulnerable, "
+                   f"risk score: {report.risk_score:.1f}")
+
+        return report
+
+
+# Example usage
+if __name__ == "__main__":
+    # Run audit
+    report = DependencyAuditor.run_full_audit()
+
+    # Display summary
+    print(f"Dependency Audit Report")
+    print(f"=" * 60)
+    print(f"Total Packages: {report.total_packages}")
+    print(f"Vulnerable: {report.vulnerable_packages}")
+    print(f"Outdated: {report.outdated_packages}")
+    print(f"Risk Score: {report.risk_score:.1f}/100")
+    print(f"\nCritical Vulnerabilities:")
+
+    for vuln in report.get_critical_vulnerabilities():
+        print(f"  - {vuln.package_name} {vuln.affected_version}")
+        print(f"    {vuln.cve_id}: {vuln.description[:80]}...")
+        if vuln.fixed_version:
+            print(f"    Fix: Upgrade to {vuln.fixed_version}")
+
+    # Save report
+    report.save(Path("dependency_audit.json"))
+\end{lstlisting}
+
+\section{Computational Reproducibility}
+
+Beyond environment management, we must ensure that computations themselves are reproducible. This requires careful management of random seeds, hardware-dependent operations, and computational metadata.
+
+\subsection{Random Seed Management}
+
+\begin{lstlisting}[style=python, caption={Comprehensive random seed management}]
+"""
+Random Seed Management
+
+Ensures reproducibility across numpy, PyTorch, TensorFlow, scikit-learn,
+and Python's random module.
+"""
+
+import logging
+import os
+import random
+from typing import Optional
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class SeedManager:
+    """Centralized random seed management."""
+
+    _global_seed: Optional[int] = None
+
+    @classmethod
+    def set_global_seed(cls, seed: int) -> None:
+        """
+        Set random seed for all libraries.
+
+        Args:
+            seed: Random seed value
+        """
+        cls._global_seed = seed
+
+        # Python random
+        random.seed(seed)
+        logger.info(f"Set Python random seed: {seed}")
+
+        # NumPy
+        np.random.seed(seed)
+        logger.info(f"Set NumPy seed: {seed}")
+
+        # PyTorch (if available)
+        try:
+            import torch
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+
+            # Deterministic algorithms (may impact performance)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+            logger.info(f"Set PyTorch seed: {seed}")
+        except ImportError:
+            logger.debug("PyTorch not available")
+
+        # TensorFlow (if available)
+        try:
+            import tensorflow as tf
+            tf.random.set_seed(seed)
+
+            # Set environment variable for additional determinism
+            os.environ['TF_DETERMINISTIC_OPS'] = '1'
+
+            logger.info(f"Set TensorFlow seed: {seed}")
+        except ImportError:
+            logger.debug("TensorFlow not available")
+
+        # Environment variable for hash seed
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        logger.info(f"Set PYTHONHASHSEED: {seed}")
+
+    @classmethod
+    def get_global_seed(cls) -> Optional[int]:
+        """Get the current global seed."""
+        return cls._global_seed
+
+    @staticmethod
+    def configure_sklearn_reproducibility() -> None:
+        """Configure scikit-learn for reproducibility."""
+        # Most sklearn estimators accept random_state parameter
+        # This is a reminder to always pass it
+        logger.info("Remember to pass random_state to sklearn estimators")
+
+    @staticmethod
+    def get_reproducibility_config() -> dict:
+        """
+        Get configuration settings for reproducibility.
+
+        Returns:
+            Dictionary of settings to log/save
+        """
+        config = {
+            "seed": SeedManager._global_seed,
+            "pythonhashseed": os.environ.get('PYTHONHASHSEED'),
+        }
+
+        # PyTorch settings
+        try:
+            import torch
+            config["pytorch"] = {
+                "deterministic": torch.backends.cudnn.deterministic,
+                "benchmark": torch.backends.cudnn.benchmark,
+            }
+        except ImportError:
+            pass
+
+        # TensorFlow settings
+        try:
+            import tensorflow as tf
+            config["tensorflow"] = {
+                "deterministic_ops": os.environ.get('TF_DETERMINISTIC_OPS'),
+            }
+        except ImportError:
+            pass
+
+        return config
+
+
+# Example usage
+if __name__ == "__main__":
+    # Set global seed
+    SeedManager.set_global_seed(42)
+
+    # Verify reproducibility
+    print("NumPy random values:")
+    print(np.random.rand(5))
+
+    # Reset and verify
+    SeedManager.set_global_seed(42)
+    print("After reset (should be identical):")
+    print(np.random.rand(5))
+
+    # Get config for logging
+    config = SeedManager.get_reproducibility_config()
+    print(f"\nReproducibility config: {config}")
+\end{lstlisting}
+
+\subsection{Hardware Fingerprinting and Compatibility}
+
+\begin{lstlisting}[style=python, caption={Hardware compatibility checking}]
+"""
+Hardware Compatibility Checker
+
+Validates that current hardware is compatible with environment snapshot.
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CompatibilityIssue:
+    """Description of a compatibility issue."""
+    category: str
+    severity: str  # 'error', 'warning', 'info'
+    message: str
+    expected: str
+    actual: str
+
+
+class HardwareCompatibilityChecker:
+    """Check hardware compatibility with snapshot."""
+
+    @staticmethod
+    def check_python_version(
+        expected: str,
+        actual: str,
+        strict: bool = False
+    ) -> Optional[CompatibilityIssue]:
+        """
+        Check Python version compatibility.
+
+        Args:
+            expected: Expected version (e.g., "3.9.7")
+            actual: Actual version
+            strict: Require exact match
+
+        Returns:
+            CompatibilityIssue if incompatible, None otherwise
+        """
+        exp_parts = expected.split('.')
+        act_parts = actual.split('.')
+
+        if strict:
+            if expected != actual:
+                return CompatibilityIssue(
+                    category="python_version",
+                    severity="error",
+                    message="Python version mismatch (strict mode)",
+                    expected=expected,
+                    actual=actual
+                )
+        else:
+            # Check major.minor match
+            if exp_parts[:2] != act_parts[:2]:
+                return CompatibilityIssue(
+                    category="python_version",
+                    severity="error",
+                    message="Python major.minor version mismatch",
+                    expected=expected,
+                    actual=actual
+                )
+            elif exp_parts[2] != act_parts[2]:
+                return CompatibilityIssue(
+                    category="python_version",
+                    severity="warning",
+                    message="Python patch version mismatch",
+                    expected=expected,
+                    actual=actual
+                )
+
+        return None
+
+    @staticmethod
+    def check_gpu_availability(
+        expected: bool,
+        actual: bool
+    ) -> Optional[CompatibilityIssue]:
+        """Check GPU availability."""
+        if expected and not actual:
+            return CompatibilityIssue(
+                category="hardware",
+                severity="error",
+                message="GPU required but not available",
+                expected="GPU available",
+                actual="No GPU"
+            )
+        elif not expected and actual:
+            return CompatibilityIssue(
+                category="hardware",
+                severity="info",
+                message="GPU available but not required",
+                expected="No GPU required",
+                actual="GPU available"
+            )
+
+        return None
+
+    @staticmethod
+    def check_memory(
+        expected_gb: float,
+        actual_gb: float,
+        tolerance: float = 0.9
+    ) -> Optional[CompatibilityIssue]:
+        """
+        Check available memory.
+
+        Args:
+            expected_gb: Expected memory in GB
+            actual_gb: Actual memory in GB
+            tolerance: Minimum fraction of expected memory required
+        """
+        if actual_gb < expected_gb * tolerance:
+            return CompatibilityIssue(
+                category="hardware",
+                severity="warning",
+                message="Insufficient memory",
+                expected=f"{expected_gb:.1f} GB",
+                actual=f"{actual_gb:.1f} GB"
+            )
+
+        return None
+
+    @classmethod
+    def check_compatibility(
+        cls,
+        snapshot: 'EnvironmentSnapshot',
+        current_hardware: 'HardwareInfo',
+        current_python: str,
+        strict_python: bool = False
+    ) -> List[CompatibilityIssue]:
+        """
+        Check complete compatibility.
+
+        Args:
+            snapshot: Reference environment snapshot
+            current_hardware: Current hardware info
+            current_python: Current Python version
+            strict_python: Require exact Python version match
+
+        Returns:
+            List of compatibility issues found
+        """
+        issues = []
+
+        # Check Python version
+        python_issue = cls.check_python_version(
+            snapshot.python_version,
+            current_python,
+            strict_python
+        )
+        if python_issue:
+            issues.append(python_issue)
+
+        # Check hardware if available
+        if snapshot.hardware:
+            # GPU check
+            gpu_issue = cls.check_gpu_availability(
+                snapshot.hardware.gpu_available,
+                current_hardware.gpu_available
+            )
+            if gpu_issue:
+                issues.append(gpu_issue)
+
+            # Memory check
+            if snapshot.hardware.total_memory_gb > 0:
+                memory_issue = cls.check_memory(
+                    snapshot.hardware.total_memory_gb,
+                    current_hardware.total_memory_gb
+                )
+                if memory_issue:
+                    issues.append(memory_issue)
+
+        # Log results
+        if issues:
+            logger.warning(f"Found {len(issues)} compatibility issues")
+            for issue in issues:
+                logger.warning(f"  {issue.severity.upper()}: {issue.message}")
+        else:
+            logger.info("Hardware compatibility check passed")
+
+        return issues
+
+
+# Example usage
+if __name__ == "__main__":
+    from ch02_environment_snapshot import (
+        EnvironmentSnapshot, EnvironmentCapture, HardwareInfo
+    )
+
+    # Load snapshot
+    snapshot = EnvironmentSnapshot.load(Path("environment_snapshot.json"))
+
+    # Capture current environment
+    _, python_executable, _ = EnvironmentCapture.capture_python_info()
+    current_hardware = EnvironmentCapture.capture_hardware_info()
+
+    # Check compatibility
+    issues = HardwareCompatibilityChecker.check_compatibility(
+        snapshot=snapshot,
+        current_hardware=current_hardware,
+        current_python="3.9.7",
+        strict_python=False
+    )
+
+    # Report issues
+    if issues:
+        print("Compatibility Issues:")
+        for issue in issues:
+            print(f"[{issue.severity.upper()}] {issue.category}: {issue.message}")
+            print(f"  Expected: {issue.expected}")
+            print(f"  Actual: {issue.actual}")
+    else:
+        print("Environment is compatible!")
+\end{lstlisting}
+
+\section{Bootstrap and Validation Scripts}
+
+Bootstrap scripts automate environment recreation. A well-designed bootstrap script should work on a fresh system with minimal prerequisites.
+
+\begin{lstlisting}[style=python, caption={Environment bootstrap script generator}]
+"""
+Bootstrap Script Generator
+
+Creates executable scripts that recreate environments from snapshots.
+"""
+
+from pathlib import Path
+from typing import List
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class BootstrapGenerator:
+    """Generate bootstrap scripts from environment snapshots."""
+
+    @staticmethod
+    def generate_bash_bootstrap(
+        snapshot: 'EnvironmentSnapshot',
+        output_path: Path,
+        use_venv: bool = True,
+        install_system_deps: bool = False
+    ) -> None:
+        """
+        Generate Bash bootstrap script.
+
+        Args:
+            snapshot: Environment snapshot
+            output_path: Where to save script
+            use_venv: Create virtual environment
+            install_system_deps: Include system package installation
+        """
+        script_lines = [
+            "#!/usr/bin/env bash",
+            "# Auto-generated environment bootstrap script",
+            f"# Generated from snapshot: {snapshot.snapshot_id}",
+            f"# Timestamp: {snapshot.timestamp.isoformat()}",
+            "",
+            "set -euo pipefail  # Exit on error, undefined vars",
+            "",
+            "echo 'Bootstrapping environment...'",
+            ""
+        ]
+
+        # Python version check
+        py_version = snapshot.python_version
+        script_lines.extend([
+            f"# Check Python version",
+            f"REQUIRED_PYTHON='{py_version}'",
+            "PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)",
+            "if [[ ! $PYTHON_VERSION =~ ^$REQUIRED_PYTHON ]]; then",
+            "  echo \"Error: Python $REQUIRED_PYTHON required, found $PYTHON_VERSION\"",
+            "  exit 1",
+            "fi",
+            "echo \"Python version check passed: $PYTHON_VERSION\"",
+            ""
+        ])
+
+        # Virtual environment
+        if use_venv:
+            script_lines.extend([
+                "# Create virtual environment",
+                "VENV_DIR='venv'",
+                "if [ ! -d \"$VENV_DIR\" ]; then",
+                "  echo 'Creating virtual environment...'",
+                "  python3 -m venv $VENV_DIR",
+                "fi",
+                "",
+                "# Activate virtual environment",
+                "source $VENV_DIR/bin/activate",
+                "echo 'Virtual environment activated'",
+                ""
+            ])
+
+        # Upgrade pip
+        script_lines.extend([
+            "# Upgrade pip",
+            "pip install --upgrade pip setuptools wheel",
+            ""
+        ])
+
+        # Install packages
+        pip_packages = [p for p in snapshot.packages
+                       if p.manager.value == 'pip']
+
+        if pip_packages:
+            script_lines.extend([
+                "# Install pip packages",
+                "echo 'Installing pip packages...'",
+            ])
+
+            # Create requirements.txt content
+            for pkg in pip_packages:
+                script_lines.append(
+                    f"pip install '{pkg.name}=={pkg.version}'"
+                )
+
+            script_lines.append("")
+
+        # Git checkout
+        if snapshot.git_commit:
+            script_lines.extend([
+                "# Checkout Git commit",
+                f"echo 'Checking out commit {snapshot.git_commit[:8]}...'",
+                f"git checkout {snapshot.git_commit}",
+                ""
+            ])
+
+        # Validation
+        script_lines.extend([
+            "# Validate installation",
+            "echo 'Validating installation...'",
+            "python3 -c 'import sys; print(f\"Python {sys.version}\")'",
+            "",
+            "echo 'Bootstrap complete!'"
+        ])
+
+        # Write script
+        script_content = "\n".join(script_lines)
+        output_path.write_text(script_content)
+        output_path.chmod(0o755)  # Make executable
+
+        logger.info(f"Bootstrap script written to {output_path}")
+
+    @staticmethod
+    def generate_dockerfile(
+        snapshot: 'EnvironmentSnapshot',
+        output_path: Path,
+        base_image: Optional[str] = None
+    ) -> None:
+        """
+        Generate Dockerfile from snapshot.
+
+        Args:
+            snapshot: Environment snapshot
+            output_path: Where to save Dockerfile
+            base_image: Base Docker image (default: python:{version}-slim)
+        """
+        py_version = snapshot.python_version
+        if base_image is None:
+            base_image = f"python:{py_version}-slim"
+
+        dockerfile_lines = [
+            f"# Auto-generated Dockerfile",
+            f"# From snapshot: {snapshot.snapshot_id}",
+            f"# Timestamp: {snapshot.timestamp.isoformat()}",
+            "",
+            f"FROM {base_image}",
+            "",
+            "# Set working directory",
+            "WORKDIR /app",
+            "",
+            "# Install system dependencies",
+            "RUN apt-get update && apt-get install -y \\",
+            "    git \\",
+            "    && rm -rf /var/lib/apt/lists/*",
+            "",
+            "# Copy requirements",
+            "COPY requirements.txt .",
+            "",
+            "# Install Python packages",
+            "RUN pip install --no-cache-dir --upgrade pip && \\",
+            "    pip install --no-cache-dir -r requirements.txt",
+            "",
+            "# Copy application",
+            "COPY . .",
+            "",
+        ]
+
+        # Add environment variables
+        if snapshot.env_vars:
+            dockerfile_lines.append("# Environment variables")
+            for key, value in snapshot.env_vars.items():
+                if key not in ['PATH', 'HOME']:  # Skip system vars
+                    dockerfile_lines.append(f'ENV {key}="{value}"')
+            dockerfile_lines.append("")
+
+        dockerfile_lines.extend([
+            "# Set Python to run in unbuffered mode",
+            "ENV PYTHONUNBUFFERED=1",
+            "",
+            "# Default command",
+            'CMD ["python", "--version"]'
+        ])
+
+        # Write Dockerfile
+        dockerfile_content = "\n".join(dockerfile_lines)
+        output_path.write_text(dockerfile_content)
+
+        logger.info(f"Dockerfile written to {output_path}")
+
+        # Also generate requirements.txt
+        req_path = output_path.parent / "requirements.txt"
+        pip_packages = [p for p in snapshot.packages
+                       if p.manager.value == 'pip']
+
+        requirements = [f"{p.name}=={p.version}" for p in pip_packages]
+        req_path.write_text("\n".join(requirements))
+
+        logger.info(f"requirements.txt written to {req_path}")
+
+
+# Example usage
+if __name__ == "__main__":
+    from ch02_environment_snapshot import EnvironmentSnapshot
+
+    # Load snapshot
+    snapshot = EnvironmentSnapshot.load(Path("environment_snapshot.json"))
+
+    # Generate bootstrap script
+    BootstrapGenerator.generate_bash_bootstrap(
+        snapshot=snapshot,
+        output_path=Path("bootstrap.sh"),
+        use_venv=True
+    )
+
+    # Generate Dockerfile
+    BootstrapGenerator.generate_dockerfile(
+        snapshot=snapshot,
+        output_path=Path("Dockerfile")
+    )
+
+    print("Bootstrap artifacts generated:")
+    print("  - bootstrap.sh")
+    print("  - Dockerfile")
+    print("  - requirements.txt")
+\end{lstlisting}
+
+\section{A Motivating Example: The Irreproducible Research Paper}
+
+\subsection{The Research}
+
+Dr. Elena Martinez, a computational biologist at a prestigious university, spent 18 months developing a novel machine learning model for predicting protein structures. Her results were remarkable: 12\% improvement over state-of-the-art methods. She submitted her paper to \textit{Nature}.
+
+The reviewers were impressed. One requested: ``Please provide code and data to reproduce the main results.''
+
+Elena confidently shared her Jupyter notebooks and a link to the public protein database she used.
+
+\subsection{The Reproduction Attempt}
+
+Reviewer 2, a skeptical but thorough professor, attempted to reproduce the results. After two weeks of effort, he reported:
+
+\begin{quote}
+``I cannot reproduce the reported accuracy. Using the provided code and data, I obtain 8.2\% improvement instead of the claimed 12\%. The code is poorly documented, dependencies are not specified, and several preprocessing steps appear to be missing. I cannot recommend acceptance without reproducibility.''
+\end{quote}
+
+\subsection{The Investigation}
+
+Elena was stunned. She re-ran her notebooks---and got different results. After a painful investigation, she discovered:
+
+\textbf{Root Causes}:
+
+\begin{enumerate}
+    \item \textbf{Unfixed random seeds}: Her data splitting and model initialization were non-deterministic
+
+    \item \textbf{Dependency drift}: The protein analysis library she used had updated twice since her original analysis. New versions changed distance calculations.
+
+    \item \textbf{Data versioning}: The public protein database she cited had added new entries and corrected errors. She didn't track which version she used.
+
+    \item \textbf{Undocumented preprocessing}: She manually removed 47 ``problematic'' proteins during exploration but didn't document this.
+
+    \item \textbf{Hardware differences}: Her GPU-accelerated computations produced slightly different floating-point results than CPU runs.
+
+    \item \textbf{Environment configuration}: She had set several environment variables (max\_memory, thread\_count) interactively that affected performance.
+\end{enumerate}
+
+\subsection{The Outcome}
+
+The paper was rejected. Elena spent four months:
+
+\begin{itemize}
+    \item Recreating her original environment (partially successful)
+    \item Re-running all experiments with fixed seeds
+    \item Properly versioning data
+    \item Documenting all preprocessing steps
+    \item Creating Docker containers for perfect reproducibility
+\end{itemize}
+
+The reproduced results showed 10.5\% improvement---still significant, but lower than originally claimed. The paper was eventually published, but the delay cost Elena a promotion opportunity and damaged her reputation.
+
+\subsection{The Lesson}
+
+Elena's experience is common in computational research. The absence of reproducibility infrastructure didn't just delay publication---it called into question the validity of her findings.
+
+This chapter provides the tools she needed from day one.
+
+\section{Post-Incident Reproducibility Audit}
+
+When reproduction fails, we need a systematic framework to diagnose root causes and remediate issues.
+
+\begin{lstlisting}[style=python, caption={Post-incident reproducibility audit framework}]
+"""
+Post-Incident Reproducibility Audit
+
+Systematic framework for diagnosing reproducibility failures.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class ReproducibilityFailureCategory(Enum):
+    """Categories of reproducibility failures."""
+    ENVIRONMENT_DRIFT = "environment_drift"
+    MISSING_DEPENDENCIES = "missing_dependencies"
+    DATA_VERSION_MISMATCH = "data_version_mismatch"
+    RANDOM_SEED_ISSUE = "random_seed_issue"
+    HARDWARE_DIFFERENCE = "hardware_difference"
+    UNDOCUMENTED_STEPS = "undocumented_steps"
+    CONFIGURATION_DRIFT = "configuration_drift"
+    CODE_MODIFICATION = "code_modification"
+
+
+@dataclass
+class ReproducibilityFailure:
+    """Description of a reproducibility failure."""
+    category: ReproducibilityFailureCategory
+    description: str
+    impact: str  # "critical", "major", "minor"
+    evidence: List[str] = field(default_factory=list)
+    remediation: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ReproducibilityAuditReport:
+    """Complete post-incident audit report."""
+    audit_id: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    original_snapshot: Optional[str] = None
+    attempted_snapshot: Optional[str] = None
+
+    failures: List[ReproducibilityFailure] = field(default_factory=list)
+
+    # Comparison metrics
+    result_difference: Optional[float] = None
+    environment_hash_match: bool = False
+    dependency_count_match: bool = False
+
+    # Status
+    reproducible: bool = False
+    partial_reproducibility: bool = False
+
+    def add_failure(
+        self,
+        category: ReproducibilityFailureCategory,
+        description: str,
+        impact: str,
+        evidence: List[str],
+        remediation: List[str]
+    ) -> None:
+        """Add a failure to the report."""
+        failure = ReproducibilityFailure(
+            category=category,
+            description=description,
+            impact=impact,
+            evidence=evidence,
+            remediation=remediation
+        )
+        self.failures.append(failure)
+
+    def get_critical_failures(self) -> List[ReproducibilityFailure]:
+        """Get all critical failures."""
+        return [f for f in self.failures if f.impact == "critical"]
+
+    def generate_remediation_plan(self) -> List[str]:
+        """Generate prioritized remediation plan."""
+        plan = []
+
+        # Group by impact
+        critical = [f for f in self.failures if f.impact == "critical"]
+        major = [f for f in self.failures if f.impact == "major"]
+        minor = [f for f in self.failures if f.impact == "minor"]
+
+        if critical:
+            plan.append("CRITICAL ISSUES (address immediately):")
+            for i, failure in enumerate(critical, 1):
+                plan.append(f"{i}. {failure.description}")
+                for rem in failure.remediation:
+                    plan.append(f"   - {rem}")
+
+        if major:
+            plan.append("\nMAJOR ISSUES (address soon):")
+            for i, failure in enumerate(major, 1):
+                plan.append(f"{i}. {failure.description}")
+                for rem in failure.remediation:
+                    plan.append(f"   - {rem}")
+
+        if minor:
+            plan.append("\nMINOR ISSUES (address when possible):")
+            for i, failure in enumerate(minor, 1):
+                plan.append(f"{i}. {failure.description}")
+
+        return plan
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "audit_id": self.audit_id,
+            "timestamp": self.timestamp.isoformat(),
+            "original_snapshot": self.original_snapshot,
+            "attempted_snapshot": self.attempted_snapshot,
+            "reproducible": self.reproducible,
+            "partial_reproducibility": self.partial_reproducibility,
+            "result_difference": self.result_difference,
+            "failure_count": len(self.failures),
+            "critical_failures": len(self.get_critical_failures()),
+            "failures": [
+                {
+                    "category": f.category.value,
+                    "description": f.description,
+                    "impact": f.impact,
+                    "evidence": f.evidence,
+                    "remediation": f.remediation
+                }
+                for f in self.failures
+            ],
+            "remediation_plan": self.generate_remediation_plan()
+        }
+
+
+class ReproducibilityAuditor:
+    """Conduct reproducibility audits."""
+
+    @staticmethod
+    def compare_snapshots(
+        original: 'EnvironmentSnapshot',
+        attempted: 'EnvironmentSnapshot'
+    ) -> ReproducibilityAuditReport:
+        """
+        Compare two environment snapshots to diagnose failures.
+
+        Args:
+            original: Original environment snapshot
+            attempted: Reproduction attempt snapshot
+
+        Returns:
+            ReproducibilityAuditReport with findings
+        """
+        report = ReproducibilityAuditReport(
+            audit_id=f"audit-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            original_snapshot=original.snapshot_id,
+            attempted_snapshot=attempted.snapshot_id
+        )
+
+        # Compare environment hashes
+        orig_hash = original.compute_hash()
+        attempted_hash = attempted.compute_hash()
+        report.environment_hash_match = (orig_hash == attempted_hash)
+
+        if not report.environment_hash_match:
+            logger.warning("Environment hashes do not match")
+
+        # Compare Python versions
+        if original.python_version != attempted.python_version:
+            report.add_failure(
+                category=ReproducibilityFailureCategory.ENVIRONMENT_DRIFT,
+                description="Python version mismatch",
+                impact="critical",
+                evidence=[
+                    f"Original: {original.python_version}",
+                    f"Attempted: {attempted.python_version}"
+                ],
+                remediation=[
+                    f"Install Python {original.python_version}",
+                    "Use pyenv or conda to manage Python versions"
+                ]
+            )
+
+        # Compare packages
+        orig_packages = {p.name: p.version for p in original.packages}
+        attempted_packages = {p.name: p.version for p in attempted.packages}
+
+        # Missing packages
+        missing = set(orig_packages.keys()) - set(attempted_packages.keys())
+        if missing:
+            report.add_failure(
+                category=ReproducibilityFailureCategory.MISSING_DEPENDENCIES,
+                description="Missing dependencies",
+                impact="critical",
+                evidence=[f"Missing packages: {', '.join(sorted(missing))}"],
+                remediation=[
+                    "Install missing packages from requirements.txt",
+                    "Use pip-compile to track transitive dependencies"
+                ]
+            )
+
+        # Version mismatches
+        mismatched = []
+        for name in orig_packages.keys() & attempted_packages.keys():
+            if orig_packages[name] != attempted_packages[name]:
+                mismatched.append(
+                    f"{name}: {orig_packages[name]} -> {attempted_packages[name]}"
+                )
+
+        if mismatched:
+            report.add_failure(
+                category=ReproducibilityFailureCategory.ENVIRONMENT_DRIFT,
+                description="Package version mismatches",
+                impact="critical",
+                evidence=mismatched[:10],  # Limit to first 10
+                remediation=[
+                    "Pin all dependencies to exact versions",
+                    "Use pip freeze or pip-compile",
+                    "Include hash verification in requirements.txt"
+                ]
+            )
+
+        # Compare Git commits
+        if original.git_commit and attempted.git_commit:
+            if original.git_commit != attempted.git_commit:
+                report.add_failure(
+                    category=ReproducibilityFailureCategory.CODE_MODIFICATION,
+                    description="Git commit mismatch",
+                    impact="critical",
+                    evidence=[
+                        f"Original commit: {original.git_commit[:8]}",
+                        f"Attempted commit: {attempted.git_commit[:8]}"
+                    ],
+                    remediation=[
+                        f"Check out original commit: git checkout {original.git_commit}",
+                        "Always tag or record exact commit for experiments"
+                    ]
+                )
+
+        elif original.git_commit and not attempted.git_commit:
+            report.add_failure(
+                category=ReproducibilityFailureCategory.CODE_MODIFICATION,
+                description="Original was in Git, reproduction is not",
+                impact="major",
+                evidence=["Reproduction environment not in Git repository"],
+                remediation=["Initialize Git repository and commit code"]
+            )
+
+        # Check for dirty Git status
+        if original.git_dirty:
+            report.add_failure(
+                category=ReproducibilityFailureCategory.CODE_MODIFICATION,
+                description="Original environment had uncommitted changes",
+                impact="major",
+                evidence=["git status showed uncommitted changes"],
+                remediation=[
+                    "Never run experiments with uncommitted changes",
+                    "Commit all changes before experiments",
+                    "Use Git hooks to enforce clean status"
+                ]
+            )
+
+        # Compare hardware
+        if original.hardware and attempted.hardware:
+            if original.hardware.gpu_available != attempted.hardware.gpu_available:
+                report.add_failure(
+                    category=ReproducibilityFailureCategory.HARDWARE_DIFFERENCE,
+                    description="GPU availability mismatch",
+                    impact="major",
+                    evidence=[
+                        f"Original: {'GPU' if original.hardware.gpu_available else 'CPU'}",
+                        f"Attempted: {'GPU' if attempted.hardware.gpu_available else 'CPU'}"
+                    ],
+                    remediation=[
+                        "Document hardware requirements",
+                        "Use CPU-only mode for reproducibility",
+                        "Set environment variables to enforce determinism on GPU"
+                    ]
+                )
+
+        # Determine overall reproducibility status
+        critical_failures = report.get_critical_failures()
+        report.reproducible = len(report.failures) == 0
+        report.partial_reproducibility = (
+            len(report.failures) > 0 and len(critical_failures) == 0
+        )
+
+        logger.info(f"Audit complete: {len(report.failures)} failures, "
+                   f"{len(critical_failures)} critical")
+
+        return report
+
+
+# Example usage
+if __name__ == "__main__":
+    from ch02_environment_snapshot import EnvironmentSnapshot
+
+    # Load snapshots
+    original = EnvironmentSnapshot.load(Path("original_snapshot.json"))
+    attempted = EnvironmentSnapshot.load(Path("reproduction_snapshot.json"))
+
+    # Run audit
+    auditor = ReproducibilityAuditor()
+    report = auditor.compare_snapshots(original, attempted)
+
+    # Display results
+    print(f"Reproducibility Audit Report")
+    print(f"=" * 60)
+    print(f"Reproducible: {report.reproducible}")
+    print(f"Failures: {len(report.failures)} "
+          f"({len(report.get_critical_failures())} critical)")
+
+    print(f"\nRemediation Plan:")
+    print("\n".join(report.generate_remediation_plan()))
+\end{lstlisting}
+
+\section{Integration with Git, Docker, and CI/CD}
+
+Reproducibility practices must integrate seamlessly with development workflows.
+
+\subsection{Git Integration}
+
+\begin{lstlisting}[style=shell, caption={Git hooks for reproducibility}]
+#!/usr/bin/env bash
+# .git/hooks/pre-commit
+# Ensure environment is documented before commits
+
+echo "Checking reproducibility requirements..."
+
+# Check that requirements.txt exists and is up to date
+if [ ! -f requirements.txt ]; then
+    echo "ERROR: requirements.txt not found"
+    echo "Run: pip freeze > requirements.txt"
+    exit 1
+fi
+
+# Check that environment snapshot exists
+if [ ! -f environment_snapshot.json ]; then
+    echo "WARNING: environment_snapshot.json not found"
+    echo "Consider running: python capture_snapshot.py"
+fi
+
+# Check for hardcoded paths
+if git diff --cached | grep -E '(\/home\/|C:\\Users\\|\/Users\/)'; then
+    echo "WARNING: Hardcoded paths detected in commit"
+    echo "Consider using relative paths or environment variables"
+fi
+
+echo "Reproducibility checks passed"
+\end{lstlisting}
+
+\subsection{CI/CD Pipeline}
+
+\begin{lstlisting}[style=yaml, caption={GitHub Actions workflow for reproducibility}]
+# .github/workflows/reproducibility.yml
+name: Reproducibility Checks
+
+on: [push, pull_request]
+
+jobs:
+  environment-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Verify requirements.txt exists
+      run: |
+        if [ ! -f requirements.txt ]; then
+          echo "ERROR: requirements.txt missing"
+          exit 1
+        fi
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run dependency audit
+      run: |
+        pip install safety pip-licenses
+        python -m safety check --json > safety_report.json || true
+        python audit_dependencies.py
+
+    - name: Check for dependency vulnerabilities
+      run: |
+        python -c "
+        import json
+        with open('safety_report.json') as f:
+            data = json.load(f)
+        if len(data) > 0:
+            print(f'Found {len(data)} vulnerabilities')
+            for vuln in data[:5]:  # Show first 5
+                print(f\"  - {vuln['package']}: {vuln.get('cve', 'N/A')}\")
+            exit(1)
+        "
+
+    - name: Verify environment snapshot
+      run: |
+        python capture_snapshot.py
+        # Compare with committed snapshot if exists
+
+    - name: Upload audit reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: audit-reports
+        path: |
+          safety_report.json
+          dependency_audit.json
+          environment_snapshot.json
+\end{lstlisting}
+
+\subsection{Docker Integration}
+
+\begin{lstlisting}[style=shell, caption={Docker workflow for reproducibility}]
+# Build reproducible Docker image
+docker build -t ml-project:v1.0.0 .
+
+# Tag with environment hash for tracking
+SNAPSHOT_HASH=$(python -c "from ch02_environment_snapshot import *; \
+  s = EnvironmentSnapshot.load(Path('environment_snapshot.json')); \
+  print(s.compute_hash()[:12])")
+
+docker tag ml-project:v1.0.0 ml-project:env-${SNAPSHOT_HASH}
+
+# Run with deterministic configuration
+docker run --rm \
+  -e PYTHONHASHSEED=42 \
+  -e TF_DETERMINISTIC_OPS=1 \
+  -v $(pwd)/data:/app/data:ro \
+  ml-project:v1.0.0 \
+  python train.py --seed 42
+\end{lstlisting}
+
+\section{Summary}
+
+This chapter provided a comprehensive framework for reproducible research:
+
+\begin{itemize}
+    \item \textbf{Environment snapshots} capture complete computational state with cryptographic validation
+
+    \item \textbf{Dependency management} tools track packages, scan for vulnerabilities, and enforce version pinning
+
+    \item \textbf{Computational reproducibility} requires careful seed management, hardware tracking, and metadata capture
+
+    \item \textbf{Bootstrap scripts} automate environment recreation from snapshots
+
+    \item \textbf{Post-incident audits} provide systematic frameworks for diagnosing reproduction failures
+
+    \item \textbf{Integration} with Git, Docker, and CI/CD embeds reproducibility in development workflows
+\end{itemize}
+
+Reproducibility is not a one-time checklist---it is a continuous practice. The tools in this chapter enable you to build reproducibility into every stage of the ML lifecycle.
+
+\section{Exercises}
+
+\subsection{Exercise 1: Capture and Validate Environment Snapshot [Basic]}
+
+Capture a complete environment snapshot of your current development environment.
+
+\begin{enumerate}
+    \item Install the required tools (psutil, safety, pip-licenses)
+    \item Use \texttt{EnvironmentCapture.capture\_full\_snapshot()} to capture your environment
+    \item Save the snapshot to JSON
+    \item Verify the snapshot hash
+    \item Inspect the snapshot contents and identify any sensitive information that should be filtered
+\end{enumerate}
+
+\textbf{Deliverable}: Environment snapshot JSON file and a short report on what was captured.
+
+\subsection{Exercise 2: Dependency Audit [Intermediate]}
+
+Run a complete dependency audit on a project.
+
+\begin{enumerate}
+    \item Install safety and pip-licenses
+    \item Use \texttt{DependencyAuditor.run\_full\_audit()} on your environment
+    \item Identify all critical and high-severity vulnerabilities
+    \item Generate a remediation plan
+    \item Update vulnerable dependencies
+    \item Re-run the audit and verify improvements
+\end{enumerate}
+
+\textbf{Deliverable}: Before and after audit reports with remediation actions taken.
+
+\subsection{Exercise 3: Random Seed Reproducibility [Basic]}
+
+Test random seed reproducibility across multiple runs.
+
+\begin{enumerate}
+    \item Create a simple ML pipeline (data split, model training, evaluation)
+    \item Run it 10 times without setting seeds---observe variance
+    \item Use \texttt{SeedManager.set\_global\_seed(42)} and run 10 more times
+    \item Verify that results are identical
+    \item Test with both NumPy and sklearn (or PyTorch/TensorFlow if available)
+    \item Document any remaining sources of non-determinism
+\end{enumerate}
+
+\textbf{Deliverable}: Jupyter notebook with variance analysis and reproducibility report.
+
+\subsection{Exercise 4: Bootstrap Script Testing [Intermediate]}
+
+Generate and test a bootstrap script.
+
+\begin{enumerate}
+    \item Capture an environment snapshot
+    \item Generate a bash bootstrap script using \texttt{BootstrapGenerator}
+    \item Create a fresh virtual environment or Docker container
+    \item Run the bootstrap script
+    \item Verify that the environment matches the original snapshot
+    \item Document any issues encountered
+\end{enumerate}
+
+\textbf{Deliverable}: Bootstrap script, test log, and environment comparison report.
+
+\subsection{Exercise 5: Post-Incident Reproducibility Audit [Advanced]}
+
+Conduct a mock post-incident audit.
+
+\begin{enumerate}
+    \item Create an ``original'' environment snapshot
+    \item Intentionally introduce reproducibility issues:
+    \begin{itemize}
+        \item Update some package versions
+        \item Modify code without committing
+        \item Change Python patch version
+    \end{itemize}
+    \item Capture an ``attempted reproduction'' snapshot
+    \item Use \texttt{ReproducibilityAuditor.compare\_snapshots()}
+    \item Review the audit report and remediation plan
+    \item Fix the issues and verify reproducibility
+\end{enumerate}
+
+\textbf{Deliverable}: Complete audit report with before/after snapshots and fixes.
+
+\subsection{Exercise 6: Docker Reproducibility [Intermediate]}
+
+Build a reproducible Docker environment.
+
+\begin{enumerate}
+    \item Capture environment snapshot
+    \item Generate Dockerfile using \texttt{BootstrapGenerator}
+    \item Build Docker image
+    \item Run the same ML script in Docker and locally
+    \item Compare results (should be identical)
+    \item Tag image with environment hash
+    \item Push to registry (optional)
+\end{enumerate}
+
+\textbf{Deliverable}: Dockerfile, build instructions, and result comparison.
+
+\subsection{Exercise 7: CI/CD Reproducibility Pipeline [Advanced]}
+
+Implement a CI/CD pipeline for reproducibility checks.
+
+\begin{enumerate}
+    \item Set up a Git repository with a sample ML project
+    \item Create a GitHub Actions (or GitLab CI) workflow that:
+    \begin{itemize}
+        \item Verifies requirements.txt exists
+        \item Runs dependency audit
+        \item Checks for vulnerabilities
+        \item Captures environment snapshot
+        \item Compares with committed snapshot (if exists)
+        \item Fails if critical issues found
+    \end{itemize}
+    \item Test the pipeline with intentional violations
+    \item Add a pre-commit hook for local checks
+    \item Document the workflow
+\end{enumerate}
+
+\textbf{Deliverable}: Complete CI/CD configuration, pre-commit hook, and documentation.
+
+\vspace{1cm}
+
+Complete at least Exercises 1, 2, and 3 before proceeding to Chapter 3. The advanced exercises (5 and 7) make excellent portfolio projects.

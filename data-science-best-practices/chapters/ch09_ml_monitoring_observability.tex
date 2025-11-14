@@ -1,0 +1,2740 @@
+\chapter{ML Monitoring and Observability}
+
+\section{Introduction}
+
+Production ML systems fail silently. A fraud detection model can degrade from 95\% to 65\% accuracy over weeks while still serving predictions with confidence. Data distributions shift, features become stale, and infrastructure degrades—all invisible without proper monitoring. The difference between reliable ML systems and those that erode business value is comprehensive observability.
+
+\subsection{The Silent Degradation Problem}
+
+Consider a credit scoring model deployed in January. By March, prediction latency has tripled, data drift affects 40\% of features, and accuracy has dropped 15\%—yet the system continues serving predictions. Without monitoring, this degradation goes unnoticed until business metrics collapse or regulatory audits reveal failures.
+
+\subsection{Why ML Monitoring is Different}
+
+Traditional software monitoring focuses on system metrics: CPU, memory, latency, errors. ML systems require additional layers:
+
+\begin{itemize}
+    \item \textbf{Model Performance}: Accuracy, precision, recall evolve over time
+    \item \textbf{Data Quality}: Distribution shifts, missing features, invalid ranges
+    \item \textbf{Prediction Drift}: Output distributions change independent of performance
+    \item \textbf{Feature Importance}: Critical features lose predictive power
+    \item \textbf{Business Metrics}: Model decisions impact revenue, cost, user satisfaction
+\end{itemize}
+
+\subsection{The Cost of Poor Monitoring}
+
+Industry data reveals:
+\begin{itemize}
+    \item \textbf{73\% of ML models} experience undetected degradation in first 6 months
+    \item \textbf{Silent failures} cost companies \$500K+ annually in lost revenue
+    \item \textbf{Average detection time} for model drift is 45 days without monitoring
+    \item \textbf{False alert fatigue} causes teams to ignore 60\% of monitoring alerts
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-grade monitoring systems:
+
+\begin{enumerate}
+    \item \textbf{Performance Monitoring}: Custom metrics, alerting, and trend analysis
+    \item \textbf{Data Drift Detection}: Statistical tests (KS, PSI, custom metrics)
+    \item \textbf{Model Decay Detection}: Performance degradation and retraining triggers
+    \item \textbf{Infrastructure Monitoring}: Latency, throughput, errors, resource usage
+    \item \textbf{Alert Management}: Severity levels, escalation, and fatigue prevention
+    \item \textbf{Observability}: Dashboard generation, incident response, SLO/SLI definition
+\end{enumerate}
+
+\section{Model Performance Monitoring}
+
+Performance monitoring tracks model quality metrics over time, detecting degradation before business impact.
+
+\subsection{ModelMonitor: Core Monitoring System}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Model Performance Monitor}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable
+from enum import Enum
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import logging
+import json
+import numpy as np
+from prometheus_client import (
+    Counter, Gauge, Histogram, Summary,
+    CollectorRegistry, push_to_gateway
+)
+
+logger = logging.getLogger(__name__)
+
+class MetricType(Enum):
+    """Types of metrics to monitor."""
+    COUNTER = "counter"  # Monotonically increasing
+    GAUGE = "gauge"      # Can go up or down
+    HISTOGRAM = "histogram"  # Distribution of values
+    SUMMARY = "summary"  # Quantiles over sliding window
+
+class AlertSeverity(Enum):
+    """Alert severity levels."""
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+@dataclass
+class MetricConfig:
+    """
+    Configuration for a monitored metric.
+
+    Attributes:
+        name: Metric identifier
+        metric_type: Type of metric (counter, gauge, etc.)
+        description: Human-readable description
+        labels: Labels for metric dimensions
+        thresholds: Alert thresholds by severity
+        window_size: Time window for aggregation (seconds)
+    """
+    name: str
+    metric_type: MetricType
+    description: str
+    labels: List[str] = field(default_factory=list)
+    thresholds: Dict[AlertSeverity, float] = field(default_factory=dict)
+    window_size: int = 3600  # 1 hour default
+
+@dataclass
+class Alert:
+    """
+    Monitoring alert with context.
+
+    Attributes:
+        severity: Alert severity level
+        metric_name: Name of metric that triggered alert
+        message: Alert description
+        value: Current metric value
+        threshold: Threshold that was breached
+        timestamp: When alert was generated
+        context: Additional context for debugging
+    """
+    severity: AlertSeverity
+    metric_name: str
+    message: str
+    value: float
+    threshold: float
+    timestamp: datetime
+    context: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert alert to dictionary."""
+        return {
+            "severity": self.severity.value,
+            "metric_name": self.metric_name,
+            "message": self.message,
+            "value": self.value,
+            "threshold": self.threshold,
+            "timestamp": self.timestamp.isoformat(),
+            "context": self.context
+        }
+
+class ModelMonitor:
+    """
+    Production-grade ML model monitoring system.
+
+    Integrates with Prometheus for metrics collection and supports
+    custom metrics, alerting, and trend analysis.
+
+    Example:
+        >>> monitor = ModelMonitor(
+        ...     model_name="fraud_detector",
+        ...     prometheus_gateway="localhost:9091"
+        ... )
+        >>> monitor.register_metric(MetricConfig(
+        ...     name="prediction_accuracy",
+        ...     metric_type=MetricType.GAUGE,
+        ...     description="Model prediction accuracy",
+        ...     thresholds={
+        ...         AlertSeverity.WARNING: 0.85,
+        ...         AlertSeverity.CRITICAL: 0.75
+        ...     }
+        ... ))
+        >>> monitor.record_metric("prediction_accuracy", 0.82)
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        model_version: str = "v1",
+        prometheus_gateway: Optional[str] = None,
+        alert_callback: Optional[Callable[[Alert], None]] = None,
+        enable_push: bool = True
+    ):
+        """
+        Initialize model monitor.
+
+        Args:
+            model_name: Name of model being monitored
+            model_version: Model version identifier
+            prometheus_gateway: Prometheus pushgateway address
+            alert_callback: Function to call when alert is triggered
+            enable_push: Whether to push metrics to Prometheus
+        """
+        self.model_name = model_name
+        self.model_version = model_version
+        self.prometheus_gateway = prometheus_gateway
+        self.alert_callback = alert_callback
+        self.enable_push = enable_push
+
+        # Metric storage
+        self.registry = CollectorRegistry()
+        self.metrics: Dict[str, Any] = {}
+        self.metric_configs: Dict[str, MetricConfig] = {}
+        self.metric_history: Dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=10000)
+        )
+
+        # Alert management
+        self.active_alerts: Dict[str, Alert] = {}
+        self.alert_history: List[Alert] = []
+        self.alert_suppression: Dict[str, datetime] = {}
+
+        # Performance counters
+        self._setup_default_metrics()
+
+        logger.info(
+            f"Initialized ModelMonitor for {model_name} v{model_version}"
+        )
+
+    def _setup_default_metrics(self):
+        """Set up default monitoring metrics."""
+        # Prediction counter
+        self.predictions_total = Counter(
+            'model_predictions_total',
+            'Total number of predictions',
+            ['model_name', 'model_version', 'status'],
+            registry=self.registry
+        )
+
+        # Prediction latency
+        self.prediction_latency = Histogram(
+            'model_prediction_latency_seconds',
+            'Prediction latency in seconds',
+            ['model_name', 'model_version'],
+            buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+            registry=self.registry
+        )
+
+        # Prediction confidence
+        self.prediction_confidence = Summary(
+            'model_prediction_confidence',
+            'Distribution of prediction confidence scores',
+            ['model_name', 'model_version'],
+            registry=self.registry
+        )
+
+        # Active predictions
+        self.active_predictions = Gauge(
+            'model_active_predictions',
+            'Number of predictions currently being processed',
+            ['model_name', 'model_version'],
+            registry=self.registry
+        )
+
+    def register_metric(self, config: MetricConfig):
+        """
+        Register a custom metric for monitoring.
+
+        Args:
+            config: Metric configuration
+        """
+        self.metric_configs[config.name] = config
+
+        # Create Prometheus metric
+        labels = ['model_name', 'model_version'] + config.labels
+
+        if config.metric_type == MetricType.COUNTER:
+            metric = Counter(
+                f'model_{config.name}',
+                config.description,
+                labels,
+                registry=self.registry
+            )
+        elif config.metric_type == MetricType.GAUGE:
+            metric = Gauge(
+                f'model_{config.name}',
+                config.description,
+                labels,
+                registry=self.registry
+            )
+        elif config.metric_type == MetricType.HISTOGRAM:
+            metric = Histogram(
+                f'model_{config.name}',
+                config.description,
+                labels,
+                registry=self.registry
+            )
+        else:  # SUMMARY
+            metric = Summary(
+                f'model_{config.name}',
+                config.description,
+                labels,
+                registry=self.registry
+            )
+
+        self.metrics[config.name] = metric
+        logger.info(f"Registered metric: {config.name}")
+
+    def record_metric(
+        self,
+        metric_name: str,
+        value: float,
+        labels: Optional[Dict[str, str]] = None
+    ):
+        """
+        Record a metric value.
+
+        Args:
+            metric_name: Name of metric to record
+            value: Metric value
+            labels: Optional label values
+        """
+        if metric_name not in self.metrics:
+            logger.warning(f"Metric {metric_name} not registered")
+            return
+
+        # Store in history
+        self.metric_history[metric_name].append({
+            'timestamp': datetime.now(),
+            'value': value,
+            'labels': labels or {}
+        })
+
+        # Update Prometheus metric
+        metric = self.metrics[metric_name]
+        label_values = {
+            'model_name': self.model_name,
+            'model_version': self.model_version,
+            **(labels or {})
+        }
+
+        config = self.metric_configs[metric_name]
+        if config.metric_type == MetricType.COUNTER:
+            metric.labels(**label_values).inc(value)
+        elif config.metric_type == MetricType.GAUGE:
+            metric.labels(**label_values).set(value)
+        else:  # HISTOGRAM or SUMMARY
+            metric.labels(**label_values).observe(value)
+
+        # Check thresholds
+        self._check_thresholds(metric_name, value)
+
+        # Push to Prometheus if enabled
+        if self.enable_push and self.prometheus_gateway:
+            try:
+                push_to_gateway(
+                    self.prometheus_gateway,
+                    job=f'model_monitor_{self.model_name}',
+                    registry=self.registry
+                )
+            except Exception as e:
+                logger.error(f"Failed to push to Prometheus: {e}")
+
+    def _check_thresholds(self, metric_name: str, value: float):
+        """
+        Check if metric value breaches thresholds.
+
+        Args:
+            metric_name: Name of metric
+            value: Current value
+        """
+        config = self.metric_configs.get(metric_name)
+        if not config or not config.thresholds:
+            return
+
+        # Check from highest to lowest severity
+        severities = [
+            AlertSeverity.CRITICAL,
+            AlertSeverity.ERROR,
+            AlertSeverity.WARNING,
+            AlertSeverity.INFO
+        ]
+
+        for severity in severities:
+            if severity not in config.thresholds:
+                continue
+
+            threshold = config.thresholds[severity]
+
+            # For performance metrics, breach is below threshold
+            # For error metrics, breach is above threshold
+            # Determine based on metric name conventions
+            is_error_metric = any(
+                term in metric_name.lower()
+                for term in ['error', 'failure', 'latency', 'drift']
+            )
+
+            breached = (
+                value > threshold if is_error_metric
+                else value < threshold
+            )
+
+            if breached:
+                self._trigger_alert(
+                    severity,
+                    metric_name,
+                    value,
+                    threshold,
+                    is_error_metric
+                )
+                break  # Only trigger highest severity
+
+    def _trigger_alert(
+        self,
+        severity: AlertSeverity,
+        metric_name: str,
+        value: float,
+        threshold: float,
+        is_error_metric: bool
+    ):
+        """
+        Trigger a monitoring alert.
+
+        Args:
+            severity: Alert severity
+            metric_name: Name of metric
+            value: Current value
+            threshold: Breached threshold
+            is_error_metric: Whether this is an error-type metric
+        """
+        # Check alert suppression (prevent spam)
+        suppression_key = f"{metric_name}_{severity.value}"
+        if suppression_key in self.alert_suppression:
+            last_alert = self.alert_suppression[suppression_key]
+            if datetime.now() - last_alert < timedelta(minutes=15):
+                return  # Suppress alert
+
+        # Create alert
+        direction = "above" if is_error_metric else "below"
+        alert = Alert(
+            severity=severity,
+            metric_name=metric_name,
+            message=(
+                f"{metric_name} is {direction} threshold: "
+                f"{value:.4f} (threshold: {threshold:.4f})"
+            ),
+            value=value,
+            threshold=threshold,
+            timestamp=datetime.now(),
+            context={
+                'model_name': self.model_name,
+                'model_version': self.model_version,
+                'history': list(self.metric_history[metric_name])[-10:]
+            }
+        )
+
+        # Store alert
+        self.active_alerts[metric_name] = alert
+        self.alert_history.append(alert)
+        self.alert_suppression[suppression_key] = datetime.now()
+
+        # Log alert
+        logger.log(
+            logging.CRITICAL if severity == AlertSeverity.CRITICAL
+            else logging.ERROR if severity == AlertSeverity.ERROR
+            else logging.WARNING,
+            f"ALERT: {alert.message}"
+        )
+
+        # Call alert callback
+        if self.alert_callback:
+            try:
+                self.alert_callback(alert)
+            except Exception as e:
+                logger.error(f"Alert callback failed: {e}")
+
+    def clear_alert(self, metric_name: str):
+        """
+        Clear an active alert.
+
+        Args:
+            metric_name: Name of metric
+        """
+        if metric_name in self.active_alerts:
+            del self.active_alerts[metric_name]
+            logger.info(f"Cleared alert for {metric_name}")
+
+    def get_metric_history(
+        self,
+        metric_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical values for a metric.
+
+        Args:
+            metric_name: Name of metric
+            start_time: Start of time range
+            end_time: End of time range
+
+        Returns:
+            List of metric values with timestamps
+        """
+        if metric_name not in self.metric_history:
+            return []
+
+        history = list(self.metric_history[metric_name])
+
+        if start_time:
+            history = [
+                h for h in history
+                if h['timestamp'] >= start_time
+            ]
+
+        if end_time:
+            history = [
+                h for h in history
+                if h['timestamp'] <= end_time
+            ]
+
+        return history
+
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of all monitored metrics.
+
+        Returns:
+            Dictionary with metric summaries
+        """
+        summary = {
+            'model_name': self.model_name,
+            'model_version': self.model_version,
+            'timestamp': datetime.now().isoformat(),
+            'metrics': {},
+            'active_alerts': len(self.active_alerts),
+            'total_alerts': len(self.alert_history)
+        }
+
+        for metric_name, history in self.metric_history.items():
+            if not history:
+                continue
+
+            values = [h['value'] for h in history]
+            summary['metrics'][metric_name] = {
+                'current': values[-1],
+                'mean': np.mean(values),
+                'std': np.std(values),
+                'min': np.min(values),
+                'max': np.max(values),
+                'count': len(values)
+            }
+
+        return summary
+
+    def record_prediction(
+        self,
+        latency: float,
+        confidence: float,
+        success: bool = True
+    ):
+        """
+        Record a model prediction with standard metrics.
+
+        Args:
+            latency: Prediction latency in seconds
+            confidence: Prediction confidence score
+            success: Whether prediction succeeded
+        """
+        status = 'success' if success else 'error'
+
+        self.predictions_total.labels(
+            model_name=self.model_name,
+            model_version=self.model_version,
+            status=status
+        ).inc()
+
+        self.prediction_latency.labels(
+            model_name=self.model_name,
+            model_version=self.model_version
+        ).observe(latency)
+
+        self.prediction_confidence.labels(
+            model_name=self.model_name,
+            model_version=self.model_version
+        ).observe(confidence)
+\end{lstlisting}
+
+\subsection{Custom Metrics and Alerting}
+
+The ModelMonitor supports custom metrics with flexible thresholds:
+
+\begin{lstlisting}[language=Python, caption={Custom Metrics Configuration}]
+# Configure performance monitoring
+monitor = ModelMonitor(
+    model_name="fraud_detector",
+    model_version="v2.1",
+    prometheus_gateway="localhost:9091"
+)
+
+# Register accuracy metric
+monitor.register_metric(MetricConfig(
+    name="accuracy",
+    metric_type=MetricType.GAUGE,
+    description="Model prediction accuracy",
+    thresholds={
+        AlertSeverity.WARNING: 0.85,
+        AlertSeverity.CRITICAL: 0.75
+    },
+    window_size=3600  # 1 hour
+))
+
+# Register precision and recall
+monitor.register_metric(MetricConfig(
+    name="precision",
+    metric_type=MetricType.GAUGE,
+    description="Precision for fraud class",
+    labels=["class"],
+    thresholds={
+        AlertSeverity.WARNING: 0.80,
+        AlertSeverity.CRITICAL: 0.70
+    }
+))
+
+monitor.register_metric(MetricConfig(
+    name="recall",
+    metric_type=MetricType.GAUGE,
+    description="Recall for fraud class",
+    labels=["class"],
+    thresholds={
+        AlertSeverity.WARNING: 0.75,
+        AlertSeverity.CRITICAL: 0.65
+    }
+))
+
+# Register error rate
+monitor.register_metric(MetricConfig(
+    name="error_rate",
+    metric_type=MetricType.GAUGE,
+    description="Prediction error rate",
+    thresholds={
+        AlertSeverity.WARNING: 0.05,  # 5% errors
+        AlertSeverity.CRITICAL: 0.10  # 10% errors
+    }
+))
+
+# Record metrics during prediction
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def monitor_prediction(monitor: ModelMonitor):
+    """Context manager for monitoring predictions."""
+    start_time = time.time()
+    monitor.active_predictions.labels(
+        model_name=monitor.model_name,
+        model_version=monitor.model_version
+    ).inc()
+
+    try:
+        yield
+        success = True
+    except Exception:
+        success = False
+        raise
+    finally:
+        latency = time.time() - start_time
+        monitor.active_predictions.labels(
+            model_name=monitor.model_name,
+            model_version=monitor.model_version
+        ).dec()
+
+        # Record latency
+        monitor.prediction_latency.labels(
+            model_name=monitor.model_name,
+            model_version=monitor.model_version
+        ).observe(latency)
+
+        # Record success/failure
+        status = 'success' if success else 'error'
+        monitor.predictions_total.labels(
+            model_name=monitor.model_name,
+            model_version=monitor.model_version,
+            status=status
+        ).inc()
+
+# Usage in prediction pipeline
+def make_prediction(features, monitor):
+    """Make prediction with monitoring."""
+    with monitor_prediction(monitor):
+        prediction = model.predict(features)
+        confidence = model.predict_proba(features).max()
+
+        monitor.prediction_confidence.labels(
+            model_name=monitor.model_name,
+            model_version=monitor.model_version
+        ).observe(confidence)
+
+        return prediction
+\end{lstlisting}
+
+\section{Data Drift Detection}
+
+Data drift occurs when input feature distributions change over time, degrading model performance.
+
+\subsection{DriftDetector: Statistical Drift Detection}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Drift Detection System}]
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import numpy as np
+import pandas as pd
+from scipy import stats
+from scipy.spatial.distance import jensenshannon
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DriftType(Enum):
+    """Types of drift detection methods."""
+    KS_TEST = "kolmogorov_smirnov"  # For continuous features
+    CHI_SQUARE = "chi_square"  # For categorical features
+    PSI = "population_stability_index"  # For any features
+    JS_DIVERGENCE = "jensen_shannon"  # For distributions
+    WASSERSTEIN = "wasserstein"  # For continuous distributions
+
+@dataclass
+class DriftResult:
+    """
+    Result of drift detection analysis.
+
+    Attributes:
+        feature_name: Name of feature analyzed
+        drift_detected: Whether drift was detected
+        drift_score: Numeric drift score
+        p_value: Statistical significance (if applicable)
+        drift_type: Method used for detection
+        reference_stats: Statistics of reference distribution
+        current_stats: Statistics of current distribution
+        threshold: Threshold used for detection
+    """
+    feature_name: str
+    drift_detected: bool
+    drift_score: float
+    p_value: Optional[float]
+    drift_type: DriftType
+    reference_stats: Dict[str, float]
+    current_stats: Dict[str, float]
+    threshold: float
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary."""
+        return {
+            'feature_name': self.feature_name,
+            'drift_detected': self.drift_detected,
+            'drift_score': self.drift_score,
+            'p_value': self.p_value,
+            'drift_type': self.drift_type.value,
+            'reference_stats': self.reference_stats,
+            'current_stats': self.current_stats,
+            'threshold': self.threshold
+        }
+
+class DriftDetector:
+    """
+    Statistical drift detection for ML features.
+
+    Supports multiple drift detection methods:
+    - Kolmogorov-Smirnov test for continuous features
+    - Chi-square test for categorical features
+    - Population Stability Index (PSI)
+    - Jensen-Shannon divergence
+    - Wasserstein distance
+
+    Example:
+        >>> detector = DriftDetector()
+        >>> detector.fit(reference_data)
+        >>> results = detector.detect_drift(current_data)
+        >>> for result in results:
+        ...     if result.drift_detected:
+        ...         print(f"Drift in {result.feature_name}")
+    """
+
+    def __init__(
+        self,
+        categorical_features: Optional[List[str]] = None,
+        ks_threshold: float = 0.05,
+        chi_square_threshold: float = 0.05,
+        psi_threshold: float = 0.2,
+        js_threshold: float = 0.1,
+        wasserstein_threshold: float = 0.1,
+        n_bins: int = 10
+    ):
+        """
+        Initialize drift detector.
+
+        Args:
+            categorical_features: List of categorical feature names
+            ks_threshold: P-value threshold for KS test
+            chi_square_threshold: P-value threshold for chi-square
+            psi_threshold: PSI threshold (0.1=small, 0.2=medium drift)
+            js_threshold: Jensen-Shannon divergence threshold
+            wasserstein_threshold: Wasserstein distance threshold
+            n_bins: Number of bins for discretization
+        """
+        self.categorical_features = categorical_features or []
+        self.ks_threshold = ks_threshold
+        self.chi_square_threshold = chi_square_threshold
+        self.psi_threshold = psi_threshold
+        self.js_threshold = js_threshold
+        self.wasserstein_threshold = wasserstein_threshold
+        self.n_bins = n_bins
+
+        # Reference distribution storage
+        self.reference_distributions: Dict[str, Dict] = {}
+        self.is_fitted = False
+
+    def fit(self, reference_data: pd.DataFrame):
+        """
+        Fit detector on reference data distribution.
+
+        Args:
+            reference_data: Reference dataset (training data)
+        """
+        logger.info("Fitting drift detector on reference data")
+
+        for column in reference_data.columns:
+            if column in self.categorical_features:
+                # Store categorical distribution
+                value_counts = reference_data[column].value_counts(
+                    normalize=True
+                )
+                self.reference_distributions[column] = {
+                    'type': 'categorical',
+                    'distribution': value_counts.to_dict(),
+                    'categories': set(value_counts.index)
+                }
+            else:
+                # Store continuous distribution
+                values = reference_data[column].dropna()
+                self.reference_distributions[column] = {
+                    'type': 'continuous',
+                    'mean': float(values.mean()),
+                    'std': float(values.std()),
+                    'min': float(values.min()),
+                    'max': float(values.max()),
+                    'values': values.values,
+                    'histogram': np.histogram(
+                        values,
+                        bins=self.n_bins
+                    )
+                }
+
+        self.is_fitted = True
+        logger.info(
+            f"Fitted on {len(self.reference_distributions)} features"
+        )
+
+    def detect_drift(
+        self,
+        current_data: pd.DataFrame,
+        methods: Optional[List[DriftType]] = None
+    ) -> List[DriftResult]:
+        """
+        Detect drift in current data vs reference.
+
+        Args:
+            current_data: Current dataset to check for drift
+            methods: Specific drift detection methods to use
+
+        Returns:
+            List of drift detection results
+        """
+        if not self.is_fitted:
+            raise ValueError("Detector not fitted. Call fit() first.")
+
+        if methods is None:
+            methods = [DriftType.KS_TEST, DriftType.PSI]
+
+        results = []
+
+        for column in current_data.columns:
+            if column not in self.reference_distributions:
+                logger.warning(f"Column {column} not in reference data")
+                continue
+
+            ref_dist = self.reference_distributions[column]
+
+            if ref_dist['type'] == 'categorical':
+                # Categorical drift detection
+                if DriftType.CHI_SQUARE in methods:
+                    result = self._chi_square_test(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+
+                if DriftType.PSI in methods:
+                    result = self._psi_categorical(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+            else:
+                # Continuous drift detection
+                if DriftType.KS_TEST in methods:
+                    result = self._ks_test(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+
+                if DriftType.PSI in methods:
+                    result = self._psi_continuous(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+
+                if DriftType.JS_DIVERGENCE in methods:
+                    result = self._js_divergence(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+
+                if DriftType.WASSERSTEIN in methods:
+                    result = self._wasserstein_distance(
+                        column,
+                        current_data[column],
+                        ref_dist
+                    )
+                    results.append(result)
+
+        return results
+
+    def _ks_test(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Kolmogorov-Smirnov test for continuous features.
+
+        Tests null hypothesis that distributions are the same.
+        """
+        current_clean = current_values.dropna()
+        reference_values = ref_dist['values']
+
+        # Perform KS test
+        statistic, p_value = stats.ks_2samp(
+            reference_values,
+            current_clean
+        )
+
+        drift_detected = p_value < self.ks_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=statistic,
+            p_value=p_value,
+            drift_type=DriftType.KS_TEST,
+            reference_stats={
+                'mean': ref_dist['mean'],
+                'std': ref_dist['std']
+            },
+            current_stats={
+                'mean': float(current_clean.mean()),
+                'std': float(current_clean.std())
+            },
+            threshold=self.ks_threshold
+        )
+
+    def _chi_square_test(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Chi-square test for categorical features.
+
+        Tests independence of distributions.
+        """
+        # Get current distribution
+        current_counts = current_values.value_counts()
+        ref_distribution = ref_dist['distribution']
+
+        # Align categories
+        all_categories = set(current_counts.index) | ref_dist['categories']
+
+        observed = []
+        expected = []
+        total_current = len(current_values)
+
+        for category in all_categories:
+            observed.append(current_counts.get(category, 0))
+            expected.append(
+                ref_distribution.get(category, 0) * total_current
+            )
+
+        # Perform chi-square test
+        observed = np.array(observed)
+        expected = np.array(expected)
+
+        # Add small constant to avoid division by zero
+        expected = np.where(expected == 0, 0.001, expected)
+
+        statistic, p_value = stats.chisquare(observed, expected)
+
+        drift_detected = p_value < self.chi_square_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=statistic,
+            p_value=p_value,
+            drift_type=DriftType.CHI_SQUARE,
+            reference_stats={'distribution': ref_distribution},
+            current_stats={
+                'distribution': current_counts.to_dict()
+            },
+            threshold=self.chi_square_threshold
+        )
+
+    def _psi_continuous(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Population Stability Index for continuous features.
+
+        PSI = sum((current% - reference%) * ln(current% / reference%))
+        """
+        current_clean = current_values.dropna()
+
+        # Use reference histogram bins
+        ref_counts, ref_bins = ref_dist['histogram']
+
+        # Bin current data with same bins
+        current_counts, _ = np.histogram(
+            current_clean,
+            bins=ref_bins
+        )
+
+        # Calculate percentages
+        ref_pct = ref_counts / ref_counts.sum()
+        current_pct = current_counts / current_counts.sum()
+
+        # Add small constant to avoid log(0)
+        ref_pct = np.where(ref_pct == 0, 0.0001, ref_pct)
+        current_pct = np.where(current_pct == 0, 0.0001, current_pct)
+
+        # Calculate PSI
+        psi = np.sum(
+            (current_pct - ref_pct) * np.log(current_pct / ref_pct)
+        )
+
+        drift_detected = psi > self.psi_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=psi,
+            p_value=None,
+            drift_type=DriftType.PSI,
+            reference_stats={
+                'mean': ref_dist['mean'],
+                'std': ref_dist['std']
+            },
+            current_stats={
+                'mean': float(current_clean.mean()),
+                'std': float(current_clean.std())
+            },
+            threshold=self.psi_threshold
+        )
+
+    def _psi_categorical(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Population Stability Index for categorical features.
+        """
+        current_pct = current_values.value_counts(normalize=True)
+        ref_pct = pd.Series(ref_dist['distribution'])
+
+        # Align indices
+        all_categories = set(current_pct.index) | set(ref_pct.index)
+
+        psi = 0.0
+        for category in all_categories:
+            current_p = current_pct.get(category, 0.0001)
+            ref_p = ref_pct.get(category, 0.0001)
+
+            psi += (current_p - ref_p) * np.log(current_p / ref_p)
+
+        drift_detected = psi > self.psi_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=psi,
+            p_value=None,
+            drift_type=DriftType.PSI,
+            reference_stats={'distribution': ref_dist['distribution']},
+            current_stats={'distribution': current_pct.to_dict()},
+            threshold=self.psi_threshold
+        )
+
+    def _js_divergence(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Jensen-Shannon divergence for continuous features.
+
+        Symmetric measure of distribution similarity.
+        """
+        current_clean = current_values.dropna()
+
+        # Use reference histogram bins
+        ref_counts, ref_bins = ref_dist['histogram']
+        current_counts, _ = np.histogram(
+            current_clean,
+            bins=ref_bins
+        )
+
+        # Normalize to probabilities
+        ref_probs = ref_counts / ref_counts.sum()
+        current_probs = current_counts / current_counts.sum()
+
+        # Calculate JS divergence
+        js_div = jensenshannon(ref_probs, current_probs)
+
+        drift_detected = js_div > self.js_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=js_div,
+            p_value=None,
+            drift_type=DriftType.JS_DIVERGENCE,
+            reference_stats={
+                'mean': ref_dist['mean'],
+                'std': ref_dist['std']
+            },
+            current_stats={
+                'mean': float(current_clean.mean()),
+                'std': float(current_clean.std())
+            },
+            threshold=self.js_threshold
+        )
+
+    def _wasserstein_distance(
+        self,
+        feature_name: str,
+        current_values: pd.Series,
+        ref_dist: Dict
+    ) -> DriftResult:
+        """
+        Wasserstein distance (Earth Mover's Distance).
+
+        Measures the minimum cost to transform one distribution
+        into another.
+        """
+        current_clean = current_values.dropna()
+        reference_values = ref_dist['values']
+
+        # Calculate Wasserstein distance
+        distance = stats.wasserstein_distance(
+            reference_values,
+            current_clean
+        )
+
+        # Normalize by reference std for interpretability
+        normalized_distance = distance / (ref_dist['std'] + 1e-10)
+
+        drift_detected = normalized_distance > self.wasserstein_threshold
+
+        return DriftResult(
+            feature_name=feature_name,
+            drift_detected=drift_detected,
+            drift_score=normalized_distance,
+            p_value=None,
+            drift_type=DriftType.WASSERSTEIN,
+            reference_stats={
+                'mean': ref_dist['mean'],
+                'std': ref_dist['std']
+            },
+            current_stats={
+                'mean': float(current_clean.mean()),
+                'std': float(current_clean.std())
+            },
+            threshold=self.wasserstein_threshold
+        )
+
+    def get_drift_summary(
+        self,
+        results: List[DriftResult]
+    ) -> Dict[str, Any]:
+        """
+        Generate summary of drift detection results.
+
+        Args:
+            results: List of drift detection results
+
+        Returns:
+            Summary dictionary with statistics
+        """
+        total_features = len(set(r.feature_name for r in results))
+        drifted_features = len(
+            set(r.feature_name for r in results if r.drift_detected)
+        )
+
+        # Group by drift type
+        by_type = defaultdict(list)
+        for result in results:
+            by_type[result.drift_type].append(result)
+
+        type_summaries = {}
+        for drift_type, type_results in by_type.items():
+            drifted = sum(1 for r in type_results if r.drift_detected)
+            type_summaries[drift_type.value] = {
+                'total_checked': len(type_results),
+                'drifted': drifted,
+                'drift_rate': drifted / len(type_results)
+            }
+
+        return {
+            'total_features': total_features,
+            'drifted_features': drifted_features,
+            'drift_rate': drifted_features / total_features,
+            'by_type': type_summaries,
+            'drifted_feature_names': list(
+                set(r.feature_name for r in results if r.drift_detected)
+            )
+        }
+\end{lstlisting}
+
+\subsection{Drift Detection in Practice}
+
+\begin{lstlisting}[language=Python, caption={Implementing Drift Detection}]
+# Initialize drift detector
+drift_detector = DriftDetector(
+    categorical_features=['country', 'product_category'],
+    ks_threshold=0.05,
+    psi_threshold=0.2
+)
+
+# Fit on training/reference data
+drift_detector.fit(reference_data)
+
+# Monitor production data periodically
+def monitor_data_drift(current_batch: pd.DataFrame):
+    """Monitor current batch for drift."""
+    # Detect drift using multiple methods
+    results = drift_detector.detect_drift(
+        current_batch,
+        methods=[
+            DriftType.KS_TEST,
+            DriftType.PSI,
+            DriftType.JS_DIVERGENCE
+        ]
+    )
+
+    # Get summary
+    summary = drift_detector.get_drift_summary(results)
+
+    # Log results
+    logger.info(f"Drift Summary: {summary}")
+
+    # Alert on significant drift
+    if summary['drift_rate'] > 0.3:  # 30% of features drifting
+        logger.warning(
+            f"Significant drift detected: {summary['drift_rate']:.1%} "
+            f"of features affected"
+        )
+
+        # Log specific drifted features
+        for result in results:
+            if result.drift_detected:
+                logger.warning(
+                    f"  {result.feature_name}: "
+                    f"{result.drift_type.value} = {result.drift_score:.4f} "
+                    f"(threshold: {result.threshold})"
+                )
+
+        # Trigger retraining if drift is severe
+        if summary['drift_rate'] > 0.5:
+            logger.critical("Severe drift detected - triggering retrain")
+            trigger_model_retraining()
+
+    return results, summary
+
+# Schedule periodic drift checks
+import schedule
+
+def drift_check_job():
+    """Scheduled drift check."""
+    # Get recent production data
+    current_batch = get_recent_production_data(hours=24)
+
+    # Check for drift
+    results, summary = monitor_data_drift(current_batch)
+
+    # Store results for trend analysis
+    store_drift_metrics(summary)
+
+# Run drift check every 6 hours
+schedule.every(6).hours.do(drift_check_job)
+\end{lstlisting}
+
+\section{Performance Tracking and Model Decay}
+
+Model performance degrades over time due to data drift, concept drift, or changing patterns. Detecting decay early enables timely retraining.
+
+\subsection{PerformanceTracker: Sliding Window Analysis}
+
+\begin{lstlisting}[language=Python, caption={Performance Tracking with Decay Detection}]
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from collections import deque
+import numpy as np
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class PerformanceWindow:
+    """
+    Performance metrics for a time window.
+
+    Attributes:
+        start_time: Window start
+        end_time: Window end
+        metrics: Dictionary of metric values
+        sample_count: Number of samples in window
+    """
+    start_time: datetime
+    end_time: datetime
+    metrics: Dict[str, float]
+    sample_count: int
+
+@dataclass
+class DecayDetectionResult:
+    """
+    Result of model decay analysis.
+
+    Attributes:
+        metric_name: Name of metric analyzed
+        decay_detected: Whether decay was detected
+        current_value: Current metric value
+        baseline_value: Baseline/reference value
+        change_percent: Percentage change from baseline
+        trend: Trend direction ('improving', 'stable', 'declining')
+        confidence: Statistical confidence (0-1)
+        trigger_retrain: Whether retraining should be triggered
+    """
+    metric_name: str
+    decay_detected: bool
+    current_value: float
+    baseline_value: float
+    change_percent: float
+    trend: str
+    confidence: float
+    trigger_retrain: bool
+
+class PerformanceTracker:
+    """
+    Track model performance with sliding window analysis.
+
+    Detects performance decay and triggers retraining when needed.
+
+    Example:
+        >>> tracker = PerformanceTracker(
+        ...     window_size=timedelta(days=7),
+        ...     decay_threshold=0.05
+        ... )
+        >>> tracker.record_prediction(
+        ...     y_true=1,
+        ...     y_pred=1,
+        ...     y_prob=0.95
+        ... )
+        >>> decay_result = tracker.check_decay()
+    """
+
+    def __init__(
+        self,
+        window_size: timedelta = timedelta(days=7),
+        slide_interval: timedelta = timedelta(hours=1),
+        decay_threshold: float = 0.05,
+        min_samples: int = 100,
+        retrain_threshold: float = 0.10
+    ):
+        """
+        Initialize performance tracker.
+
+        Args:
+            window_size: Size of sliding window
+            slide_interval: How often to compute metrics
+            decay_threshold: Threshold for decay detection (5% drop)
+            min_samples: Minimum samples for reliable metrics
+            retrain_threshold: Threshold for triggering retrain (10% drop)
+        """
+        self.window_size = window_size
+        self.slide_interval = slide_interval
+        self.decay_threshold = decay_threshold
+        self.min_samples = min_samples
+        self.retrain_threshold = retrain_threshold
+
+        # Prediction storage
+        self.predictions: deque = deque()
+
+        # Performance windows
+        self.windows: List[PerformanceWindow] = []
+
+        # Baseline metrics (from initial period)
+        self.baseline_metrics: Optional[Dict[str, float]] = None
+        self.baseline_set = False
+
+        # Last computation time
+        self.last_computation = datetime.now()
+
+    def record_prediction(
+        self,
+        y_true: Any,
+        y_pred: Any,
+        y_prob: Optional[np.ndarray] = None,
+        metadata: Optional[Dict] = None
+    ):
+        """
+        Record a prediction for tracking.
+
+        Args:
+            y_true: Ground truth label
+            y_pred: Predicted label
+            y_prob: Prediction probabilities (if available)
+            metadata: Additional metadata
+        """
+        self.predictions.append({
+            'timestamp': datetime.now(),
+            'y_true': y_true,
+            'y_pred': y_pred,
+            'y_prob': y_prob,
+            'metadata': metadata or {}
+        })
+
+        # Compute metrics if interval elapsed
+        if datetime.now() - self.last_computation >= self.slide_interval:
+            self._compute_window_metrics()
+
+    def _compute_window_metrics(self):
+        """Compute metrics for current window."""
+        now = datetime.now()
+        window_start = now - self.window_size
+
+        # Filter predictions in window
+        window_preds = [
+            p for p in self.predictions
+            if p['timestamp'] >= window_start
+        ]
+
+        if len(window_preds) < self.min_samples:
+            logger.debug(
+                f"Insufficient samples in window: {len(window_preds)}"
+            )
+            return
+
+        # Extract arrays
+        y_true = np.array([p['y_true'] for p in window_preds])
+        y_pred = np.array([p['y_pred'] for p in window_preds])
+
+        # Compute metrics
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score,
+            f1_score, roc_auc_score
+        )
+
+        metrics = {
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(
+                y_true, y_pred, average='weighted', zero_division=0
+            ),
+            'recall': recall_score(
+                y_true, y_pred, average='weighted', zero_division=0
+            ),
+            'f1': f1_score(
+                y_true, y_pred, average='weighted', zero_division=0
+            )
+        }
+
+        # Add AUC if probabilities available
+        if window_preds[0]['y_prob'] is not None:
+            y_prob = np.array([p['y_prob'] for p in window_preds])
+            try:
+                metrics['auc'] = roc_auc_score(
+                    y_true, y_prob, average='weighted', multi_class='ovr'
+                )
+            except ValueError:
+                pass  # Not enough classes
+
+        # Create window
+        window = PerformanceWindow(
+            start_time=window_start,
+            end_time=now,
+            metrics=metrics,
+            sample_count=len(window_preds)
+        )
+
+        self.windows.append(window)
+        self.last_computation = now
+
+        # Set baseline if first window
+        if not self.baseline_set and len(self.windows) >= 3:
+            # Use average of first 3 windows as baseline
+            self._set_baseline()
+
+        # Clean old windows
+        self._clean_old_windows()
+
+        logger.debug(f"Computed window metrics: {metrics}")
+
+    def _set_baseline(self):
+        """Set baseline metrics from initial windows."""
+        baseline_windows = self.windows[:3]
+
+        metric_names = baseline_windows[0].metrics.keys()
+        self.baseline_metrics = {}
+
+        for metric_name in metric_names:
+            values = [
+                w.metrics[metric_name]
+                for w in baseline_windows
+            ]
+            self.baseline_metrics[metric_name] = np.mean(values)
+
+        self.baseline_set = True
+        logger.info(f"Baseline metrics set: {self.baseline_metrics}")
+
+    def _clean_old_windows(self):
+        """Remove windows older than needed for analysis."""
+        # Keep last 30 days of windows
+        cutoff = datetime.now() - timedelta(days=30)
+        self.windows = [
+            w for w in self.windows
+            if w.end_time >= cutoff
+        ]
+
+        # Clean old predictions
+        cutoff_preds = datetime.now() - self.window_size
+        while self.predictions and self.predictions[0]['timestamp'] < cutoff_preds:
+            self.predictions.popleft()
+
+    def check_decay(self) -> List[DecayDetectionResult]:
+        """
+        Check for performance decay.
+
+        Returns:
+            List of decay detection results
+        """
+        if not self.baseline_set or not self.windows:
+            return []
+
+        # Get recent window metrics
+        recent_window = self.windows[-1]
+
+        results = []
+
+        for metric_name, baseline_value in self.baseline_metrics.items():
+            current_value = recent_window.metrics[metric_name]
+
+            # Calculate change
+            change_percent = (
+                (current_value - baseline_value) / baseline_value
+            )
+
+            # Determine trend
+            if len(self.windows) >= 5:
+                recent_values = [
+                    w.metrics[metric_name]
+                    for w in self.windows[-5:]
+                ]
+                trend, confidence = self._analyze_trend(recent_values)
+            else:
+                trend = 'unknown'
+                confidence = 0.0
+
+            # Detect decay (performance drop)
+            decay_detected = change_percent < -self.decay_threshold
+            trigger_retrain = change_percent < -self.retrain_threshold
+
+            result = DecayDetectionResult(
+                metric_name=metric_name,
+                decay_detected=decay_detected,
+                current_value=current_value,
+                baseline_value=baseline_value,
+                change_percent=change_percent,
+                trend=trend,
+                confidence=confidence,
+                trigger_retrain=trigger_retrain
+            )
+
+            results.append(result)
+
+            # Log significant changes
+            if decay_detected:
+                logger.warning(
+                    f"Performance decay detected for {metric_name}: "
+                    f"{change_percent:.1%} drop "
+                    f"(current: {current_value:.4f}, "
+                    f"baseline: {baseline_value:.4f})"
+                )
+
+            if trigger_retrain:
+                logger.critical(
+                    f"Retraining threshold exceeded for {metric_name}"
+                )
+
+        return results
+
+    def _analyze_trend(
+        self,
+        values: List[float]
+    ) -> Tuple[str, float]:
+        """
+        Analyze trend in metric values.
+
+        Args:
+            values: List of metric values over time
+
+        Returns:
+            Tuple of (trend direction, confidence)
+        """
+        x = np.arange(len(values))
+        y = np.array(values)
+
+        # Linear regression
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+
+        # Determine trend
+        if abs(slope) < 0.001:  # Nearly flat
+            trend = 'stable'
+        elif slope > 0:
+            trend = 'improving'
+        else:
+            trend = 'declining'
+
+        # Confidence is R-squared
+        confidence = r_value ** 2
+
+        return trend, confidence
+
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of performance tracking.
+
+        Returns:
+            Dictionary with performance statistics
+        """
+        if not self.windows:
+            return {'status': 'no_data'}
+
+        recent_window = self.windows[-1]
+
+        summary = {
+            'timestamp': recent_window.end_time.isoformat(),
+            'window_size_days': self.window_size.days,
+            'sample_count': recent_window.sample_count,
+            'current_metrics': recent_window.metrics,
+            'baseline_metrics': self.baseline_metrics,
+            'total_windows': len(self.windows),
+            'total_predictions': len(self.predictions)
+        }
+
+        # Add decay information if baseline set
+        if self.baseline_set:
+            decay_results = self.check_decay()
+            summary['decay_results'] = [
+                {
+                    'metric': r.metric_name,
+                    'decay_detected': r.decay_detected,
+                    'change_percent': r.change_percent,
+                    'trend': r.trend,
+                    'trigger_retrain': r.trigger_retrain
+                }
+                for r in decay_results
+            ]
+
+        return summary
+
+    def should_retrain(self) -> bool:
+        """
+        Determine if model should be retrained.
+
+        Returns:
+            True if retraining is recommended
+        """
+        if not self.baseline_set:
+            return False
+
+        decay_results = self.check_decay()
+
+        # Retrain if any metric exceeds threshold
+        return any(r.trigger_retrain for r in decay_results)
+\end{lstlisting}
+
+\subsection{Automated Retraining Triggers}
+
+\begin{lstlisting}[language=Python, caption={Retraining Pipeline with Triggers}]
+from typing import Optional
+from pathlib import Path
+import joblib
+
+class AutoRetrainingPipeline:
+    """
+    Automated model retraining pipeline.
+
+    Monitors performance and triggers retraining when needed.
+    """
+
+    def __init__(
+        self,
+        model_class,
+        performance_tracker: PerformanceTracker,
+        drift_detector: DriftDetector,
+        model_monitor: ModelMonitor
+    ):
+        """
+        Initialize retraining pipeline.
+
+        Args:
+            model_class: Model class to instantiate for retraining
+            performance_tracker: Performance tracking system
+            drift_detector: Drift detection system
+            model_monitor: Model monitoring system
+        """
+        self.model_class = model_class
+        self.performance_tracker = performance_tracker
+        self.drift_detector = drift_detector
+        self.model_monitor = model_monitor
+
+        self.current_model = None
+        self.retraining_in_progress = False
+        self.last_retrain_time: Optional[datetime] = None
+        self.min_retrain_interval = timedelta(days=7)
+
+    def check_retraining_triggers(
+        self,
+        current_data: pd.DataFrame
+    ) -> Tuple[bool, List[str]]:
+        """
+        Check if retraining should be triggered.
+
+        Args:
+            current_data: Current production data
+
+        Returns:
+            Tuple of (should_retrain, reasons)
+        """
+        reasons = []
+
+        # Check if minimum interval has passed
+        if self.last_retrain_time:
+            time_since_retrain = datetime.now() - self.last_retrain_time
+            if time_since_retrain < self.min_retrain_interval:
+                return False, ["Minimum retrain interval not reached"]
+
+        # Check performance decay
+        if self.performance_tracker.should_retrain():
+            reasons.append("Performance decay threshold exceeded")
+
+        # Check data drift
+        drift_results = self.drift_detector.detect_drift(current_data)
+        drift_summary = self.drift_detector.get_drift_summary(drift_results)
+
+        if drift_summary['drift_rate'] > 0.5:  # 50% of features
+            reasons.append(
+                f"Significant data drift: {drift_summary['drift_rate']:.1%}"
+            )
+
+        # Check alert status
+        if len(self.model_monitor.active_alerts) > 3:
+            reasons.append("Multiple active alerts")
+
+        should_retrain = len(reasons) > 0
+
+        return should_retrain, reasons
+
+    def trigger_retraining(
+        self,
+        training_data: pd.DataFrame,
+        validation_data: pd.DataFrame,
+        reasons: List[str]
+    ):
+        """
+        Trigger model retraining.
+
+        Args:
+            training_data: Data for retraining
+            validation_data: Data for validation
+            reasons: Reasons for retraining
+        """
+        if self.retraining_in_progress:
+            logger.warning("Retraining already in progress")
+            return
+
+        self.retraining_in_progress = True
+
+        logger.info(f"Triggering retraining. Reasons: {reasons}")
+
+        try:
+            # Extract features and targets
+            X_train = training_data.drop('target', axis=1)
+            y_train = training_data['target']
+            X_val = validation_data.drop('target', axis=1)
+            y_val = validation_data['target']
+
+            # Train new model
+            logger.info("Training new model")
+            new_model = self.model_class()
+            new_model.fit(X_train, y_train)
+
+            # Validate new model
+            val_score = new_model.score(X_val, y_val)
+            logger.info(f"New model validation score: {val_score:.4f}")
+
+            # Compare with current model
+            if self.current_model:
+                current_score = self.current_model.score(X_val, y_val)
+                logger.info(
+                    f"Current model validation score: {current_score:.4f}"
+                )
+
+                # Only replace if new model is better
+                if val_score <= current_score:
+                    logger.warning(
+                        "New model not better than current model"
+                    )
+                    self.retraining_in_progress = False
+                    return
+
+            # Replace model
+            self.current_model = new_model
+            self.last_retrain_time = datetime.now()
+
+            # Save model
+            model_path = self._save_model(new_model)
+            logger.info(f"Model saved to {model_path}")
+
+            # Reset performance tracker baseline
+            self.performance_tracker.baseline_set = False
+            self.performance_tracker.windows = []
+
+            # Clear active alerts
+            self.model_monitor.active_alerts.clear()
+
+            logger.info("Retraining completed successfully")
+
+        except Exception as e:
+            logger.error(f"Retraining failed: {e}")
+            raise
+        finally:
+            self.retraining_in_progress = False
+
+    def _save_model(self, model) -> Path:
+        """Save model with timestamp."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_path = Path(f"models/model_{timestamp}.pkl")
+        model_path.parent.mkdir(exist_ok=True)
+
+        joblib.dump(model, model_path)
+
+        return model_path
+
+    def monitor_and_retrain(
+        self,
+        current_data: pd.DataFrame,
+        training_data_fn: Callable[[], Tuple[pd.DataFrame, pd.DataFrame]]
+    ):
+        """
+        Main monitoring loop with automatic retraining.
+
+        Args:
+            current_data: Current production data
+            training_data_fn: Function to fetch training/validation data
+        """
+        # Check triggers
+        should_retrain, reasons = self.check_retraining_triggers(
+            current_data
+        )
+
+        if should_retrain:
+            logger.warning(
+                f"Retraining triggered. Reasons: {reasons}"
+            )
+
+            # Fetch training data
+            training_data, validation_data = training_data_fn()
+
+            # Trigger retraining
+            self.trigger_retraining(
+                training_data,
+                validation_data,
+                reasons
+            )
+        else:
+            logger.info("No retraining needed")
+
+# Usage
+pipeline = AutoRetrainingPipeline(
+    model_class=RandomForestClassifier,
+    performance_tracker=tracker,
+    drift_detector=drift_detector,
+    model_monitor=monitor
+)
+
+# In production loop
+def monitoring_loop():
+    """Main monitoring loop."""
+    while True:
+        # Get current data
+        current_data = fetch_recent_data()
+
+        # Check and retrain if needed
+        pipeline.monitor_and_retrain(
+            current_data,
+            training_data_fn=fetch_training_data
+        )
+
+        # Sleep
+        time.sleep(3600)  # Check every hour
+\end{lstlisting}
+
+\section{Infrastructure and Operational Monitoring}
+
+Beyond model metrics, infrastructure health is critical for reliable ML systems.
+
+\subsection{AlertManager: Intelligent Alert Routing}
+
+\begin{lstlisting}[language=Python, caption={Alert Management System}]
+from typing import Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from datetime import datetime, timedelta
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AlertChannel(Enum):
+    """Alert delivery channels."""
+    EMAIL = "email"
+    SLACK = "slack"
+    PAGERDUTY = "pagerduty"
+    WEBHOOK = "webhook"
+    LOG = "log"
+
+@dataclass
+class AlertRule:
+    """
+    Rule for alert routing and escalation.
+
+    Attributes:
+        name: Rule identifier
+        severity_levels: Severities this rule applies to
+        channels: Delivery channels
+        recipients: List of recipients (emails, slack channels, etc.)
+        escalation_delay: Time before escalating
+        max_frequency: Maximum alerts per time period
+        suppress_similar: Whether to suppress similar alerts
+    """
+    name: str
+    severity_levels: List[AlertSeverity]
+    channels: List[AlertChannel]
+    recipients: List[str]
+    escalation_delay: Optional[timedelta] = None
+    max_frequency: int = 10
+    frequency_window: timedelta = timedelta(hours=1)
+    suppress_similar: bool = True
+
+class AlertManager:
+    """
+    Intelligent alert management with routing and escalation.
+
+    Prevents alert fatigue through deduplication, rate limiting,
+    and intelligent routing.
+
+    Example:
+        >>> alert_mgr = AlertManager()
+        >>> alert_mgr.add_rule(AlertRule(
+        ...     name="critical_alerts",
+        ...     severity_levels=[AlertSeverity.CRITICAL],
+        ...     channels=[AlertChannel.PAGERDUTY, AlertChannel.SLACK],
+        ...     recipients=["oncall@company.com", "#incidents"]
+        ... ))
+        >>> alert_mgr.send_alert(alert)
+    """
+
+    def __init__(
+        self,
+        email_config: Optional[Dict] = None,
+        slack_webhook: Optional[str] = None,
+        pagerduty_key: Optional[str] = None
+    ):
+        """
+        Initialize alert manager.
+
+        Args:
+            email_config: SMTP configuration for email
+            slack_webhook: Slack webhook URL
+            pagerduty_key: PagerDuty integration key
+        """
+        self.email_config = email_config
+        self.slack_webhook = slack_webhook
+        self.pagerduty_key = pagerduty_key
+
+        # Alert rules
+        self.rules: List[AlertRule] = []
+
+        # Alert history for rate limiting
+        self.alert_history: Dict[str, List[datetime]] = defaultdict(list)
+
+        # Suppressed alerts
+        self.suppressed_alerts: Dict[str, Alert] = {}
+
+    def add_rule(self, rule: AlertRule):
+        """
+        Add alert routing rule.
+
+        Args:
+            rule: Alert rule configuration
+        """
+        self.rules.append(rule)
+        logger.info(f"Added alert rule: {rule.name}")
+
+    def send_alert(self, alert: Alert):
+        """
+        Send alert through configured channels.
+
+        Args:
+            alert: Alert to send
+        """
+        # Find matching rules
+        matching_rules = [
+            rule for rule in self.rules
+            if alert.severity in rule.severity_levels
+        ]
+
+        if not matching_rules:
+            logger.warning(
+                f"No matching rules for alert: {alert.metric_name}"
+            )
+            return
+
+        for rule in matching_rules:
+            # Check rate limiting
+            if not self._check_rate_limit(rule, alert):
+                logger.info(
+                    f"Alert rate limited for rule {rule.name}"
+                )
+                continue
+
+            # Check suppression
+            if rule.suppress_similar and self._is_suppressed(alert):
+                logger.info(
+                    f"Alert suppressed (similar recent alert): "
+                    f"{alert.metric_name}"
+                )
+                continue
+
+            # Send through channels
+            for channel in rule.channels:
+                try:
+                    if channel == AlertChannel.EMAIL:
+                        self._send_email(alert, rule.recipients)
+                    elif channel == AlertChannel.SLACK:
+                        self._send_slack(alert, rule.recipients)
+                    elif channel == AlertChannel.PAGERDUTY:
+                        self._send_pagerduty(alert)
+                    elif channel == AlertChannel.LOG:
+                        self._send_log(alert)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to send alert via {channel.value}: {e}"
+                    )
+
+            # Record alert
+            rule_key = f"{rule.name}_{alert.metric_name}"
+            self.alert_history[rule_key].append(datetime.now())
+
+            # Store for suppression
+            if rule.suppress_similar:
+                self.suppressed_alerts[alert.metric_name] = alert
+
+    def _check_rate_limit(
+        self,
+        rule: AlertRule,
+        alert: Alert
+    ) -> bool:
+        """
+        Check if alert exceeds rate limit.
+
+        Args:
+            rule: Alert rule
+            alert: Alert to check
+
+        Returns:
+            True if alert should be sent
+        """
+        rule_key = f"{rule.name}_{alert.metric_name}"
+
+        # Get recent alerts
+        cutoff = datetime.now() - rule.frequency_window
+        recent_alerts = [
+            ts for ts in self.alert_history.get(rule_key, [])
+            if ts >= cutoff
+        ]
+
+        # Update history
+        self.alert_history[rule_key] = recent_alerts
+
+        # Check limit
+        return len(recent_alerts) < rule.max_frequency
+
+    def _is_suppressed(self, alert: Alert) -> bool:
+        """
+        Check if similar alert was recently sent.
+
+        Args:
+            alert: Alert to check
+
+        Returns:
+            True if alert should be suppressed
+        """
+        if alert.metric_name not in self.suppressed_alerts:
+            return False
+
+        previous = self.suppressed_alerts[alert.metric_name]
+
+        # Suppress if within 15 minutes and similar severity
+        time_diff = alert.timestamp - previous.timestamp
+        similar_severity = alert.severity == previous.severity
+
+        return time_diff < timedelta(minutes=15) and similar_severity
+
+    def _send_email(self, alert: Alert, recipients: List[str]):
+        """Send alert via email."""
+        if not self.email_config:
+            logger.warning("Email not configured")
+            return
+
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = self.email_config['from']
+        msg['To'] = ', '.join(recipients)
+        msg['Subject'] = (
+            f"[{alert.severity.value.upper()}] {alert.metric_name}"
+        )
+
+        # Create body
+        body = f"""
+ML Monitoring Alert
+
+Severity: {alert.severity.value}
+Metric: {alert.metric_name}
+Message: {alert.message}
+
+Current Value: {alert.value:.4f}
+Threshold: {alert.threshold:.4f}
+Timestamp: {alert.timestamp}
+
+Context:
+{json.dumps(alert.context, indent=2)}
+        """
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Send
+        with smtplib.SMTP(
+            self.email_config['host'],
+            self.email_config['port']
+        ) as server:
+            if self.email_config.get('use_tls'):
+                server.starttls()
+
+            if 'username' in self.email_config:
+                server.login(
+                    self.email_config['username'],
+                    self.email_config['password']
+                )
+
+            server.send_message(msg)
+
+        logger.info(f"Email sent to {recipients}")
+
+    def _send_slack(self, alert: Alert, channels: List[str]):
+        """Send alert to Slack."""
+        if not self.slack_webhook:
+            logger.warning("Slack not configured")
+            return
+
+        # Severity emoji
+        emoji_map = {
+            AlertSeverity.INFO: ':information_source:',
+            AlertSeverity.WARNING: ':warning:',
+            AlertSeverity.ERROR: ':x:',
+            AlertSeverity.CRITICAL: ':rotating_light:'
+        }
+
+        # Create payload
+        payload = {
+            "text": f"{emoji_map[alert.severity]} *ML Monitoring Alert*",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{alert.severity.value.upper()}: {alert.metric_name}"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Message:*\n{alert.message}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Current Value:*\n{alert.value:.4f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Threshold:*\n{alert.threshold:.4f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Time:*\n{alert.timestamp}"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # Send to webhook
+        response = requests.post(
+            self.slack_webhook,
+            json=payload
+        )
+        response.raise_for_status()
+
+        logger.info(f"Slack alert sent")
+
+    def _send_pagerduty(self, alert: Alert):
+        """Send alert to PagerDuty."""
+        if not self.pagerduty_key:
+            logger.warning("PagerDuty not configured")
+            return
+
+        # Only page for ERROR and CRITICAL
+        if alert.severity not in [AlertSeverity.ERROR, AlertSeverity.CRITICAL]:
+            return
+
+        payload = {
+            "routing_key": self.pagerduty_key,
+            "event_action": "trigger",
+            "payload": {
+                "summary": alert.message,
+                "severity": alert.severity.value,
+                "source": alert.metric_name,
+                "custom_details": {
+                    "value": alert.value,
+                    "threshold": alert.threshold,
+                    "context": alert.context
+                }
+            }
+        }
+
+        response = requests.post(
+            "https://events.pagerduty.com/v2/enqueue",
+            json=payload
+        )
+        response.raise_for_status()
+
+        logger.info("PagerDuty alert sent")
+
+    def _send_log(self, alert: Alert):
+        """Log alert."""
+        level_map = {
+            AlertSeverity.INFO: logging.INFO,
+            AlertSeverity.WARNING: logging.WARNING,
+            AlertSeverity.ERROR: logging.ERROR,
+            AlertSeverity.CRITICAL: logging.CRITICAL
+        }
+
+        logger.log(
+            level_map[alert.severity],
+            f"ALERT: {alert.message} "
+            f"(value={alert.value:.4f}, threshold={alert.threshold:.4f})"
+        )
+\end{lstlisting}
+
+\section{Real-World Scenario: Silent Model Degradation}
+
+\subsection{The Problem}
+
+A credit scoring model was deployed in January 2024. By March, business teams noticed a 20\% increase in default rates among approved loans, costing the company \$2M in losses. Investigation revealed:
+
+\begin{itemize}
+    \item Model accuracy dropped from 89\% to 72\%
+    \item Data drift affected 45\% of features due to economic changes
+    \item Prediction latency increased 3x due to infrastructure issues
+    \item No monitoring detected these issues for 8 weeks
+\end{itemize}
+
+\subsection{The Solution}
+
+Implementing comprehensive monitoring would have caught this early:
+
+\begin{lstlisting}[language=Python, caption={Complete Monitoring Implementation}]
+# Initialize monitoring systems
+model_monitor = ModelMonitor(
+    model_name="credit_scoring",
+    model_version="v1.0",
+    prometheus_gateway="localhost:9091",
+    alert_callback=lambda alert: alert_manager.send_alert(alert)
+)
+
+# Register critical metrics
+model_monitor.register_metric(MetricConfig(
+    name="accuracy",
+    metric_type=MetricType.GAUGE,
+    description="Model accuracy on recent predictions",
+    thresholds={
+        AlertSeverity.WARNING: 0.85,  # Alert at 85%
+        AlertSeverity.CRITICAL: 0.75   # Critical at 75%
+    }
+))
+
+model_monitor.register_metric(MetricConfig(
+    name="default_rate",
+    metric_type=MetricType.GAUGE,
+    description="Rate of defaults among approved loans",
+    thresholds={
+        AlertSeverity.WARNING: 0.15,  # Alert at 15%
+        AlertSeverity.CRITICAL: 0.20   # Critical at 20%
+    }
+))
+
+# Initialize drift detection
+drift_detector = DriftDetector(
+    categorical_features=['employment_type', 'loan_purpose'],
+    ks_threshold=0.05,
+    psi_threshold=0.15  # Stricter threshold
+)
+drift_detector.fit(training_data)
+
+# Initialize performance tracking
+performance_tracker = PerformanceTracker(
+    window_size=timedelta(days=7),
+    decay_threshold=0.03,  # 3% decay triggers alert
+    retrain_threshold=0.10  # 10% decay triggers retrain
+)
+
+# Configure alert manager
+alert_manager = AlertManager(
+    email_config=email_config,
+    slack_webhook=slack_webhook
+)
+
+alert_manager.add_rule(AlertRule(
+    name="critical_performance",
+    severity_levels=[AlertSeverity.CRITICAL],
+    channels=[AlertChannel.SLACK, AlertChannel.EMAIL],
+    recipients=["ml-team@company.com", "#ml-alerts"]
+))
+
+alert_manager.add_rule(AlertRule(
+    name="warning_performance",
+    severity_levels=[AlertSeverity.WARNING],
+    channels=[AlertChannel.SLACK],
+    recipients=["#ml-monitoring"]
+))
+
+# Main monitoring loop
+def production_monitoring():
+    """Production monitoring with all systems."""
+    while True:
+        try:
+            # Fetch recent predictions with ground truth
+            recent_data = fetch_recent_predictions(hours=24)
+
+            # Check drift
+            drift_results = drift_detector.detect_drift(recent_data)
+            drift_summary = drift_detector.get_drift_summary(drift_results)
+
+            if drift_summary['drift_rate'] > 0.3:
+                logger.warning(
+                    f"Drift detected in {drift_summary['drift_rate']:.1%} "
+                    f"of features"
+                )
+
+                # Log to monitoring system
+                model_monitor.record_metric(
+                    "drift_rate",
+                    drift_summary['drift_rate']
+                )
+
+            # Update performance tracker
+            for _, row in recent_data.iterrows():
+                if 'ground_truth' in row:  # Only if labels available
+                    performance_tracker.record_prediction(
+                        y_true=row['ground_truth'],
+                        y_pred=row['prediction'],
+                        y_prob=row.get('probability')
+                    )
+
+            # Check for decay
+            decay_results = performance_tracker.check_decay()
+
+            for result in decay_results:
+                model_monitor.record_metric(
+                    result.metric_name,
+                    result.current_value
+                )
+
+            # Check if retraining needed
+            if performance_tracker.should_retrain():
+                logger.critical("Model retraining required")
+
+                # Trigger automated retraining
+                trigger_retraining_pipeline()
+
+            # Compute and log business metrics
+            business_metrics = compute_business_metrics(recent_data)
+            for metric_name, value in business_metrics.items():
+                model_monitor.record_metric(metric_name, value)
+
+            # Sleep
+            time.sleep(3600)  # Check every hour
+
+        except Exception as e:
+            logger.error(f"Monitoring loop error: {e}")
+            time.sleep(300)  # Retry after 5 minutes
+
+# Start monitoring
+if __name__ == "__main__":
+    production_monitoring()
+\end{lstlisting}
+
+\subsection{Outcome}
+
+With comprehensive monitoring:
+\begin{itemize}
+    \item \textbf{Week 2}: Drift detected in 3 key features (economic indicators changed)
+    \item \textbf{Week 3}: Performance decay alert triggered (accuracy dropped to 85\%)
+    \item \textbf{Week 4}: Automated retraining initiated, new model deployed
+    \item \textbf{Impact}: Prevented \$1.8M in losses, maintained model performance
+\end{itemize}
+
+\section{Observability Best Practices}
+
+\subsection{SLO and SLI Definition}
+
+Define Service Level Objectives and Indicators for ML systems:
+
+\begin{lstlisting}[language=Python, caption={SLO/SLI Implementation}]
+from dataclasses import dataclass
+from typing import Dict, List
+from enum import Enum
+
+class SLIType(Enum):
+    """Types of Service Level Indicators."""
+    AVAILABILITY = "availability"
+    LATENCY = "latency"
+    ACCURACY = "accuracy"
+    THROUGHPUT = "throughput"
+    ERROR_RATE = "error_rate"
+
+@dataclass
+class SLI:
+    """
+    Service Level Indicator.
+
+    Measurable metric of service quality.
+    """
+    name: str
+    sli_type: SLIType
+    description: str
+    measurement_window: timedelta
+    target_value: float
+
+    def __post_init__(self):
+        self.measurements: List[float] = []
+
+    def record(self, value: float):
+        """Record SLI measurement."""
+        self.measurements.append(value)
+
+    def compute(self) -> float:
+        """Compute current SLI value."""
+        if not self.measurements:
+            return 0.0
+
+        if self.sli_type == SLIType.AVAILABILITY:
+            # Availability: % of successful requests
+            return np.mean(self.measurements)
+        elif self.sli_type == SLIType.LATENCY:
+            # Latency: 95th percentile
+            return np.percentile(self.measurements, 95)
+        elif self.sli_type == SLIType.ACCURACY:
+            # Accuracy: mean accuracy
+            return np.mean(self.measurements)
+        elif self.sli_type == SLIType.THROUGHPUT:
+            # Throughput: requests per second
+            return len(self.measurements) / self.measurement_window.total_seconds()
+        else:  # ERROR_RATE
+            # Error rate: % of errors
+            return np.mean(self.measurements)
+
+@dataclass
+class SLO:
+    """
+    Service Level Objective.
+
+    Target for SLI performance.
+    """
+    name: str
+    sli: SLI
+    objective: float  # Target value
+    time_period: timedelta  # Evaluation period
+
+    def is_met(self) -> bool:
+        """Check if SLO is met."""
+        current_value = self.sli.compute()
+
+        # For latency and error rate, lower is better
+        if self.sli.sli_type in [SLIType.LATENCY, SLIType.ERROR_RATE]:
+            return current_value <= self.objective
+        else:
+            return current_value >= self.objective
+
+    def error_budget(self) -> float:
+        """
+        Calculate remaining error budget.
+
+        Error budget = allowed failures before SLO breach
+        """
+        current_value = self.sli.compute()
+
+        if self.sli.sli_type in [SLIType.LATENCY, SLIType.ERROR_RATE]:
+            budget = self.objective - current_value
+        else:
+            budget = current_value - self.objective
+
+        return budget
+
+# Define SLOs for ML system
+def define_ml_slos() -> List[SLO]:
+    """Define SLOs for ML prediction service."""
+    slos = []
+
+    # Availability SLO: 99.9% uptime
+    availability_sli = SLI(
+        name="prediction_availability",
+        sli_type=SLIType.AVAILABILITY,
+        description="Percentage of successful predictions",
+        measurement_window=timedelta(days=30),
+        target_value=0.999
+    )
+    slos.append(SLO(
+        name="99.9% Availability",
+        sli=availability_sli,
+        objective=0.999,
+        time_period=timedelta(days=30)
+    ))
+
+    # Latency SLO: 95th percentile < 100ms
+    latency_sli = SLI(
+        name="prediction_latency_p95",
+        sli_type=SLIType.LATENCY,
+        description="95th percentile prediction latency",
+        measurement_window=timedelta(days=7),
+        target_value=0.100  # 100ms
+    )
+    slos.append(SLO(
+        name="P95 Latency < 100ms",
+        sli=latency_sli,
+        objective=0.100,
+        time_period=timedelta(days=7)
+    ))
+
+    # Accuracy SLO: > 85% accuracy
+    accuracy_sli = SLI(
+        name="model_accuracy",
+        sli_type=SLIType.ACCURACY,
+        description="Model prediction accuracy",
+        measurement_window=timedelta(days=7),
+        target_value=0.85
+    )
+    slos.append(SLO(
+        name="Accuracy > 85%",
+        sli=accuracy_sli,
+        objective=0.85,
+        time_period=timedelta(days=7)
+    ))
+
+    # Error rate SLO: < 0.1% errors
+    error_sli = SLI(
+        name="error_rate",
+        sli_type=SLIType.ERROR_RATE,
+        description="Prediction error rate",
+        measurement_window=timedelta(days=30),
+        target_value=0.001
+    )
+    slos.append(SLO(
+        name="Error Rate < 0.1%",
+        sli=error_sli,
+        objective=0.001,
+        time_period=timedelta(days=30)
+    ))
+
+    return slos
+
+# Monitor SLOs
+class SLOMonitor:
+    """Monitor SLOs and trigger alerts on breach."""
+
+    def __init__(self, slos: List[SLO], alert_manager: AlertManager):
+        self.slos = slos
+        self.alert_manager = alert_manager
+
+    def check_slos(self):
+        """Check all SLOs and alert on breach."""
+        for slo in self.slos:
+            if not slo.is_met():
+                error_budget = slo.error_budget()
+
+                # Create alert
+                alert = Alert(
+                    severity=AlertSeverity.CRITICAL,
+                    metric_name=slo.name,
+                    message=f"SLO breach: {slo.name}",
+                    value=slo.sli.compute(),
+                    threshold=slo.objective,
+                    timestamp=datetime.now(),
+                    context={
+                        'sli_name': slo.sli.name,
+                        'error_budget': error_budget,
+                        'time_period': str(slo.time_period)
+                    }
+                )
+
+                self.alert_manager.send_alert(alert)
+\end{lstlisting}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Implement Custom Metrics}
+
+Create a monitoring system for a recommendation model that tracks:
+\begin{itemize}
+    \item Click-through rate (CTR)
+    \item Diversity of recommendations
+    \item Coverage (% of catalog recommended)
+    \item User engagement time
+\end{itemize}
+
+Configure appropriate thresholds and alert rules.
+
+\subsection{Exercise 2: Multi-Method Drift Detection}
+
+Implement a drift detection system that:
+\begin{itemize}
+    \item Uses KS test, PSI, and JS divergence
+    \item Compares results across methods
+    \item Determines consensus on drift
+    \item Generates drift report with visualizations
+\end{itemize}
+
+\subsection{Exercise 3: Performance Decay Analysis}
+
+Build a performance tracker that:
+\begin{itemize}
+    \item Tracks multiple metrics (accuracy, precision, recall, F1)
+    \item Computes trend lines with confidence intervals
+    \item Predicts when retraining will be needed
+    \item Generates performance degradation reports
+\end{itemize}
+
+\subsection{Exercise 4: Alert Fatigue Prevention}
+
+Design an alert management system that prevents alert fatigue by:
+\begin{itemize}
+    \item Implementing exponential backoff for repeated alerts
+    \item Grouping similar alerts
+    \item Providing alert context and suggested actions
+    \item Measuring alert actionability metrics
+\end{itemize}
+
+\subsection{Exercise 5: SLO Monitoring Dashboard}
+
+Create a dashboard that:
+\begin{itemize}
+    \item Displays current SLO status
+    \item Shows error budget burn rate
+    \item Predicts SLO breach timing
+    \item Provides drill-down into SLI measurements
+\end{itemize}
+
+\subsection{Exercise 6: End-to-End Monitoring}
+
+Implement complete monitoring for a fraud detection system:
+\begin{itemize}
+    \item Model performance (precision, recall, AUC)
+    \item Data drift (transaction patterns)
+    \item Infrastructure (latency, throughput)
+    \item Business metrics (fraud caught, false positives)
+\end{itemize}
+
+Configure automated retraining triggers and alert escalation.
+
+\subsection{Exercise 7: Incident Response Automation}
+
+Build an incident response system that:
+\begin{itemize}
+    \item Detects anomalies in monitoring metrics
+    \item Automatically collects diagnostic information
+    \item Attempts self-healing (rollback, scaling)
+    \item Creates incident tickets with context
+    \item Generates post-incident reports
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+    \item \textbf{Monitor Everything}: Track model performance, data quality, infrastructure, and business metrics
+    \item \textbf{Use Multiple Methods}: Combine statistical tests (KS, PSI) with custom metrics for comprehensive coverage
+    \item \textbf{Automate Response}: Configure automatic retraining triggers and incident response
+    \item \textbf{Prevent Alert Fatigue}: Use intelligent routing, rate limiting, and deduplication
+    \item \textbf{Define SLOs}: Establish clear objectives with measurable indicators and error budgets
+    \item \textbf{Plan for Degradation}: Assume models will decay and build systems to detect and respond
+    \item \textbf{Integrate Monitoring}: Connect to existing observability tools (Prometheus, Grafana)
+\end{itemize}
+
+Production ML monitoring transforms silent failures into actionable insights, enabling teams to maintain model performance and prevent business impact.

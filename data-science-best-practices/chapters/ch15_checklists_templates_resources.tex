@@ -1,0 +1,1722 @@
+\chapter{Checklists, Templates, and Resources}
+
+\section{Introduction}
+
+This appendix provides production-ready templates, checklists, and automation frameworks for implementing ML engineering best practices. Use these resources to accelerate project setup, ensure quality standards, and maintain operational excellence.
+
+\section{Project Health Assessment Framework}
+
+Automated framework for assessing ML project health across multiple dimensions.
+
+\subsection{HealthCheckFramework: Automated Assessment}
+
+\begin{lstlisting}[language=Python, caption={ML Project Health Assessment}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from pathlib import Path
+from enum import Enum
+import subprocess
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+class HealthCategory(Enum):
+    """Project health categories."""
+    CODE_QUALITY = "code_quality"
+    TESTING = "testing"
+    DOCUMENTATION = "documentation"
+    VERSIONING = "versioning"
+    DEPLOYMENT = "deployment"
+    MONITORING = "monitoring"
+
+@dataclass
+class HealthCheck:
+    """
+    Individual health check.
+
+    Attributes:
+        name: Check name
+        category: Health category
+        description: What this checks
+        check_function: Function to run check
+        weight: Importance weight (0-1)
+        required: Whether this is mandatory
+    """
+    name: str
+    category: HealthCategory
+    description: str
+    check_function: callable
+    weight: float = 1.0
+    required: bool = False
+
+@dataclass
+class HealthScore:
+    """
+    Health assessment result.
+
+    Attributes:
+        category: Category assessed
+        score: Score 0-100
+        passed_checks: Number of passed checks
+        total_checks: Total number of checks
+        issues: List of failed checks
+        recommendations: Improvement suggestions
+    """
+    category: HealthCategory
+    score: float
+    passed_checks: int
+    total_checks: int
+    issues: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+
+class HealthCheckFramework:
+    """
+    Comprehensive ML project health assessment.
+
+    Evaluates code quality, testing, documentation, deployment
+    readiness, and operational maturity.
+
+    Example:
+        >>> framework = HealthCheckFramework(project_path=".")
+        >>> results = framework.assess_health()
+        >>> print(f"Overall Score: {results['overall_score']:.1f}/100")
+    """
+
+    def __init__(self, project_path: str = "."):
+        """
+        Initialize health checker.
+
+        Args:
+            project_path: Path to ML project
+        """
+        self.project_path = Path(project_path)
+        self.checks: Dict[HealthCategory, List[HealthCheck]] = {
+            category: [] for category in HealthCategory
+        }
+
+        # Register default checks
+        self._register_default_checks()
+
+        logger.info(f"Initialized health checker for {project_path}")
+
+    def _register_default_checks(self):
+        """Register default health checks."""
+
+        # Code Quality Checks
+        self.add_check(HealthCheck(
+            name="code_formatting",
+            category=HealthCategory.CODE_QUALITY,
+            description="Code follows Black formatting",
+            check_function=self._check_black_formatting,
+            weight=0.8,
+            required=True
+        ))
+
+        self.add_check(HealthCheck(
+            name="linting",
+            category=HealthCategory.CODE_QUALITY,
+            description="Code passes flake8 linting",
+            check_function=self._check_flake8,
+            weight=1.0,
+            required=True
+        ))
+
+        self.add_check(HealthCheck(
+            name="type_hints",
+            category=HealthCategory.CODE_QUALITY,
+            description="Type hints coverage",
+            check_function=self._check_type_hints,
+            weight=0.6
+        ))
+
+        # Testing Checks
+        self.add_check(HealthCheck(
+            name="test_coverage",
+            category=HealthCategory.TESTING,
+            description="Unit test coverage >= 80%",
+            check_function=self._check_test_coverage,
+            weight=1.0,
+            required=True
+        ))
+
+        self.add_check(HealthCheck(
+            name="integration_tests",
+            category=HealthCategory.TESTING,
+            description="Integration tests exist",
+            check_function=self._check_integration_tests,
+            weight=0.8
+        ))
+
+        # Documentation Checks
+        self.add_check(HealthCheck(
+            name="readme",
+            category=HealthCategory.DOCUMENTATION,
+            description="README.md exists and comprehensive",
+            check_function=self._check_readme,
+            weight=1.0,
+            required=True
+        ))
+
+        self.add_check(HealthCheck(
+            name="api_documentation",
+            category=HealthCategory.DOCUMENTATION,
+            description="API documentation exists",
+            check_function=self._check_api_docs,
+            weight=0.7
+        ))
+
+        # Versioning Checks
+        self.add_check(HealthCheck(
+            name="git_repo",
+            category=HealthCategory.VERSIONING,
+            description="Project is a Git repository",
+            check_function=self._check_git_repo,
+            weight=1.0,
+            required=True
+        ))
+
+        self.add_check(HealthCheck(
+            name="requirements_file",
+            category=HealthCategory.VERSIONING,
+            description="Dependencies tracked",
+            check_function=self._check_requirements,
+            weight=1.0,
+            required=True
+        ))
+
+        # Deployment Checks
+        self.add_check(HealthCheck(
+            name="dockerfile",
+            category=HealthCategory.DEPLOYMENT,
+            description="Dockerfile exists",
+            check_function=self._check_dockerfile,
+            weight=0.8
+        ))
+
+        self.add_check(HealthCheck(
+            name="ci_cd",
+            category=HealthCategory.DEPLOYMENT,
+            description="CI/CD pipeline configured",
+            check_function=self._check_ci_cd,
+            weight=1.0
+        ))
+
+        # Monitoring Checks
+        self.add_check(HealthCheck(
+            name="logging",
+            category=HealthCategory.MONITORING,
+            description="Structured logging implemented",
+            check_function=self._check_logging,
+            weight=0.8
+        ))
+
+        self.add_check(HealthCheck(
+            name="metrics",
+            category=HealthCategory.MONITORING,
+            description="Metrics instrumentation present",
+            check_function=self._check_metrics,
+            weight=0.7
+        ))
+
+    def add_check(self, check: HealthCheck):
+        """Add custom health check."""
+        self.checks[check.category].append(check)
+
+    def assess_health(self) -> Dict:
+        """
+        Run all health checks and generate report.
+
+        Returns:
+            Dictionary with assessment results
+        """
+        logger.info("Running health assessment")
+
+        category_scores = {}
+        all_issues = []
+        all_recommendations = []
+
+        for category in HealthCategory:
+            score = self._assess_category(category)
+            category_scores[category.value] = score
+
+            all_issues.extend(score.issues)
+            all_recommendations.extend(score.recommendations)
+
+        # Calculate overall score (weighted average)
+        category_weights = {
+            HealthCategory.CODE_QUALITY: 0.25,
+            HealthCategory.TESTING: 0.25,
+            HealthCategory.DOCUMENTATION: 0.15,
+            HealthCategory.VERSIONING: 0.10,
+            HealthCategory.DEPLOYMENT: 0.15,
+            HealthCategory.MONITORING: 0.10
+        }
+
+        overall_score = sum(
+            score.score * category_weights[category]
+            for category, score in category_scores.items()
+        )
+
+        # Determine health level
+        if overall_score >= 90:
+            health_level = "Excellent"
+        elif overall_score >= 75:
+            health_level = "Good"
+        elif overall_score >= 60:
+            health_level = "Fair"
+        else:
+            health_level = "Needs Improvement"
+
+        results = {
+            'overall_score': overall_score,
+            'health_level': health_level,
+            'category_scores': {
+                cat.value: {
+                    'score': score.score,
+                    'passed': score.passed_checks,
+                    'total': score.total_checks
+                }
+                for cat, score in category_scores.items()
+            },
+            'issues': all_issues,
+            'recommendations': all_recommendations[:10],  # Top 10
+            'passed_required': self._check_required_checks(category_scores)
+        }
+
+        self._log_summary(results)
+
+        return results
+
+    def _assess_category(self, category: HealthCategory) -> HealthScore:
+        """Assess single health category."""
+        checks = self.checks[category]
+
+        if not checks:
+            return HealthScore(
+                category=category,
+                score=100.0,
+                passed_checks=0,
+                total_checks=0
+            )
+
+        passed = 0
+        issues = []
+        recommendations = []
+
+        for check in checks:
+            try:
+                result = check.check_function(self.project_path)
+
+                if result:
+                    passed += 1
+                else:
+                    issues.append(f"{check.name}: {check.description}")
+                    recommendations.append(
+                        f"Fix {check.name} to improve {category.value}"
+                    )
+
+            except Exception as e:
+                logger.error(f"Check {check.name} failed: {e}")
+                issues.append(f"{check.name}: Error running check")
+
+        # Weighted score
+        total_weight = sum(c.weight for c in checks)
+        passed_weight = sum(
+            c.weight for c in checks
+            if c.check_function(self.project_path)
+        )
+
+        score = (passed_weight / total_weight * 100) if total_weight > 0 else 0
+
+        return HealthScore(
+            category=category,
+            score=score,
+            passed_checks=passed,
+            total_checks=len(checks),
+            issues=issues,
+            recommendations=recommendations
+        )
+
+    def _check_required_checks(
+        self,
+        category_scores: Dict[HealthCategory, HealthScore]
+    ) -> bool:
+        """Check if all required checks passed."""
+        for category in HealthCategory:
+            checks = self.checks[category]
+            required_checks = [c for c in checks if c.required]
+
+            for check in required_checks:
+                if not check.check_function(self.project_path):
+                    return False
+
+        return True
+
+    # Individual check implementations
+
+    def _check_black_formatting(self, path: Path) -> bool:
+        """Check if code is Black formatted."""
+        try:
+            result = subprocess.run(
+                ["black", "--check", str(path / "src")],
+                capture_output=True,
+                timeout=30
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _check_flake8(self, path: Path) -> bool:
+        """Check flake8 linting."""
+        try:
+            result = subprocess.run(
+                ["flake8", str(path / "src")],
+                capture_output=True,
+                timeout=30
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _check_type_hints(self, path: Path) -> bool:
+        """Check type hint coverage."""
+        try:
+            result = subprocess.run(
+                ["mypy", str(path / "src"), "--ignore-missing-imports"],
+                capture_output=True,
+                timeout=30
+            )
+            # Accept if mypy runs without fatal errors
+            return "error" not in result.stdout.decode().lower()
+        except Exception:
+            return False
+
+    def _check_test_coverage(self, path: Path) -> bool:
+        """Check test coverage >= 80%."""
+        try:
+            result = subprocess.run(
+                ["pytest", "--cov=src", "--cov-report=json"],
+                cwd=path,
+                capture_output=True,
+                timeout=60
+            )
+
+            # Parse coverage report
+            coverage_file = path / "coverage.json"
+            if coverage_file.exists():
+                with open(coverage_file) as f:
+                    coverage = json.load(f)
+                    total_coverage = coverage['totals']['percent_covered']
+                    return total_coverage >= 80.0
+
+            return False
+        except Exception:
+            return False
+
+    def _check_integration_tests(self, path: Path) -> bool:
+        """Check if integration tests exist."""
+        integration_test_paths = [
+            path / "tests" / "integration",
+            path / "tests" / "test_integration.py"
+        ]
+
+        return any(p.exists() for p in integration_test_paths)
+
+    def _check_readme(self, path: Path) -> bool:
+        """Check if README exists and has minimum content."""
+        readme_path = path / "README.md"
+
+        if not readme_path.exists():
+            return False
+
+        content = readme_path.read_text()
+
+        # Check for essential sections
+        required_sections = [
+            "install", "usage", "contributing"
+        ]
+
+        return all(
+            section in content.lower()
+            for section in required_sections
+        )
+
+    def _check_api_docs(self, path: Path) -> bool:
+        """Check for API documentation."""
+        docs_paths = [
+            path / "docs",
+            path / "API.md"
+        ]
+
+        return any(p.exists() for p in docs_paths)
+
+    def _check_git_repo(self, path: Path) -> bool:
+        """Check if project is a Git repo."""
+        return (path / ".git").exists()
+
+    def _check_requirements(self, path: Path) -> bool:
+        """Check if dependencies are tracked."""
+        requirement_files = [
+            "requirements.txt",
+            "environment.yml",
+            "pyproject.toml",
+            "Pipfile"
+        ]
+
+        return any((path / f).exists() for f in requirement_files)
+
+    def _check_dockerfile(self, path: Path) -> bool:
+        """Check if Dockerfile exists."""
+        return (path / "Dockerfile").exists()
+
+    def _check_ci_cd(self, path: Path) -> bool:
+        """Check for CI/CD configuration."""
+        ci_paths = [
+            path / ".github" / "workflows",
+            path / ".gitlab-ci.yml",
+            path / "Jenkinsfile",
+            path / ".circleci"
+        ]
+
+        return any(p.exists() for p in ci_paths)
+
+    def _check_logging(self, path: Path) -> bool:
+        """Check for structured logging."""
+        # Search for logging configuration
+        src_path = path / "src"
+
+        if not src_path.exists():
+            return False
+
+        # Check for logging imports
+        for py_file in src_path.rglob("*.py"):
+            content = py_file.read_text()
+            if "import logging" in content or "from logging" in content:
+                return True
+
+        return False
+
+    def _check_metrics(self, path: Path) -> bool:
+        """Check for metrics instrumentation."""
+        src_path = path / "src"
+
+        if not src_path.exists():
+            return False
+
+        # Check for metrics libraries
+        metrics_libraries = [
+            "prometheus_client",
+            "statsd",
+            "datadog"
+        ]
+
+        for py_file in src_path.rglob("*.py"):
+            content = py_file.read_text()
+            if any(lib in content for lib in metrics_libraries):
+                return True
+
+        return False
+
+    def _log_summary(self, results: Dict):
+        """Log assessment summary."""
+        logger.info("=" * 70)
+        logger.info("ML PROJECT HEALTH ASSESSMENT")
+        logger.info("=" * 70)
+        logger.info(f"Overall Score: {results['overall_score']:.1f}/100")
+        logger.info(f"Health Level: {results['health_level']}")
+        logger.info("")
+        logger.info("Category Scores:")
+
+        for category, scores in results['category_scores'].items():
+            logger.info(
+                f"  {category}: {scores['score']:.1f}/100 "
+                f"({scores['passed']}/{scores['total']} checks passed)"
+            )
+
+        if results['issues']:
+            logger.info("")
+            logger.info(f"Issues Found: {len(results['issues'])}")
+            for issue in results['issues'][:5]:
+                logger.info(f"  - {issue}")
+
+        logger.info("=" * 70)
+
+    def generate_report(self, results: Dict, output_path: str = "health_report.md"):
+        """
+        Generate markdown health report.
+
+        Args:
+            results: Assessment results
+            output_path: Path for report
+        """
+        lines = ["# ML Project Health Report\n"]
+
+        # Overall score with emoji
+        if results['overall_score'] >= 90:
+            emoji = "(GREEN)"
+        elif results['overall_score'] >= 75:
+            emoji = "(YELLOW)"
+        else:
+            emoji = "(RED)"
+
+        lines.append(f"{emoji} **Overall Score**: {results['overall_score']:.1f}/100\n")
+        lines.append(f"**Health Level**: {results['health_level']}\n")
+        lines.append("")
+
+        # Category breakdown
+        lines.append("## Category Scores\n")
+
+        for category, scores in results['category_scores'].items():
+            status = "(PASS)" if scores['score'] >= 75 else "(WARN)"
+            lines.append(
+                f"{status} **{category.title()}**: {scores['score']:.1f}/100 "
+                f"({scores['passed']}/{scores['total']} checks passed)\n"
+            )
+
+        # Issues
+        if results['issues']:
+            lines.append("\n## Issues\n")
+            for issue in results['issues']:
+                lines.append(f"- {issue}\n")
+
+        # Recommendations
+        if results['recommendations']:
+            lines.append("\n## Recommendations\n")
+            for i, rec in enumerate(results['recommendations'][:10], 1):
+                lines.append(f"{i}. {rec}\n")
+
+        # Save report
+        with open(output_path, 'w') as f:
+            f.writelines(lines)
+
+        logger.info(f"Health report saved to {output_path}")
+\end{lstlisting}
+
+\section{ML Project Templates}
+
+\subsection{ProjectTemplate: Automated Project Setup}
+
+\begin{lstlisting}[language=Python, caption={ML Project Template Generator}]
+from pathlib import Path
+from typing import Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ProjectTemplate:
+    """
+    Generate standardized ML project structure.
+
+    Creates directories, configuration files, and initial code.
+
+    Example:
+        >>> template = ProjectTemplate("my_ml_project")
+        >>> template.generate()
+    """
+
+    def __init__(
+        self,
+        project_name: str,
+        project_type: str = "ml_service",
+        include_docker: bool = True,
+        include_ci: bool = True
+    ):
+        """
+        Initialize project template.
+
+        Args:
+            project_name: Name of project
+            project_type: "ml_service", "research", or "batch"
+            include_docker: Include Docker configuration
+            include_ci: Include CI/CD configuration
+        """
+        self.project_name = project_name
+        self.project_type = project_type
+        self.include_docker = include_docker
+        self.include_ci = include_ci
+
+        self.project_path = Path(project_name)
+
+    def generate(self):
+        """Generate complete project structure."""
+        logger.info(f"Generating project: {self.project_name}")
+
+        # Create directory structure
+        self._create_directories()
+
+        # Generate configuration files
+        self._create_pyproject_toml()
+        self._create_requirements_txt()
+        self._create_environment_yml()
+
+        if self.include_docker:
+            self._create_dockerfile()
+            self._create_docker_compose()
+
+        if self.include_ci:
+            self._create_github_actions()
+
+        # Create initial code files
+        self._create_src_structure()
+        self._create_tests()
+
+        # Create documentation
+        self._create_readme()
+        self._create_contributing()
+
+        # Create configuration
+        self._create_config_files()
+
+        # Create pre-commit hooks
+        self._create_precommit_config()
+
+        logger.info(f"Project generated at {self.project_path}")
+
+    def _create_directories(self):
+        """Create project directory structure."""
+        directories = [
+            "",  # Root
+            "src",
+            "src/models",
+            "src/data",
+            "src/features",
+            "src/utils",
+            "tests",
+            "tests/unit",
+            "tests/integration",
+            "notebooks",
+            "data/raw",
+            "data/processed",
+            "data/features",
+            "models/trained",
+            "models/optimized",
+            "config",
+            "docs",
+            "scripts",
+            ".github/workflows" if self.include_ci else None
+        ]
+
+        for directory in directories:
+            if directory:
+                (self.project_path / directory).mkdir(parents=True, exist_ok=True)
+
+    def _create_pyproject_toml(self):
+        """Create pyproject.toml."""
+        content = f'''[tool.poetry]
+name = "{self.project_name}"
+version = "0.1.0"
+description = "ML project for {self.project_name}"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.24.0"
+pandas = "^2.0.0"
+scikit-learn = "^1.3.0"
+torch = "^2.0.0"
+fastapi = "^0.104.0"
+pydantic = "^2.0.0"
+pyyaml = "^6.0"
+python-dotenv = "^1.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+black = "^23.7.0"
+flake8 = "^6.0.0"
+mypy = "^1.4.0"
+pre-commit = "^3.3.0"
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+include = '\\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+addopts = "--cov=src --cov-report=html --cov-report=term"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+'''
+
+        (self.project_path / "pyproject.toml").write_text(content)
+
+    def _create_requirements_txt(self):
+        """Create requirements.txt."""
+        content = '''# Core ML Libraries
+numpy==1.24.0
+pandas==2.0.0
+scikit-learn==1.3.0
+torch==2.0.0
+
+# API Framework
+fastapi==0.104.0
+uvicorn==0.23.0
+pydantic==2.0.0
+
+# Utilities
+pyyaml==6.0
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Monitoring
+prometheus-client==0.17.0
+
+# Development
+pytest==7.4.0
+pytest-cov==4.1.0
+black==23.7.0
+flake8==6.0.0
+mypy==1.4.0
+'''
+
+        (self.project_path / "requirements.txt").write_text(content)
+
+    def _create_environment_yml(self):
+        """Create environment.yml for conda."""
+        content = f'''name: {self.project_name}
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+    - -r requirements.txt
+'''
+
+        (self.project_path / "environment.yml").write_text(content)
+
+    def _create_dockerfile(self):
+        """Create Dockerfile."""
+        content = '''FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+    build-essential \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Create non-root user
+RUN useradd -m -u 1000 ml-user && chown -R ml-user:ml-user /app
+USER ml-user
+
+# Expose port
+EXPOSE 8000
+
+# Run application
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+'''
+
+        (self.project_path / "Dockerfile").write_text(content)
+
+    def _create_docker_compose(self):
+        """Create docker-compose.yml."""
+        content = f'''version: '3.8'
+
+services:
+  {self.project_name}:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-storage:/var/lib/grafana
+
+volumes:
+  grafana-storage:
+'''
+
+        (self.project_path / "docker-compose.yml").write_text(content)
+
+    def _create_github_actions(self):
+        """Create GitHub Actions CI/CD."""
+        content = '''name: CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: Lint with flake8
+      run: |
+        flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src/ --count --max-line-length=100 --statistics
+
+    - name: Check formatting with black
+      run: black --check src/
+
+    - name: Type check with mypy
+      run: mypy src/ --ignore-missing-imports
+      continue-on-error: true
+
+    - name: Run tests
+      run: pytest tests/ -v --cov=src --cov-report=xml
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+'''
+
+        ci_path = self.project_path / ".github" / "workflows"
+        ci_path.mkdir(parents=True, exist_ok=True)
+        (ci_path / "ci.yml").write_text(content)
+
+    def _create_src_structure(self):
+        """Create initial source code structure."""
+        # Main API file
+        api_content = '''"""Main API application."""
+from fastapi import FastAPI
+from src.models.predictor import ModelPredictor
+
+app = FastAPI(title="ML API")
+predictor = ModelPredictor()
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy"}
+
+@app.post("/predict")
+def predict(features: dict):
+    """Make prediction."""
+    prediction = predictor.predict(features)
+    return {"prediction": prediction}
+'''
+
+        api_path = self.project_path / "src" / "api"
+        api_path.mkdir(exist_ok=True)
+        (api_path / "__init__.py").touch()
+        (api_path / "main.py").write_text(api_content)
+
+        # Model predictor
+        predictor_content = '''"""Model prediction logic."""
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ModelPredictor:
+    """Handle model predictions."""
+
+    def __init__(self):
+        """Initialize predictor."""
+        self.model = None
+        self._load_model()
+
+    def _load_model(self):
+        """Load trained model."""
+        # TODO: Implement model loading
+        logger.info("Model loaded")
+
+    def predict(self, features: dict):
+        """Make prediction."""
+        # TODO: Implement prediction logic
+        return 0.5
+'''
+
+        (self.project_path / "src" / "models" / "__init__.py").touch()
+        (self.project_path / "src" / "models" / "predictor.py").write_text(predictor_content)
+
+    def _create_tests(self):
+        """Create initial test files."""
+        test_content = '''"""Test model predictor."""
+import pytest
+from src.models.predictor import ModelPredictor
+
+def test_predictor_initialization():
+    """Test predictor initializes correctly."""
+    predictor = ModelPredictor()
+    assert predictor is not None
+
+def test_prediction():
+    """Test prediction returns expected format."""
+    predictor = ModelPredictor()
+    result = predictor.predict({"feature1": 1.0})
+    assert isinstance(result, (int, float))
+'''
+
+        (self.project_path / "tests" / "__init__.py").touch()
+        (self.project_path / "tests" / "unit" / "__init__.py").touch()
+        (self.project_path / "tests" / "unit" / "test_predictor.py").write_text(test_content)
+
+    def _create_readme(self):
+        """Create README.md."""
+        content = f'''# {self.project_name}
+
+## Overview
+
+ML project for {self.project_name}.
+
+## Installation
+
+```bash
+# Using pip
+pip install -r requirements.txt
+
+# Using conda
+conda env create -f environment.yml
+conda activate {self.project_name}
+
+# Using poetry
+poetry install
+```
+
+## Usage
+
+```python
+from src.models.predictor import ModelPredictor
+
+predictor = ModelPredictor()
+prediction = predictor.predict({{"feature1": 1.0}})
+```
+
+### API
+
+Start the API server:
+
+```bash
+uvicorn src.api.main:app --reload
+```
+
+### Docker
+
+```bash
+docker-compose up
+```
+
+## Development
+
+```bash
+# Run tests
+pytest
+
+# Format code
+black src/ tests/
+
+# Lint code
+flake8 src/ tests/
+
+# Type check
+mypy src/
+```
+
+## Project Structure
+
+```
+{self.project_name}/
+|-- src/              # Source code
+|   |-- api/          # API endpoints
+|   |-- models/       # Model logic
+|   |-- data/         # Data processing
+|   +-- features/     # Feature engineering
+|-- tests/            # Tests
+|-- notebooks/        # Jupyter notebooks
+|-- data/             # Data storage
+|-- models/           # Trained models
+|-- config/           # Configuration
++-- docs/             # Documentation
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open Pull Request
+
+## License
+
+MIT License
+'''
+
+        (self.project_path / "README.md").write_text(content)
+
+    def _create_contributing(self):
+        """Create CONTRIBUTING.md."""
+        content = '''# Contributing Guidelines
+
+## Development Setup
+
+1. Clone repository
+2. Install dependencies: `pip install -r requirements-dev.txt`
+3. Install pre-commit hooks: `pre-commit install`
+
+## Code Standards
+
+- Follow PEP 8 style guide
+- Use Black for formatting (line length 100)
+- Use type hints where appropriate
+- Write docstrings for all public functions
+- Maintain test coverage above 80%
+
+## Testing
+
+- Write unit tests for all new code
+- Run tests before committing: `pytest`
+- Ensure all tests pass
+- Check coverage: `pytest --cov=src`
+
+## Pull Request Process
+
+1. Update README if needed
+2. Update tests
+3. Ensure CI passes
+4. Request review from maintainers
+'''
+
+        (self.project_path / "CONTRIBUTING.md").write_text(content)
+
+    def _create_config_files(self):
+        """Create configuration files."""
+        # Development config
+        dev_config = '''# Development Configuration
+environment: development
+
+model:
+  name: "ml_model"
+  version: "v1.0"
+  path: "models/trained/model.pkl"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+
+logging:
+  level: "DEBUG"
+  format: "json"
+
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+'''
+
+        (self.project_path / "config" / "development.yaml").write_text(dev_config)
+
+        # Production config
+        prod_config = '''# Production Configuration
+environment: production
+
+model:
+  name: "ml_model"
+  version: "v1.0"
+  path: "models/trained/model.pkl"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 8
+
+logging:
+  level: "INFO"
+  format: "json"
+
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+'''
+
+        (self.project_path / "config" / "production.yaml").write_text(prod_config)
+
+    def _create_precommit_config(self):
+        """Create .pre-commit-config.yaml."""
+        content = '''repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-json
+
+  - repo: https://github.com/psf/black
+    rev: 23.7.0
+    hooks:
+      - id: black
+        language_version: python3.9
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 6.0.0
+    hooks:
+      - id: flake8
+        args: ['--max-line-length=100']
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.4.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+'''
+
+        (self.project_path / ".pre-commit-config.yaml").write_text(content)
+
+        # .gitignore
+        gitignore_content = '''# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Models and Data
+models/trained/*.pkl
+models/trained/*.h5
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+'''
+
+        (self.project_path / ".gitignore").write_text(gitignore_content)
+\end{lstlisting}
+
+\section{Deployment Checklists}
+
+\subsection{Pre-Deployment Checklist}
+
+\begin{enumerate}
+    \item \textbf{Code Quality}
+    \begin{itemize}
+        \item[ ] All code follows style guide (Black, flake8 passing)
+        \item[ ] Type hints added to public functions
+        \item[ ] Code review completed and approved
+        \item[ ] No commented-out code or TODOs
+    \end{itemize}
+
+    \item \textbf{Testing}
+    \begin{itemize}
+        \item[ ] Unit test coverage $\geq$ 80\%
+        \item[ ] Integration tests pass
+        \item[ ] Performance tests pass (latency, throughput)
+        \item[ ] Load testing completed
+    \end{itemize}
+
+    \item \textbf{Model Validation}
+    \begin{itemize}
+        \item[ ] Model accuracy meets requirements
+        \item[ ] Fairness metrics evaluated and passing
+        \item[ ] Model card created and reviewed
+        \item[ ] A/B test results favorable
+    \end{itemize}
+
+    \item \textbf{Documentation}
+    \begin{itemize}
+        \item[ ] README updated
+        \item[ ] API documentation current
+        \item[ ] Runbook created
+        \item[ ] Architecture diagram updated
+    \end{itemize}
+
+    \item \textbf{Infrastructure}
+    \begin{itemize}
+        \item[ ] Docker image builds successfully
+        \item[ ] Kubernetes manifests validated
+        \item[ ] Resource limits configured
+        \item[ ] Auto-scaling rules defined
+    \end{itemize}
+
+    \item \textbf{Security}
+    \begin{itemize}
+        \item[ ] Dependency vulnerabilities scanned
+        \item[ ] Secrets managed securely (not in code)
+        \item[ ] TLS/SSL configured
+        \item[ ] Access controls reviewed
+    \end{itemize}
+
+    \item \textbf{Monitoring}
+    \begin{itemize}
+        \item[ ] Logging configured and tested
+        \item[ ] Metrics instrumentation added
+        \item[ ] Alerts configured
+        \item[ ] Dashboard created
+    \end{itemize}
+
+    \item \textbf{Compliance}
+    \begin{itemize}
+        \item[ ] GDPR compliance verified
+        \item[ ] Data retention policies implemented
+        \item[ ] Audit trail configured
+        \item[ ] Ethics review completed (if required)
+    \end{itemize}
+
+    \item \textbf{Rollback Plan}
+    \begin{itemize}
+        \item[ ] Previous version identified
+        \item[ ] Rollback procedure tested
+        \item[ ] Rollback triggers defined
+        \item[ ] Communication plan ready
+    \end{itemize}
+
+    \item \textbf{Communication}
+    \begin{itemize}
+        \item[ ] Stakeholders notified of deployment
+        \item[ ] Maintenance window scheduled (if needed)
+        \item[ ] On-call rotation updated
+        \item[ ] Incident response plan ready
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Post-Deployment Checklist}
+
+\begin{enumerate}
+    \item \textbf{Immediate Validation (0-30 minutes)}
+    \begin{itemize}
+        \item[ ] Health checks passing
+        \item[ ] All pods/instances running
+        \item[ ] No error spikes in logs
+        \item[ ] Latency within SLO (p95, p99)
+        \item[ ] Traffic routing correctly
+    \end{itemize}
+
+    \item \textbf{Short-term Monitoring (1-24 hours)}
+    \begin{itemize}
+        \item[ ] Model predictions reasonable
+        \item[ ] No unexpected errors
+        \item[ ] Resource utilization normal
+        \item[ ] User feedback monitored
+        \item[ ] Business metrics stable
+    \end{itemize}
+
+    \item \textbf{Long-term Validation (1-7 days)}
+    \begin{itemize}
+        \item[ ] Model performance metrics stable
+        \item[ ] No data drift detected
+        \item[ ] Cost within budget
+        \item[ ] SLOs consistently met
+        \item[ ] No critical alerts
+    \end{itemize}
+\end{enumerate}
+
+\section{Runbook Template}
+
+\subsection{Service Runbook}
+
+\begin{lstlisting}[style=yaml, caption={runbook.yml}]
+service_name: ML Prediction Service
+version: v2.1
+last_updated: 2024-01-15
+on_call: ml-team@company.com
+
+# Service Overview
+description: >
+  Provides ML predictions for fraud detection.
+  Handles 10M requests/day with <100ms latency SLO.
+
+dependencies:
+  - name: PostgreSQL
+    purpose: Feature store
+    contact: data-team@company.com
+  - name: Redis
+    purpose: Caching layer
+    contact: infrastructure@company.com
+
+# Operational Procedures
+
+## Service Management
+
+start_service: |
+  kubectl apply -f k8s/deployment.yaml
+  kubectl rollout status deployment/ml-service
+
+stop_service: |
+  kubectl scale deployment/ml-service --replicas=0
+
+restart_service: |
+  kubectl rollout restart deployment/ml-service
+
+check_health: |
+  curl https://api.company.com/health
+  # Expected: {"status": "healthy"}
+
+# Troubleshooting
+
+## High Latency
+
+symptoms:
+  - P95 latency > 100ms
+  - User complaints about slowness
+
+investigation:
+  1. Check current latency:
+     kubectl logs deployment/ml-service | grep "latency"
+
+  2. Check resource usage:
+     kubectl top pods -l app=ml-service
+
+  3. Check cache hit rate:
+     curl https://api.company.com/metrics | grep cache_hit_rate
+
+resolution:
+  - If CPU > 80%: Scale up instances
+  - If memory > 80%: Increase memory limits
+  - If cache hit rate < 50%: Warm cache or increase size
+
+## Prediction Errors
+
+symptoms:
+  - Error rate > 1%
+  - Alerts firing
+
+investigation:
+  1. Check error logs:
+     kubectl logs deployment/ml-service --tail=100 | grep ERROR
+
+  2. Check model version:
+     curl https://api.company.com/model-info
+
+  3. Check feature availability:
+     psql -h feature-store -c "SELECT COUNT(*) FROM features"
+
+resolution:
+  - If model loading failed: Rollback to previous version
+  - If features unavailable: Check feature pipeline
+  - If unknown error: Page on-call engineer
+
+## Rollback Procedure
+
+steps:
+  1. Identify last known good version:
+     kubectl rollout history deployment/ml-service
+
+  2. Rollback:
+     kubectl rollout undo deployment/ml-service
+
+  3. Verify:
+     kubectl rollout status deployment/ml-service
+     curl https://api.company.com/health
+
+  4. Monitor for 30 minutes:
+     - Check error rate
+     - Check latency
+     - Check prediction quality
+
+# Monitoring and Alerts
+
+## Key Metrics
+
+latency:
+  p50: < 50ms
+  p95: < 100ms
+  p99: < 200ms
+
+throughput: > 100 req/sec
+
+error_rate: < 1%
+
+availability: > 99.9%
+
+## Alert Definitions
+
+high_latency:
+  condition: p95_latency > 100ms for 5 minutes
+  severity: warning
+  action: Check "High Latency" troubleshooting
+
+critical_error_rate:
+  condition: error_rate > 5% for 2 minutes
+  severity: critical
+  action: Immediate rollback
+
+low_availability:
+  condition: availability < 99% for 10 minutes
+  severity: critical
+  action: Check pod health, scale if needed
+
+# Escalation
+
+level_1:
+  - Check runbook
+  - Check logs and metrics
+  - Apply standard fixes
+
+level_2:
+  - If not resolved in 15 minutes
+  - Page on-call engineer
+  - Slack: #ml-incidents
+
+level_3:
+  - If not resolved in 30 minutes
+  - Page engineering manager
+  - Start incident call
+  - Update status page
+
+# Maintenance
+
+regular_tasks:
+  daily:
+    - Check error logs
+    - Review dashboards
+    - Verify backups
+
+  weekly:
+    - Review model performance
+    - Check resource usage trends
+    - Update dependencies
+
+  monthly:
+    - Model retraining
+    - Capacity planning
+    - Disaster recovery drill
+
+# Useful Commands
+
+kubectl_commands:
+  get_pods: kubectl get pods -l app=ml-service
+  get_logs: kubectl logs -f deployment/ml-service
+  describe: kubectl describe deployment/ml-service
+  exec: kubectl exec -it <pod-name> -- /bin/bash
+
+database_commands:
+  connect: psql -h feature-store -U ml_user -d features
+  check_size: SELECT pg_size_pretty(pg_database_size('features'))
+  recent_features: SELECT * FROM features ORDER BY created_at DESC LIMIT 10
+
+monitoring_commands:
+  metrics: curl https://api.company.com/metrics
+  health: curl https://api.company.com/health
+  model_info: curl https://api.company.com/model-info
+
+# References
+
+documentation: https://wiki.company.com/ml-service
+dashboards:
+  grafana: https://grafana.company.com/d/ml-service
+  prometheus: https://prometheus.company.com/graph
+  logs: https://kibana.company.com/app/ml-service
+
+contacts:
+  team_lead: lead@company.com
+  on_call: ml-team@company.com
+  escalation: engineering@company.com
+\end{lstlisting}
+
+\section{Resource Lists}
+
+\subsection{Essential Tools}
+
+\textbf{Development}:
+\begin{itemize}
+    \item \textbf{IDEs}: VS Code, PyCharm, Jupyter Lab
+    \item \textbf{Version Control}: Git, DVC, Git LFS
+    \item \textbf{Package Management}: Poetry, Conda, pip-tools
+    \item \textbf{Code Quality}: Black, flake8, mypy, pylint
+\end{itemize}
+
+\textbf{ML Frameworks}:
+\begin{itemize}
+    \item \textbf{Training}: PyTorch, TensorFlow, scikit-learn
+    \item \textbf{Experiment Tracking}: MLflow, Weights \& Biases, Neptune
+    \item \textbf{Model Serving}: TorchServe, TensorFlow Serving, BentoML
+    \item \textbf{AutoML}: Auto-sklearn, TPOT, H2O AutoML
+\end{itemize}
+
+\textbf{Infrastructure}:
+\begin{itemize}
+    \item \textbf{Containerization}: Docker, Kubernetes, Helm
+    \item \textbf{CI/CD}: GitHub Actions, GitLab CI, Jenkins
+    \item \textbf{Orchestration}: Airflow, Prefect, Dagster
+    \item \textbf{Cloud Platforms}: AWS SageMaker, Google AI Platform, Azure ML
+\end{itemize}
+
+\textbf{Monitoring}:
+\begin{itemize}
+    \item \textbf{Metrics}: Prometheus, Grafana, Datadog
+    \item \textbf{Logging}: ELK Stack, Loki, CloudWatch
+    \item \textbf{Tracing}: Jaeger, Zipkin, OpenTelemetry
+    \item \textbf{APM}: New Relic, Datadog APM, Dynatrace
+\end{itemize}
+
+\subsection{Learning Resources}
+
+\textbf{Books}:
+\begin{itemize}
+    \item \emph{Designing Machine Learning Systems} - Chip Huyen
+    \item \emph{Machine Learning Engineering} - Andriy Burkov
+    \item \emph{Building Machine Learning Powered Applications} - Emmanuel Ameisen
+    \item \emph{Practical MLOps} - Noah Gift, Alfredo Deza
+\end{itemize}
+
+\textbf{Online Courses}:
+\begin{itemize}
+    \item MLOps Specialization (Coursera)
+    \item Full Stack Deep Learning
+    \item Made With ML
+    \item Fast.ai Practical Deep Learning
+\end{itemize}
+
+\textbf{Communities}:
+\begin{itemize}
+    \item MLOps Community Slack
+    \item r/MachineLearning
+    \item Papers With Code
+    \item Kaggle Forums
+\end{itemize}
+
+\section{Final Exercise: Complete Project Setup}
+
+\subsection{Exercise: End-to-End ML Project}
+
+Set up a complete production-ready ML project:
+
+\textbf{Part 1: Project Initialization}
+\begin{enumerate}
+    \item Use ProjectTemplate to generate project structure
+    \item Initialize Git repository with proper .gitignore
+    \item Set up virtual environment and install dependencies
+    \item Configure pre-commit hooks
+\end{enumerate}
+
+\textbf{Part 2: Development}
+\begin{enumerate}
+    \item Implement data pipeline with validation
+    \item Train model with experiment tracking (MLflow)
+    \item Add unit tests (target 80\% coverage)
+    \item Implement API with FastAPI
+    \item Add model card documentation
+\end{enumerate}
+
+\textbf{Part 3: Quality Assurance}
+\begin{enumerate}
+    \item Run HealthCheckFramework and fix issues
+    \item Implement fairness evaluation
+    \item Add monitoring instrumentation (Prometheus)
+    \item Create Dockerfile and test locally
+    \item Set up CI/CD pipeline
+\end{enumerate}
+
+\textbf{Part 4: Deployment}
+\begin{enumerate}
+    \item Complete pre-deployment checklist
+    \item Deploy to staging environment
+    \item Run integration tests
+    \item Deploy to production with monitoring
+    \item Complete post-deployment validation
+\end{enumerate}
+
+\textbf{Part 5: Operations}
+\begin{enumerate}
+    \item Create runbook for service
+    \item Set up alerts and dashboards
+    \item Document incident response procedures
+    \item Conduct failure scenario testing
+    \item Schedule first model retrain
+\end{enumerate}
+
+\subsection{Success Criteria}
+
+\begin{itemize}
+    \item Health check score $\geq$ 85/100
+    \item All tests passing in CI/CD
+    \item Service deployed and serving predictions
+    \item Monitoring dashboard operational
+    \item Documentation complete and reviewed
+\end{itemize}
+
+\section{Conclusion}
+
+This handbook has covered the complete lifecycle of production ML systems—from reproducible research environments to ethical deployment at scale. The templates, frameworks, and checklists in this appendix accelerate the journey from prototype to production.
+
+\textbf{Key Principles}:
+\begin{itemize}
+    \item \textbf{Automate Everything}: Manual processes don't scale
+    \item \textbf{Measure Continuously}: Instrumentations enables optimization
+    \item \textbf{Test Rigorously}: Failures are expensive in production
+    \item \textbf{Document Thoroughly}: Future you will thank present you
+    \item \textbf{Monitor Proactively}: Detect issues before users do
+    \item \textbf{Iterate Systematically}: Small, validated improvements compound
+\end{itemize}
+
+Building reliable ML systems requires discipline, tooling, and continuous improvement. Use these resources to establish best practices in your organization and deliver ML systems that provide sustainable business value.

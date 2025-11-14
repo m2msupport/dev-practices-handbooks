@@ -1,0 +1,2314 @@
+\chapter{Data Pipelines and ETL for ML}
+
+\section{Introduction}
+
+Data pipelines are the circulatory system of ML infrastructure. A model trained on perfect data fails in production when pipelines deliver corrupted, delayed, or incomplete features. A recommendation system trained on last month's user behavior becomes obsolete when daily pipeline updates fail silently. The difference between a model that works in notebooks and one that delivers value is reliable, monitored, and resilient data pipelines.
+
+\subsection{The Pipeline Failure Problem}
+
+Consider a fraud detection model that suddenly sees a 40\% drop in precision. Investigation reveals that three days ago, a pipeline step began failing silently, causing transaction amounts to be divided by 100. The model received corrupted features for 72 hours, flagging normal transactions as fraud and costing \$2M in customer churn and operational overhead.
+
+\subsection{Why Pipeline Engineering Matters}
+
+ML pipelines are fundamentally different from traditional ETL:
+
+\begin{itemize}
+    \item \textbf{Feature Dependencies}: Complex DAGs with temporal and cross-feature dependencies
+    \item \textbf{Data Quality}: Small corruptions cascade through feature engineering
+    \item \textbf{Latency Requirements}: Real-time predictions need sub-100ms feature computation
+    \item \textbf{Drift Detection}: Pipelines must monitor and alert on distribution changes
+    \item \textbf{Backfill Complexity}: Recomputing historical features requires careful orchestration
+    \item \textbf{Versioning}: Features evolve with models, requiring synchronized updates
+\end{itemize}
+
+\subsection{The Cost of Poor Pipelines}
+
+Industry data shows:
+\begin{itemize}
+    \item \textbf{60\% of ML failures} trace to data pipeline issues
+    \item \textbf{Silent failures} go undetected for 7-14 days on average
+    \item \textbf{Pipeline bugs} cost 5x more to fix in production than in development
+    \item \textbf{Backfill operations} consume 30\% of data engineering resources
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter provides production-grade pipeline frameworks:
+
+\begin{enumerate}
+    \item \textbf{ETL/ELT Design}: Pipeline architecture with error handling and recovery
+    \item \textbf{Stream Processing}: Real-time feature computation with Kafka
+    \item \textbf{Data Validation}: Schema checking and quality gates
+    \item \textbf{Pipeline Monitoring}: Observability and alerting
+    \item \textbf{Backfill Strategies}: Historical data processing with dependency tracking
+    \item \textbf{Orchestration}: Airflow and Prefect integration
+    \item \textbf{Testing}: Pipeline validation frameworks
+\end{enumerate}
+
+\section{ETL/ELT Pipeline Design}
+
+Production pipelines require careful design for reliability, monitoring, and recovery.
+
+\subsection{DataPipeline: Core Pipeline Framework}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Pipeline Framework}]
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable, Union
+from enum import Enum
+from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
+import logging
+import time
+import traceback
+from functools import wraps
+import json
+
+logger = logging.getLogger(__name__)
+
+class StepStatus(Enum):
+    """Pipeline step execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
+
+class PipelineMode(Enum):
+    """Pipeline execution mode."""
+    BATCH = "batch"
+    STREAMING = "streaming"
+    INCREMENTAL = "incremental"
+
+@dataclass
+class StepConfig:
+    """
+    Configuration for a pipeline step.
+
+    Attributes:
+        name: Step identifier
+        function: Function to execute
+        dependencies: List of step names this depends on
+        retries: Number of retry attempts
+        retry_delay: Delay between retries (seconds)
+        timeout: Maximum execution time (seconds)
+        skip_on_failure: Whether to skip if dependencies fail
+        idempotent: Whether step can be safely retried
+    """
+    name: str
+    function: Callable
+    dependencies: List[str] = field(default_factory=list)
+    retries: int = 3
+    retry_delay: int = 60
+    timeout: Optional[int] = 3600
+    skip_on_failure: bool = False
+    idempotent: bool = True
+
+@dataclass
+class StepResult:
+    """
+    Result of step execution.
+
+    Attributes:
+        step_name: Name of executed step
+        status: Execution status
+        start_time: When step started
+        end_time: When step completed
+        duration: Execution duration in seconds
+        output: Step output data
+        error: Error message if failed
+        retry_count: Number of retries attempted
+        metadata: Additional metadata
+    """
+    step_name: str
+    status: StepStatus
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration: Optional[float] = None
+    output: Any = None
+    error: Optional[str] = None
+    retry_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'step_name': self.step_name,
+            'status': self.status.value,
+            'start_time': self.start_time.isoformat(),
+            'end_time': self.end_time.isoformat() if self.end_time else None,
+            'duration': self.duration,
+            'error': self.error,
+            'retry_count': self.retry_count,
+            'metadata': self.metadata
+        }
+
+class DataPipeline:
+    """
+    Production-grade data pipeline with orchestration and monitoring.
+
+    Supports step dependencies, retries, timeouts, and comprehensive
+    error handling.
+
+    Example:
+        >>> pipeline = DataPipeline("user_features")
+        >>> pipeline.add_step(StepConfig(
+        ...     name="extract",
+        ...     function=extract_data,
+        ...     retries=3
+        ... ))
+        >>> pipeline.add_step(StepConfig(
+        ...     name="transform",
+        ...     function=transform_data,
+        ...     dependencies=["extract"]
+        ... ))
+        >>> result = pipeline.run()
+    """
+
+    def __init__(
+        self,
+        name: str,
+        mode: PipelineMode = PipelineMode.BATCH,
+        persist_results: bool = True,
+        persist_path: Optional[str] = None
+    ):
+        """
+        Initialize pipeline.
+
+        Args:
+            name: Pipeline identifier
+            mode: Execution mode (batch, streaming, incremental)
+            persist_results: Whether to persist step results
+            persist_path: Path for persisting results
+        """
+        self.name = name
+        self.mode = mode
+        self.persist_results = persist_results
+        self.persist_path = persist_path or f"./pipeline_results/{name}"
+
+        # Pipeline steps
+        self.steps: Dict[str, StepConfig] = {}
+        self.step_order: List[str] = []
+
+        # Execution tracking
+        self.results: Dict[str, StepResult] = {}
+        self.pipeline_start_time: Optional[datetime] = None
+        self.pipeline_end_time: Optional[datetime] = None
+
+        # Context for passing data between steps
+        self.context: Dict[str, Any] = {}
+
+        logger.info(f"Initialized pipeline: {name} (mode={mode.value})")
+
+    def add_step(self, config: StepConfig):
+        """
+        Add a step to the pipeline.
+
+        Args:
+            config: Step configuration
+        """
+        if config.name in self.steps:
+            raise ValueError(f"Step {config.name} already exists")
+
+        # Validate dependencies exist
+        for dep in config.dependencies:
+            if dep not in self.steps and dep not in self.step_order:
+                # Allow forward references, will validate at run time
+                pass
+
+        self.steps[config.name] = config
+        self._compute_step_order()
+
+        logger.info(
+            f"Added step: {config.name} "
+            f"(dependencies={config.dependencies})"
+        )
+
+    def _compute_step_order(self):
+        """
+        Compute topological order of steps based on dependencies.
+
+        Uses Kahn's algorithm for topological sorting.
+        """
+        # Build adjacency list and in-degree count
+        in_degree = {name: 0 for name in self.steps}
+        adjacency = {name: [] for name in self.steps}
+
+        for name, config in self.steps.items():
+            for dep in config.dependencies:
+                if dep not in self.steps:
+                    raise ValueError(
+                        f"Step {name} depends on non-existent step {dep}"
+                    )
+                adjacency[dep].append(name)
+                in_degree[name] += 1
+
+        # Topological sort
+        queue = [name for name, degree in in_degree.items() if degree == 0]
+        order = []
+
+        while queue:
+            step = queue.pop(0)
+            order.append(step)
+
+            for neighbor in adjacency[step]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        if len(order) != len(self.steps):
+            raise ValueError("Pipeline has circular dependencies")
+
+        self.step_order = order
+
+    def run(
+        self,
+        skip_steps: Optional[List[str]] = None,
+        run_only: Optional[List[str]] = None
+    ) -> Dict[str, StepResult]:
+        """
+        Execute the pipeline.
+
+        Args:
+            skip_steps: Steps to skip
+            run_only: Only run these steps (and their dependencies)
+
+        Returns:
+            Dictionary of step results
+        """
+        self.pipeline_start_time = datetime.now()
+        skip_steps = skip_steps or []
+
+        # Determine which steps to run
+        if run_only:
+            steps_to_run = self._get_steps_with_dependencies(run_only)
+        else:
+            steps_to_run = self.step_order
+
+        logger.info(
+            f"Starting pipeline: {self.name} "
+            f"({len(steps_to_run)} steps)"
+        )
+
+        try:
+            for step_name in steps_to_run:
+                if step_name in skip_steps:
+                    logger.info(f"Skipping step: {step_name}")
+                    self.results[step_name] = StepResult(
+                        step_name=step_name,
+                        status=StepStatus.SKIPPED,
+                        start_time=datetime.now()
+                    )
+                    continue
+
+                # Check dependencies
+                if not self._check_dependencies(step_name):
+                    logger.warning(
+                        f"Skipping {step_name} due to failed dependencies"
+                    )
+                    self.results[step_name] = StepResult(
+                        step_name=step_name,
+                        status=StepStatus.SKIPPED,
+                        start_time=datetime.now(),
+                        error="Dependencies failed"
+                    )
+                    continue
+
+                # Execute step
+                result = self._execute_step(step_name)
+                self.results[step_name] = result
+
+                # Persist result if configured
+                if self.persist_results:
+                    self._persist_result(result)
+
+                # Stop pipeline on critical failure
+                if result.status == StepStatus.FAILED:
+                    config = self.steps[step_name]
+                    if not config.skip_on_failure:
+                        logger.error(
+                            f"Pipeline failed at step: {step_name}"
+                        )
+                        break
+
+        except Exception as e:
+            logger.error(f"Pipeline execution failed: {e}")
+            logger.error(traceback.format_exc())
+            raise
+        finally:
+            self.pipeline_end_time = datetime.now()
+
+        # Generate summary
+        self._log_summary()
+
+        return self.results
+
+    def _get_steps_with_dependencies(
+        self,
+        step_names: List[str]
+    ) -> List[str]:
+        """
+        Get steps and all their dependencies in order.
+
+        Args:
+            step_names: Target steps
+
+        Returns:
+            List of steps to run including dependencies
+        """
+        required_steps = set()
+
+        def add_dependencies(step_name: str):
+            if step_name in required_steps:
+                return
+
+            config = self.steps[step_name]
+            for dep in config.dependencies:
+                add_dependencies(dep)
+
+            required_steps.add(step_name)
+
+        for step_name in step_names:
+            add_dependencies(step_name)
+
+        # Return in topological order
+        return [s for s in self.step_order if s in required_steps]
+
+    def _check_dependencies(self, step_name: str) -> bool:
+        """
+        Check if step dependencies succeeded.
+
+        Args:
+            step_name: Step to check
+
+        Returns:
+            True if all dependencies succeeded
+        """
+        config = self.steps[step_name]
+
+        for dep in config.dependencies:
+            if dep not in self.results:
+                logger.error(f"Dependency {dep} not executed")
+                return False
+
+            if self.results[dep].status != StepStatus.SUCCESS:
+                logger.error(
+                    f"Dependency {dep} failed with status "
+                    f"{self.results[dep].status}"
+                )
+                return False
+
+        return True
+
+    def _execute_step(self, step_name: str) -> StepResult:
+        """
+        Execute a single step with retries and error handling.
+
+        Args:
+            step_name: Name of step to execute
+
+        Returns:
+            Step execution result
+        """
+        config = self.steps[step_name]
+        retry_count = 0
+
+        while retry_count <= config.retries:
+            result = StepResult(
+                step_name=step_name,
+                status=StepStatus.RUNNING,
+                start_time=datetime.now(),
+                retry_count=retry_count
+            )
+
+            try:
+                logger.info(
+                    f"Executing step: {step_name} "
+                    f"(attempt {retry_count + 1}/{config.retries + 1})"
+                )
+
+                # Execute with timeout
+                output = self._execute_with_timeout(
+                    config.function,
+                    timeout=config.timeout,
+                    context=self.context
+                )
+
+                # Store output in context
+                self.context[step_name] = output
+
+                # Success
+                result.end_time = datetime.now()
+                result.duration = (
+                    result.end_time - result.start_time
+                ).total_seconds()
+                result.status = StepStatus.SUCCESS
+                result.output = output
+
+                logger.info(
+                    f"Step completed: {step_name} "
+                    f"(duration={result.duration:.2f}s)"
+                )
+
+                return result
+
+            except TimeoutError as e:
+                logger.error(f"Step {step_name} timed out: {e}")
+                result.error = f"Timeout after {config.timeout}s"
+                result.status = StepStatus.FAILED
+
+            except Exception as e:
+                logger.error(f"Step {step_name} failed: {e}")
+                logger.error(traceback.format_exc())
+                result.error = str(e)
+                result.status = StepStatus.FAILED
+
+            # Retry logic
+            if retry_count < config.retries:
+                retry_count += 1
+                result.status = StepStatus.RETRYING
+
+                logger.info(
+                    f"Retrying step {step_name} in {config.retry_delay}s"
+                )
+                time.sleep(config.retry_delay)
+            else:
+                # All retries exhausted
+                result.end_time = datetime.now()
+                result.duration = (
+                    result.end_time - result.start_time
+                ).total_seconds()
+                result.status = StepStatus.FAILED
+
+                logger.error(
+                    f"Step {step_name} failed after {retry_count} retries"
+                )
+
+                return result
+
+        return result
+
+    def _execute_with_timeout(
+        self,
+        func: Callable,
+        timeout: Optional[int],
+        context: Dict[str, Any]
+    ) -> Any:
+        """
+        Execute function with timeout.
+
+        Args:
+            func: Function to execute
+            timeout: Timeout in seconds
+            context: Pipeline context
+
+        Returns:
+            Function output
+        """
+        import signal
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"Execution exceeded {timeout}s")
+
+        if timeout:
+            # Set timeout
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout)
+
+        try:
+            # Execute function with context
+            output = func(context)
+            return output
+        finally:
+            if timeout:
+                # Cancel timeout
+                signal.alarm(0)
+
+    def _persist_result(self, result: StepResult):
+        """
+        Persist step result to storage.
+
+        Args:
+            result: Step result to persist
+        """
+        from pathlib import Path
+        import joblib
+
+        # Create directory
+        path = Path(self.persist_path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # Save result metadata
+        metadata_path = path / f"{result.step_name}_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(result.to_dict(), f, indent=2)
+
+        # Save output if serializable
+        if result.output is not None:
+            try:
+                output_path = path / f"{result.step_name}_output.pkl"
+                joblib.dump(result.output, output_path)
+            except Exception as e:
+                logger.warning(f"Could not persist output: {e}")
+
+    def _log_summary(self):
+        """Log pipeline execution summary."""
+        if not self.pipeline_start_time or not self.pipeline_end_time:
+            return
+
+        duration = (
+            self.pipeline_end_time - self.pipeline_start_time
+        ).total_seconds()
+
+        status_counts = {}
+        for result in self.results.values():
+            status = result.status.value
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        logger.info("=" * 60)
+        logger.info(f"Pipeline Summary: {self.name}")
+        logger.info(f"  Duration: {duration:.2f}s")
+        logger.info(f"  Status counts: {status_counts}")
+
+        # Log failed steps
+        failed_steps = [
+            name for name, result in self.results.items()
+            if result.status == StepStatus.FAILED
+        ]
+        if failed_steps:
+            logger.error(f"  Failed steps: {failed_steps}")
+
+        logger.info("=" * 60)
+
+    def get_step_result(self, step_name: str) -> Optional[StepResult]:
+        """
+        Get result for a specific step.
+
+        Args:
+            step_name: Name of step
+
+        Returns:
+            Step result or None if not executed
+        """
+        return self.results.get(step_name)
+
+    def visualize_pipeline(self) -> str:
+        """
+        Generate DOT graph visualization of pipeline.
+
+        Returns:
+            DOT format string
+        """
+        dot = ["digraph Pipeline {"]
+        dot.append("  rankdir=LR;")
+
+        # Add nodes
+        for step_name in self.step_order:
+            config = self.steps[step_name]
+            result = self.results.get(step_name)
+
+            # Color by status
+            if result:
+                if result.status == StepStatus.SUCCESS:
+                    color = "green"
+                elif result.status == StepStatus.FAILED:
+                    color = "red"
+                elif result.status == StepStatus.SKIPPED:
+                    color = "gray"
+                else:
+                    color = "yellow"
+            else:
+                color = "lightblue"
+
+            dot.append(
+                f'  "{step_name}" [style=filled, fillcolor={color}];'
+            )
+
+        # Add edges
+        for step_name, config in self.steps.items():
+            for dep in config.dependencies:
+                dot.append(f'  "{dep}" -> "{step_name}";')
+
+        dot.append("}")
+
+        return "\n".join(dot)
+\end{lstlisting}
+
+\subsection{Pipeline Usage Examples}
+
+\begin{lstlisting}[language=Python, caption={Building Production Pipelines}]
+import pandas as pd
+from datetime import datetime
+
+# Define pipeline steps
+def extract_data(context: Dict) -> pd.DataFrame:
+    """Extract raw data from source."""
+    logger.info("Extracting data from database")
+
+    # Simulate data extraction
+    query = """
+        SELECT user_id, transaction_date, amount, merchant_category
+        FROM transactions
+        WHERE transaction_date >= %(start_date)s
+    """
+
+    # In production, execute actual query
+    data = pd.read_sql(query, connection, params={
+        'start_date': context.get('start_date', '2024-01-01')
+    })
+
+    logger.info(f"Extracted {len(data)} rows")
+
+    return data
+
+def validate_data(context: Dict) -> pd.DataFrame:
+    """Validate extracted data."""
+    data = context['extract']
+
+    logger.info("Validating data quality")
+
+    # Check for required columns
+    required_cols = ['user_id', 'transaction_date', 'amount']
+    missing_cols = set(required_cols) - set(data.columns)
+
+    if missing_cols:
+        raise ValueError(f"Missing columns: {missing_cols}")
+
+    # Check for nulls
+    null_counts = data.isnull().sum()
+    if null_counts.any():
+        logger.warning(f"Null values found: {null_counts[null_counts > 0]}")
+
+    # Check data types
+    if not pd.api.types.is_numeric_dtype(data['amount']):
+        raise ValueError("Amount column must be numeric")
+
+    # Check ranges
+    if (data['amount'] < 0).any():
+        raise ValueError("Negative amounts found")
+
+    logger.info("Data validation passed")
+
+    return data
+
+def transform_features(context: Dict) -> pd.DataFrame:
+    """Transform data into features."""
+    data = context['validate']
+
+    logger.info("Computing features")
+
+    # Aggregate by user
+    features = data.groupby('user_id').agg({
+        'amount': ['sum', 'mean', 'std', 'count'],
+        'merchant_category': lambda x: x.mode()[0] if len(x) > 0 else None
+    }).reset_index()
+
+    features.columns = [
+        'user_id', 'total_amount', 'avg_amount',
+        'std_amount', 'transaction_count', 'top_category'
+    ]
+
+    logger.info(f"Computed features for {len(features)} users")
+
+    return features
+
+def load_features(context: Dict) -> None:
+    """Load features to feature store."""
+    features = context['transform']
+
+    logger.info("Loading features to feature store")
+
+    # In production, write to feature store
+    # feature_store.write(features, feature_group="user_transaction_features")
+
+    # For demo, save to parquet
+    output_path = f"features_{datetime.now().strftime('%Y%m%d')}.parquet"
+    features.to_parquet(output_path)
+
+    logger.info(f"Loaded features to {output_path}")
+
+# Create pipeline
+pipeline = DataPipeline("user_features", mode=PipelineMode.BATCH)
+
+# Add steps
+pipeline.add_step(StepConfig(
+    name="extract",
+    function=extract_data,
+    retries=3,
+    retry_delay=60,
+    timeout=600
+))
+
+pipeline.add_step(StepConfig(
+    name="validate",
+    function=validate_data,
+    dependencies=["extract"],
+    retries=1  # Validation failures shouldn't retry
+))
+
+pipeline.add_step(StepConfig(
+    name="transform",
+    function=transform_features,
+    dependencies=["validate"],
+    retries=2
+))
+
+pipeline.add_step(StepConfig(
+    name="load",
+    function=load_features,
+    dependencies=["transform"],
+    retries=3,
+    skip_on_failure=False  # Critical step
+))
+
+# Execute pipeline
+pipeline.context['start_date'] = '2024-01-01'
+results = pipeline.run()
+
+# Check results
+if all(r.status == StepStatus.SUCCESS for r in results.values()):
+    logger.info("Pipeline completed successfully")
+else:
+    logger.error("Pipeline completed with errors")
+
+# Visualize
+dot_graph = pipeline.visualize_pipeline()
+print(dot_graph)
+\end{lstlisting}
+
+\section{Stream Processing for Real-Time ML}
+
+Real-time ML requires streaming pipelines that compute features with low latency.
+
+\subsection{StreamProcessor: Real-Time Feature Computation}
+
+\begin{lstlisting}[language=Python, caption={Stream Processing Framework}]
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from collections import deque
+import threading
+import queue
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class StreamEvent:
+    """
+    Event in a data stream.
+
+    Attributes:
+        event_id: Unique event identifier
+        timestamp: Event timestamp
+        data: Event payload
+        metadata: Additional metadata
+    """
+    event_id: str
+    timestamp: datetime
+    data: Dict[str, Any]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class WindowConfig:
+    """
+    Configuration for time windows.
+
+    Attributes:
+        window_type: "tumbling", "sliding", or "session"
+        window_size: Window duration
+        slide_interval: Slide interval for sliding windows
+        session_gap: Gap timeout for session windows
+    """
+    window_type: str
+    window_size: timedelta
+    slide_interval: Optional[timedelta] = None
+    session_gap: Optional[timedelta] = None
+
+class StreamProcessor:
+    """
+    Real-time stream processor for ML feature computation.
+
+    Supports windowing, aggregations, and stateful processing.
+
+    Example:
+        >>> processor = StreamProcessor("user_events")
+        >>> processor.add_aggregation(
+        ...     "avg_amount",
+        ...     lambda events: np.mean([e.data['amount'] for e in events])
+        ... )
+        >>> processor.start()
+        >>> processor.process_event(event)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        window_config: WindowConfig,
+        max_queue_size: int = 10000,
+        checkpoint_interval: int = 100
+    ):
+        """
+        Initialize stream processor.
+
+        Args:
+            name: Processor identifier
+            window_config: Window configuration
+            max_queue_size: Maximum events in queue
+            checkpoint_interval: Events between checkpoints
+        """
+        self.name = name
+        self.window_config = window_config
+        self.max_queue_size = max_queue_size
+        self.checkpoint_interval = checkpoint_interval
+
+        # Event queue
+        self.event_queue: queue.Queue = queue.Queue(
+            maxsize=max_queue_size
+        )
+
+        # Windows storage
+        self.windows: Dict[str, deque] = {}
+
+        # Aggregation functions
+        self.aggregations: Dict[str, Callable] = {}
+
+        # Processing thread
+        self.processing_thread: Optional[threading.Thread] = None
+        self.running = False
+
+        # Metrics
+        self.events_processed = 0
+        self.events_dropped = 0
+        self.processing_latencies: deque = deque(maxlen=1000)
+
+        logger.info(
+            f"Initialized StreamProcessor: {name} "
+            f"(window={window_config.window_type})"
+        )
+
+    def add_aggregation(
+        self,
+        name: str,
+        function: Callable[[List[StreamEvent]], Any]
+    ):
+        """
+        Add an aggregation function.
+
+        Args:
+            name: Aggregation name
+            function: Function that takes list of events and returns result
+        """
+        self.aggregations[name] = function
+        logger.info(f"Added aggregation: {name}")
+
+    def start(self):
+        """Start stream processing."""
+        if self.running:
+            logger.warning("Processor already running")
+            return
+
+        self.running = True
+        self.processing_thread = threading.Thread(
+            target=self._process_loop,
+            daemon=True
+        )
+        self.processing_thread.start()
+
+        logger.info(f"Started stream processor: {self.name}")
+
+    def stop(self):
+        """Stop stream processing."""
+        self.running = False
+
+        if self.processing_thread:
+            self.processing_thread.join(timeout=5)
+
+        logger.info(f"Stopped stream processor: {self.name}")
+
+    def process_event(self, event: StreamEvent):
+        """
+        Process a single event.
+
+        Args:
+            event: Event to process
+        """
+        try:
+            self.event_queue.put(event, timeout=1)
+        except queue.Full:
+            self.events_dropped += 1
+            logger.warning(f"Event queue full, dropped event {event.event_id}")
+
+    def _process_loop(self):
+        """Main processing loop."""
+        while self.running:
+            try:
+                # Get event from queue
+                event = self.event_queue.get(timeout=1)
+
+                # Process event
+                start_time = datetime.now()
+                self._process_single_event(event)
+                end_time = datetime.now()
+
+                # Track latency
+                latency = (end_time - start_time).total_seconds()
+                self.processing_latencies.append(latency)
+
+                self.events_processed += 1
+
+                # Checkpoint periodically
+                if self.events_processed % self.checkpoint_interval == 0:
+                    self._checkpoint()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error processing event: {e}")
+                logger.error(traceback.format_exc())
+
+    def _process_single_event(self, event: StreamEvent):
+        """
+        Process a single event and update windows.
+
+        Args:
+            event: Event to process
+        """
+        # Determine which window(s) this event belongs to
+        window_keys = self._get_window_keys(event)
+
+        for window_key in window_keys:
+            # Initialize window if needed
+            if window_key not in self.windows:
+                self.windows[window_key] = deque()
+
+            # Add event to window
+            self.windows[window_key].append(event)
+
+            # Evict old events
+            self._evict_old_events(window_key)
+
+        # Clean up expired windows
+        self._cleanup_windows(event.timestamp)
+
+    def _get_window_keys(self, event: StreamEvent) -> List[str]:
+        """
+        Get window keys for an event.
+
+        Args:
+            event: Event to process
+
+        Returns:
+            List of window keys
+        """
+        timestamp = event.timestamp
+
+        if self.window_config.window_type == "tumbling":
+            # Single window based on time bucket
+            window_start = self._round_down_to_window(timestamp)
+            return [window_start.isoformat()]
+
+        elif self.window_config.window_type == "sliding":
+            # Multiple overlapping windows
+            slide = self.window_config.slide_interval
+            window_size = self.window_config.window_size
+
+            windows = []
+            # Find all windows this event belongs to
+            current_window = self._round_down_to_window(timestamp)
+
+            # Look back to find all relevant windows
+            lookback = window_size
+            check_time = current_window
+
+            while check_time >= timestamp - lookback:
+                window_end = check_time + window_size
+                if timestamp < window_end:
+                    windows.append(check_time.isoformat())
+
+                check_time -= slide
+
+            return windows
+
+        else:  # session
+            # Session windows group events with gaps < session_gap
+            # This is simplified; full implementation would track sessions
+            return ["session_" + timestamp.strftime("%Y%m%d_%H")]
+
+    def _round_down_to_window(self, timestamp: datetime) -> datetime:
+        """
+        Round timestamp down to window boundary.
+
+        Args:
+            timestamp: Timestamp to round
+
+        Returns:
+            Rounded timestamp
+        """
+        window_size = self.window_config.window_size
+        epoch = datetime(1970, 1, 1)
+
+        seconds_since_epoch = (timestamp - epoch).total_seconds()
+        window_seconds = window_size.total_seconds()
+
+        bucket = int(seconds_since_epoch // window_seconds)
+        window_start = epoch + timedelta(seconds=bucket * window_seconds)
+
+        return window_start
+
+    def _evict_old_events(self, window_key: str):
+        """
+        Remove events outside window.
+
+        Args:
+            window_key: Window to clean
+        """
+        if window_key not in self.windows:
+            return
+
+        window = self.windows[window_key]
+        if not window:
+            return
+
+        # Parse window start from key
+        try:
+            window_start = datetime.fromisoformat(window_key)
+        except ValueError:
+            # Session window, skip eviction
+            return
+
+        window_end = window_start + self.window_config.window_size
+
+        # Remove events outside window
+        while window and window[0].timestamp < window_start:
+            window.popleft()
+
+        while window and window[-1].timestamp >= window_end:
+            window.pop()
+
+    def _cleanup_windows(self, current_time: datetime):
+        """
+        Remove expired windows.
+
+        Args:
+            current_time: Current timestamp
+        """
+        expired_keys = []
+
+        for window_key in self.windows:
+            try:
+                window_start = datetime.fromisoformat(window_key)
+                window_end = window_start + self.window_config.window_size
+
+                # Keep windows that might still receive events
+                # (account for late arrivals)
+                grace_period = timedelta(minutes=5)
+
+                if current_time > window_end + grace_period:
+                    expired_keys.append(window_key)
+            except ValueError:
+                # Session window, skip for now
+                continue
+
+        # Remove expired windows
+        for key in expired_keys:
+            del self.windows[key]
+
+    def _checkpoint(self):
+        """Save checkpoint for recovery."""
+        checkpoint_data = {
+            'timestamp': datetime.now().isoformat(),
+            'events_processed': self.events_processed,
+            'events_dropped': self.events_dropped,
+            'n_windows': len(self.windows)
+        }
+
+        logger.info(f"Checkpoint: {checkpoint_data}")
+
+    def compute_features(
+        self,
+        window_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Compute features for a window.
+
+        Args:
+            window_key: Window to compute features for (latest if None)
+
+        Returns:
+            Dictionary of computed features
+        """
+        if window_key is None:
+            # Get most recent window
+            if not self.windows:
+                return {}
+
+            window_key = max(self.windows.keys())
+
+        if window_key not in self.windows:
+            return {}
+
+        events = list(self.windows[window_key])
+
+        if not events:
+            return {}
+
+        # Compute all aggregations
+        features = {}
+
+        for agg_name, agg_func in self.aggregations.items():
+            try:
+                result = agg_func(events)
+                features[agg_name] = result
+            except Exception as e:
+                logger.error(f"Error computing {agg_name}: {e}")
+                features[agg_name] = None
+
+        return features
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """
+        Get processor metrics.
+
+        Returns:
+            Dictionary of metrics
+        """
+        latencies = list(self.processing_latencies)
+
+        return {
+            'events_processed': self.events_processed,
+            'events_dropped': self.events_dropped,
+            'drop_rate': (
+                self.events_dropped / max(self.events_processed, 1)
+            ),
+            'queue_size': self.event_queue.qsize(),
+            'n_windows': len(self.windows),
+            'avg_latency_ms': np.mean(latencies) * 1000 if latencies else 0,
+            'p95_latency_ms': (
+                np.percentile(latencies, 95) * 1000 if latencies else 0
+            ),
+            'p99_latency_ms': (
+                np.percentile(latencies, 99) * 1000 if latencies else 0
+            )
+        }
+\end{lstlisting}
+
+\subsection{Kafka Integration for Stream Processing}
+
+\begin{lstlisting}[language=Python, caption={Kafka Stream Processing}]
+from kafka import KafkaConsumer, KafkaProducer
+import json
+
+class KafkaStreamProcessor:
+    """
+    Stream processor integrated with Kafka.
+
+    Consumes events from Kafka topic, processes them,
+    and produces features to output topic.
+    """
+
+    def __init__(
+        self,
+        input_topic: str,
+        output_topic: str,
+        bootstrap_servers: List[str],
+        group_id: str,
+        processor: StreamProcessor
+    ):
+        """
+        Initialize Kafka stream processor.
+
+        Args:
+            input_topic: Kafka topic to consume from
+            output_topic: Kafka topic to produce to
+            bootstrap_servers: Kafka broker addresses
+            group_id: Consumer group ID
+            processor: StreamProcessor instance
+        """
+        self.input_topic = input_topic
+        self.output_topic = output_topic
+        self.processor = processor
+
+        # Initialize Kafka consumer
+        self.consumer = KafkaConsumer(
+            input_topic,
+            bootstrap_servers=bootstrap_servers,
+            group_id=group_id,
+            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+            auto_offset_reset='latest',
+            enable_auto_commit=True
+        )
+
+        # Initialize Kafka producer
+        self.producer = KafkaProducer(
+            bootstrap_servers=bootstrap_servers,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+
+        logger.info(
+            f"Initialized Kafka processor: "
+            f"{input_topic} -> {output_topic}"
+        )
+
+    def start(self):
+        """Start consuming and processing events."""
+        self.processor.start()
+
+        logger.info("Starting Kafka consumption")
+
+        try:
+            for message in self.consumer:
+                # Parse event
+                event_data = message.value
+
+                event = StreamEvent(
+                    event_id=event_data.get('event_id'),
+                    timestamp=datetime.fromisoformat(
+                        event_data.get('timestamp')
+                    ),
+                    data=event_data.get('data', {}),
+                    metadata={
+                        'partition': message.partition,
+                        'offset': message.offset
+                    }
+                )
+
+                # Process event
+                self.processor.process_event(event)
+
+                # Compute and publish features periodically
+                if self.processor.events_processed % 100 == 0:
+                    self._publish_features()
+
+        except KeyboardInterrupt:
+            logger.info("Shutting down Kafka processor")
+        finally:
+            self.stop()
+
+    def stop(self):
+        """Stop processing."""
+        self.processor.stop()
+        self.consumer.close()
+        self.producer.close()
+
+    def _publish_features(self):
+        """Publish computed features to output topic."""
+        features = self.processor.compute_features()
+
+        if features:
+            self.producer.send(
+                self.output_topic,
+                value={
+                    'timestamp': datetime.now().isoformat(),
+                    'features': features,
+                    'metrics': self.processor.get_metrics()
+                }
+            )
+
+            self.producer.flush()
+
+# Usage
+processor = StreamProcessor(
+    "user_transactions",
+    window_config=WindowConfig(
+        window_type="sliding",
+        window_size=timedelta(minutes=5),
+        slide_interval=timedelta(minutes=1)
+    )
+)
+
+# Add aggregations
+processor.add_aggregation(
+    "total_amount",
+    lambda events: sum(e.data['amount'] for e in events)
+)
+
+processor.add_aggregation(
+    "avg_amount",
+    lambda events: np.mean([e.data['amount'] for e in events])
+)
+
+processor.add_aggregation(
+    "transaction_count",
+    lambda events: len(events)
+)
+
+# Start Kafka processor
+kafka_processor = KafkaStreamProcessor(
+    input_topic="transactions",
+    output_topic="transaction_features",
+    bootstrap_servers=['localhost:9092'],
+    group_id="feature_processor",
+    processor=processor
+)
+
+kafka_processor.start()
+\end{lstlisting}
+
+\section{Data Validation and Quality Gates}
+
+Data validation prevents corrupted data from entering pipelines and models.
+
+\subsection{DataValidator: Schema and Quality Checking}
+
+\begin{lstlisting}[language=Python, caption={Comprehensive Data Validator}]
+from typing import Dict, List, Optional, Any, Callable, Union
+from dataclasses import dataclass, field
+from enum import Enum
+import pandas as pd
+import numpy as np
+from scipy import stats
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ValidationSeverity(Enum):
+    """Severity of validation failures."""
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+@dataclass
+class ValidationRule:
+    """
+    Data validation rule.
+
+    Attributes:
+        name: Rule identifier
+        description: Human-readable description
+        validator: Validation function
+        severity: Failure severity
+        enabled: Whether rule is active
+    """
+    name: str
+    description: str
+    validator: Callable[[pd.DataFrame], bool]
+    severity: ValidationSeverity
+    enabled: bool = True
+
+@dataclass
+class ValidationResult:
+    """
+    Result of validation.
+
+    Attributes:
+        rule_name: Name of rule
+        passed: Whether validation passed
+        severity: Severity level
+        message: Validation message
+        details: Additional details
+    """
+    rule_name: str
+    passed: bool
+    severity: ValidationSeverity
+    message: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+class DataValidator:
+    """
+    Comprehensive data validation framework.
+
+    Validates schema, data types, ranges, distributions, and custom rules.
+
+    Example:
+        >>> validator = DataValidator()
+        >>> validator.add_schema_check("user_id", "int64")
+        >>> validator.add_range_check("age", min_val=0, max_val=120)
+        >>> results = validator.validate(data)
+        >>> if not validator.passed(results):
+        ...     raise ValueError("Validation failed")
+    """
+
+    def __init__(self, fail_on_error: bool = True):
+        """
+        Initialize validator.
+
+        Args:
+            fail_on_error: Whether to raise exception on ERROR/CRITICAL
+        """
+        self.fail_on_error = fail_on_error
+        self.rules: List[ValidationRule] = []
+
+        logger.info("Initialized DataValidator")
+
+    def add_rule(self, rule: ValidationRule):
+        """
+        Add validation rule.
+
+        Args:
+            rule: Validation rule
+        """
+        self.rules.append(rule)
+        logger.debug(f"Added validation rule: {rule.name}")
+
+    def add_schema_check(
+        self,
+        column: str,
+        expected_dtype: str,
+        required: bool = True
+    ):
+        """
+        Add schema validation rule.
+
+        Args:
+            column: Column name
+            expected_dtype: Expected data type
+            required: Whether column is required
+        """
+        def validator(df: pd.DataFrame) -> bool:
+            if column not in df.columns:
+                return not required
+
+            actual_dtype = str(df[column].dtype)
+            return actual_dtype == expected_dtype
+
+        self.add_rule(ValidationRule(
+            name=f"schema_{column}",
+            description=f"Column {column} should have type {expected_dtype}",
+            validator=validator,
+            severity=ValidationSeverity.ERROR
+        ))
+
+    def add_range_check(
+        self,
+        column: str,
+        min_val: Optional[float] = None,
+        max_val: Optional[float] = None
+    ):
+        """
+        Add range validation rule.
+
+        Args:
+            column: Column name
+            min_val: Minimum allowed value
+            max_val: Maximum allowed value
+        """
+        def validator(df: pd.DataFrame) -> bool:
+            if column not in df.columns:
+                return False
+
+            values = df[column].dropna()
+
+            if min_val is not None and (values < min_val).any():
+                return False
+
+            if max_val is not None and (values > max_val).any():
+                return False
+
+            return True
+
+        self.add_rule(ValidationRule(
+            name=f"range_{column}",
+            description=f"Column {column} values should be in range [{min_val}, {max_val}]",
+            validator=validator,
+            severity=ValidationSeverity.ERROR
+        ))
+
+    def add_null_check(
+        self,
+        column: str,
+        max_null_rate: float = 0.0
+    ):
+        """
+        Add null value validation rule.
+
+        Args:
+            column: Column name
+            max_null_rate: Maximum allowed null rate (0.0 to 1.0)
+        """
+        def validator(df: pd.DataFrame) -> bool:
+            if column not in df.columns:
+                return False
+
+            null_rate = df[column].isnull().mean()
+            return null_rate <= max_null_rate
+
+        severity = (
+            ValidationSeverity.CRITICAL if max_null_rate == 0.0
+            else ValidationSeverity.WARNING
+        )
+
+        self.add_rule(ValidationRule(
+            name=f"null_{column}",
+            description=f"Column {column} null rate should be <= {max_null_rate:.1%}",
+            validator=validator,
+            severity=severity
+        ))
+
+    def add_uniqueness_check(
+        self,
+        column: str,
+        should_be_unique: bool = True
+    ):
+        """
+        Add uniqueness validation rule.
+
+        Args:
+            column: Column name
+            should_be_unique: Whether values should be unique
+        """
+        def validator(df: pd.DataFrame) -> bool:
+            if column not in df.columns:
+                return False
+
+            is_unique = df[column].is_unique
+
+            return is_unique == should_be_unique
+
+        self.add_rule(ValidationRule(
+            name=f"uniqueness_{column}",
+            description=f"Column {column} uniqueness should be {should_be_unique}",
+            validator=validator,
+            severity=ValidationSeverity.ERROR
+        ))
+
+    def add_distribution_check(
+        self,
+        column: str,
+        reference_data: pd.Series,
+        threshold: float = 0.05
+    ):
+        """
+        Add distribution drift validation rule.
+
+        Args:
+            column: Column name
+            reference_data: Reference distribution
+            threshold: KS test p-value threshold
+        """
+        def validator(df: pd.DataFrame) -> bool:
+            if column not in df.columns:
+                return False
+
+            current_data = df[column].dropna()
+
+            # Kolmogorov-Smirnov test
+            statistic, p_value = stats.ks_2samp(
+                reference_data,
+                current_data
+            )
+
+            return p_value >= threshold
+
+        self.add_rule(ValidationRule(
+            name=f"distribution_{column}",
+            description=f"Column {column} distribution should match reference",
+            validator=validator,
+            severity=ValidationSeverity.WARNING
+        ))
+
+    def add_custom_check(
+        self,
+        name: str,
+        description: str,
+        validator: Callable[[pd.DataFrame], bool],
+        severity: ValidationSeverity = ValidationSeverity.ERROR
+    ):
+        """
+        Add custom validation rule.
+
+        Args:
+            name: Rule name
+            description: Rule description
+            validator: Validation function
+            severity: Failure severity
+        """
+        self.add_rule(ValidationRule(
+            name=name,
+            description=description,
+            validator=validator,
+            severity=severity
+        ))
+
+    def validate(self, data: pd.DataFrame) -> List[ValidationResult]:
+        """
+        Run all validation rules.
+
+        Args:
+            data: Data to validate
+
+        Returns:
+            List of validation results
+        """
+        results = []
+
+        logger.info(f"Running {len(self.rules)} validation rules")
+
+        for rule in self.rules:
+            if not rule.enabled:
+                continue
+
+            try:
+                passed = rule.validator(data)
+
+                result = ValidationResult(
+                    rule_name=rule.name,
+                    passed=passed,
+                    severity=rule.severity,
+                    message=rule.description if passed else f"FAILED: {rule.description}"
+                )
+
+                results.append(result)
+
+                if not passed:
+                    log_level = (
+                        logging.CRITICAL if rule.severity == ValidationSeverity.CRITICAL
+                        else logging.ERROR if rule.severity == ValidationSeverity.ERROR
+                        else logging.WARNING
+                    )
+
+                    logger.log(
+                        log_level,
+                        f"Validation failed: {rule.name} - {rule.description}"
+                    )
+
+            except Exception as e:
+                logger.error(f"Validation rule {rule.name} raised exception: {e}")
+
+                results.append(ValidationResult(
+                    rule_name=rule.name,
+                    passed=False,
+                    severity=ValidationSeverity.CRITICAL,
+                    message=f"Validation error: {str(e)}"
+                ))
+
+        # Summary
+        passed_count = sum(1 for r in results if r.passed)
+        logger.info(
+            f"Validation complete: {passed_count}/{len(results)} passed"
+        )
+
+        # Raise exception if configured
+        if self.fail_on_error and not self.passed(results):
+            raise ValueError("Data validation failed")
+
+        return results
+
+    def passed(self, results: List[ValidationResult]) -> bool:
+        """
+        Check if validation passed overall.
+
+        Args:
+            results: Validation results
+
+        Returns:
+            True if no ERROR or CRITICAL failures
+        """
+        for result in results:
+            if not result.passed and result.severity in [
+                ValidationSeverity.ERROR,
+                ValidationSeverity.CRITICAL
+            ]:
+                return False
+
+        return True
+
+    def get_summary(
+        self,
+        results: List[ValidationResult]
+    ) -> Dict[str, Any]:
+        """
+        Get validation summary.
+
+        Args:
+            results: Validation results
+
+        Returns:
+            Summary dictionary
+        """
+        by_severity = {}
+        for severity in ValidationSeverity:
+            count = sum(
+                1 for r in results
+                if r.severity == severity and not r.passed
+            )
+            by_severity[severity.value] = count
+
+        failed = [r for r in results if not r.passed]
+
+        return {
+            'total_rules': len(results),
+            'passed': len(results) - len(failed),
+            'failed': len(failed),
+            'by_severity': by_severity,
+            'overall_passed': self.passed(results),
+            'failed_rules': [
+                {'name': r.rule_name, 'severity': r.severity.value}
+                for r in failed
+            ]
+        }
+\end{lstlisting}
+
+\subsection{Quality Gates in Pipelines}
+
+\begin{lstlisting}[language=Python, caption={Integrating Validation into Pipelines}]
+# Create validator
+validator = DataValidator(fail_on_error=True)
+
+# Schema checks
+validator.add_schema_check("user_id", "int64", required=True)
+validator.add_schema_check("amount", "float64", required=True)
+validator.add_schema_check("timestamp", "datetime64[ns]", required=True)
+
+# Range checks
+validator.add_range_check("amount", min_val=0, max_val=1000000)
+validator.add_range_check("age", min_val=18, max_val=100)
+
+# Null checks
+validator.add_null_check("user_id", max_null_rate=0.0)
+validator.add_null_check("amount", max_null_rate=0.01)
+
+# Uniqueness
+validator.add_uniqueness_check("transaction_id", should_be_unique=True)
+
+# Custom checks
+validator.add_custom_check(
+    name="business_hours",
+    description="Transactions should be during business hours",
+    validator=lambda df: (
+        df['timestamp'].dt.hour >= 6
+    ).all() and (
+        df['timestamp'].dt.hour <= 22
+    ).all(),
+    severity=ValidationSeverity.WARNING
+)
+
+# Add to pipeline
+def validate_step(context: Dict) -> pd.DataFrame:
+    """Pipeline validation step."""
+    data = context['extract']
+
+    logger.info("Validating data")
+
+    # Run validation
+    results = validator.validate(data)
+
+    # Get summary
+    summary = validator.get_summary(results)
+
+    logger.info(f"Validation summary: {summary}")
+
+    # Store validation results in context
+    context['validation_results'] = results
+    context['validation_summary'] = summary
+
+    return data
+
+# Add to pipeline
+pipeline.add_step(StepConfig(
+    name="validate",
+    function=validate_step,
+    dependencies=["extract"],
+    retries=1  # Don't retry validation
+))
+\end{lstlisting}
+
+\section{Pipeline Backfill and Historical Processing}
+
+Backfills recompute features for historical data when logic changes.
+
+\subsection{BackfillManager: Automated Historical Processing}
+
+\begin{lstlisting}[language=Python, caption={Backfill Automation Framework}]
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class BackfillConfig:
+    """
+    Configuration for backfill operation.
+
+    Attributes:
+        start_date: Start of backfill period
+        end_date: End of backfill period
+        batch_size: Records per batch
+        parallel_jobs: Number of parallel workers
+        overwrite: Whether to overwrite existing data
+    """
+    start_date: datetime
+    end_date: datetime
+    batch_size: int = 10000
+    parallel_jobs: int = 4
+    overwrite: bool = False
+
+class BackfillManager:
+    """
+    Manage backfill operations with dependency tracking.
+
+    Handles date range splitting, parallel execution,
+    and failure recovery.
+
+    Example:
+        >>> manager = BackfillManager(pipeline)
+        >>> config = BackfillConfig(
+        ...     start_date=datetime(2024, 1, 1),
+        ...     end_date=datetime(2024, 3, 1)
+        ... )
+        >>> manager.backfill(config)
+    """
+
+    def __init__(self, pipeline: DataPipeline):
+        """
+        Initialize backfill manager.
+
+        Args:
+            pipeline: Pipeline to run for backfill
+        """
+        self.pipeline = pipeline
+        self.completed_dates: List[datetime] = []
+        self.failed_dates: List[Tuple[datetime, str]] = []
+
+    def backfill(self, config: BackfillConfig):
+        """
+        Execute backfill operation.
+
+        Args:
+            config: Backfill configuration
+        """
+        # Generate date ranges
+        date_ranges = self._generate_date_ranges(
+            config.start_date,
+            config.end_date,
+            config.batch_size
+        )
+
+        logger.info(
+            f"Starting backfill: {len(date_ranges)} date ranges "
+            f"from {config.start_date} to {config.end_date}"
+        )
+
+        # Process each date range
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=config.parallel_jobs) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(
+                    self._process_date_range,
+                    start,
+                    end,
+                    config.overwrite
+                ): (start, end)
+                for start, end in date_ranges
+            }
+
+            # Wait for completion
+            for future in as_completed(futures):
+                start, end = futures[future]
+
+                try:
+                    future.result()
+                    self.completed_dates.append(start)
+                    logger.info(
+                        f"Completed backfill for {start.date()} to {end.date()}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed backfill for {start.date()} to {end.date()}: {e}"
+                    )
+                    self.failed_dates.append((start, str(e)))
+
+        # Summary
+        self._log_summary(config)
+
+    def _generate_date_ranges(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        days_per_batch: int
+    ) -> List[Tuple[datetime, datetime]]:
+        """
+        Generate list of date ranges for backfill.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            days_per_batch: Days per batch
+
+        Returns:
+            List of (start, end) date tuples
+        """
+        ranges = []
+        current = start_date
+
+        while current < end_date:
+            batch_end = min(
+                current + timedelta(days=days_per_batch),
+                end_date
+            )
+            ranges.append((current, batch_end))
+            current = batch_end
+
+        return ranges
+
+    def _process_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        overwrite: bool
+    ):
+        """
+        Process a single date range.
+
+        Args:
+            start_date: Range start
+            end_date: Range end
+            overwrite: Whether to overwrite existing data
+        """
+        # Check if already processed
+        if not overwrite and self._is_processed(start_date, end_date):
+            logger.info(
+                f"Skipping already processed range: "
+                f"{start_date.date()} to {end_date.date()}"
+            )
+            return
+
+        # Set date context
+        self.pipeline.context['start_date'] = start_date
+        self.pipeline.context['end_date'] = end_date
+        self.pipeline.context['backfill_mode'] = True
+
+        # Run pipeline
+        results = self.pipeline.run()
+
+        # Check success
+        if not all(r.status == StepStatus.SUCCESS for r in results.values()):
+            raise RuntimeError(
+                f"Pipeline failed for range {start_date.date()} to {end_date.date()}"
+            )
+
+    def _is_processed(
+        self,
+        start_date: datetime,
+        end_date: datetime
+    ) -> bool:
+        """
+        Check if date range already processed.
+
+        Args:
+            start_date: Range start
+            end_date: Range end
+
+        Returns:
+            True if already processed
+        """
+        # In production, check against metadata store
+        # For demo, always reprocess
+        return False
+
+    def _log_summary(self, config: BackfillConfig):
+        """Log backfill summary."""
+        total = len(self.completed_dates) + len(self.failed_dates)
+        success_rate = len(self.completed_dates) / total if total > 0 else 0
+
+        logger.info("=" * 60)
+        logger.info("Backfill Summary")
+        logger.info(f"  Total ranges: {total}")
+        logger.info(f"  Completed: {len(self.completed_dates)}")
+        logger.info(f"  Failed: {len(self.failed_dates)}")
+        logger.info(f"  Success rate: {success_rate:.1%}")
+
+        if self.failed_dates:
+            logger.error("Failed date ranges:")
+            for date, error in self.failed_dates:
+                logger.error(f"  {date.date()}: {error}")
+
+        logger.info("=" * 60)
+\end{lstlisting}
+
+\section{Real-World Scenario: Pipeline Failure}
+
+\subsection{The Problem}
+
+A credit scoring model experienced sudden degradation:
+\begin{itemize}
+    \item Precision dropped from 85\% to 62\% over 2 weeks
+    \item Recall remained stable at 78\%
+    \item No code changes to model or inference service
+\end{itemize}
+
+Investigation revealed a pipeline failure:
+\begin{itemize}
+    \item Feature pipeline step computing credit utilization began failing silently 2 weeks ago
+    \item Error handling caught exceptions but continued with default value (0.5)
+    \item All customers received same credit utilization feature (0.5 instead of actual values)
+    \item Model learned to ignore this feature in training, but production model still used it
+    \item Result: 35\% of predictions were incorrect
+\end{itemize}
+
+\textbf{Cost}: \$800K in bad loans approved, 2 weeks to detect, 3 days to fix.
+
+\subsection{The Solution}
+
+\begin{lstlisting}[language=Python, caption={Preventing Silent Pipeline Failures}]
+# 1. Add data validation as quality gate
+validator = DataValidator(fail_on_error=True)
+
+# Validate feature ranges match training distribution
+training_stats = {
+    'credit_utilization': {'mean': 0.35, 'std': 0.22, 'min': 0.0, 'max': 1.0},
+    'payment_history': {'mean': 0.87, 'std': 0.15, 'min': 0.0, 'max': 1.0}
+}
+
+for feature, stats in training_stats.items():
+    # Range check
+    validator.add_range_check(
+        feature,
+        min_val=stats['min'],
+        max_val=stats['max']
+    )
+
+    # Distribution check
+    validator.add_custom_check(
+        name=f"distribution_{feature}",
+        description=f"{feature} distribution should match training",
+        validator=lambda df, feat=feature, st=stats: (
+            abs(df[feat].mean() - st['mean']) < 0.1 and
+            abs(df[feat].std() - st['std']) < 0.1
+        ),
+        severity=ValidationSeverity.ERROR
+    )
+
+# 2. Add feature monitoring
+from monitoring import ModelMonitor, MetricConfig, MetricType
+
+monitor = ModelMonitor("credit_scoring_features")
+
+for feature in training_stats.keys():
+    monitor.register_metric(MetricConfig(
+        name=f"mean_{feature}",
+        metric_type=MetricType.GAUGE,
+        description=f"Mean value of {feature}",
+        thresholds={
+            AlertSeverity.WARNING: training_stats[feature]['mean'] * 0.8,
+            AlertSeverity.CRITICAL: training_stats[feature]['mean'] * 0.5
+        }
+    ))
+
+# 3. Improve error handling in pipeline
+def compute_credit_utilization(context: Dict) -> pd.DataFrame:
+    """Compute credit utilization with proper error handling."""
+    data = context['extract']
+
+    try:
+        # Compute utilization
+        data['credit_utilization'] = (
+            data['credit_used'] / data['credit_limit']
+        ).clip(0, 1)
+
+        # Validate results
+        if data['credit_utilization'].isnull().any():
+            raise ValueError("Null values in credit_utilization")
+
+        if not (0 <= data['credit_utilization']).all() | (data['credit_utilization'] <= 1).all():
+            raise ValueError("credit_utilization outside valid range [0, 1]")
+
+        # Log statistics
+        logger.info(
+            f"Credit utilization computed: "
+            f"mean={data['credit_utilization'].mean():.3f}, "
+            f"std={data['credit_utilization'].std():.3f}"
+        )
+
+        # Record metric
+        monitor.record_metric(
+            "mean_credit_utilization",
+            data['credit_utilization'].mean()
+        )
+
+        return data
+
+    except Exception as e:
+        logger.error(f"Failed to compute credit_utilization: {e}")
+        # DO NOT continue with default value
+        # Fail loudly to alert team
+        raise
+
+# 4. Add pipeline monitoring
+pipeline_monitor = ModelMonitor("credit_pipeline")
+
+pipeline_monitor.register_metric(MetricConfig(
+    name="pipeline_success_rate",
+    metric_type=MetricType.GAUGE,
+    description="Pipeline success rate",
+    thresholds={
+        AlertSeverity.WARNING: 0.95,
+        AlertSeverity.CRITICAL: 0.90
+    }
+))
+
+def monitored_pipeline_step(step_func):
+    """Decorator to monitor pipeline steps."""
+    @wraps(step_func)
+    def wrapper(context):
+        step_name = step_func.__name__
+        start_time = time.time()
+
+        try:
+            result = step_func(context)
+
+            # Record success
+            duration = time.time() - start_time
+            logger.info(f"Step {step_name} completed in {duration:.2f}s")
+
+            pipeline_monitor.record_prediction(
+                latency=duration,
+                confidence=1.0,
+                success=True
+            )
+
+            return result
+
+        except Exception as e:
+            # Record failure
+            duration = time.time() - start_time
+            logger.error(f"Step {step_name} failed after {duration:.2f}s: {e}")
+
+            pipeline_monitor.record_prediction(
+                latency=duration,
+                confidence=0.0,
+                success=False
+            )
+
+            raise
+
+    return wrapper
+
+# Apply to all steps
+compute_credit_utilization = monitored_pipeline_step(compute_credit_utilization)
+
+# 5. Add integration tests
+def test_pipeline_end_to_end():
+    """Test complete pipeline with known input."""
+    # Load test data
+    test_data = pd.read_parquet("test_data.parquet")
+
+    # Run pipeline
+    pipeline.context['test_mode'] = True
+    results = pipeline.run()
+
+    # Validate results
+    assert all(r.status == StepStatus.SUCCESS for r in results.values())
+
+    # Check feature values
+    output = results['transform'].output
+
+    assert 'credit_utilization' in output.columns
+    assert (output['credit_utilization'] >= 0).all()
+    assert (output['credit_utilization'] <= 1).all()
+
+    # Check statistics
+    assert abs(output['credit_utilization'].mean() - 0.35) < 0.1
+
+# Run tests in CI/CD
+test_pipeline_end_to_end()
+\end{lstlisting}
+
+\subsection{Outcome}
+
+With comprehensive validation and monitoring:
+\begin{itemize}
+    \item Pipeline failure detected within 15 minutes (alert triggered)
+    \item Automatic rollback to previous pipeline version
+    \item Root cause identified in 2 hours (missing API key in config)
+    \item Fix deployed and validated within 4 hours
+    \item Total impact: \$2K (vs \$800K without monitoring)
+\end{itemize}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Build ETL Pipeline}
+
+Create a complete ETL pipeline that:
+\begin{itemize}
+    \item Extracts user behavior data from database
+    \item Validates data quality with 10 checks
+    \item Transforms into ML features
+    \item Loads to feature store with versioning
+    \item Handles errors with retries and alerts
+\end{itemize}
+
+\subsection{Exercise 2: Stream Processing}
+
+Implement real-time feature computation:
+\begin{itemize}
+    \item Consume events from Kafka
+    \item Compute rolling aggregations (5min, 15min, 1hour windows)
+    \item Handle late arrivals and out-of-order events
+    \item Publish features to downstream services
+    \item Monitor processing latency and throughput
+\end{itemize}
+
+\subsection{Exercise 3: Data Validation Suite}
+
+Build comprehensive validation framework:
+\begin{itemize}
+    \item Schema validation (types, required fields)
+    \item Statistical validation (distributions, outliers)
+    \item Business rule validation (domain constraints)
+    \item Cross-field validation (dependencies)
+    \item Generate validation reports with visualizations
+\end{itemize}
+
+\subsection{Exercise 4: Backfill Automation}
+
+Create backfill system that:
+\begin{itemize}
+    \item Computes features for 2 years of historical data
+    \item Handles date dependencies correctly
+    \item Runs in parallel with 8 workers
+    \item Recovers from failures and resumes
+    \item Validates output matches production features
+\end{itemize}
+
+\subsection{Exercise 5: Pipeline Monitoring}
+
+Implement pipeline observability:
+\begin{itemize}
+    \item Track execution metrics (latency, throughput, errors)
+    \item Monitor data quality metrics
+    \item Detect anomalies in feature distributions
+    \item Alert on SLO violations
+    \item Generate dashboards for stakeholders
+\end{itemize}
+
+\subsection{Exercise 6: Airflow Integration}
+
+Build Airflow DAG for ML pipeline:
+\begin{itemize}
+    \item Schedule daily feature computation
+    \item Handle upstream dependencies (data availability)
+    \item Implement sensor for data freshness
+    \item Add branching based on data volume
+    \item Configure retries and alerting
+\end{itemize}
+
+\subsection{Exercise 7: Pipeline Testing Framework}
+
+Create testing infrastructure:
+\begin{itemize}
+    \item Unit tests for each pipeline step
+    \item Integration tests for complete pipeline
+    \item Property-based tests for transformations
+    \item Performance tests for scalability
+    \item Regression tests with golden datasets
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+    \item \textbf{Fail Loudly}: Silent failures corrupt models - validate aggressively and alert immediately
+    \item \textbf{Design for Failure}: Assume steps will fail - implement retries, recovery, and rollback
+    \item \textbf{Validate Everything}: Schema, ranges, distributions, business rules - don't trust upstream data
+    \item \textbf{Monitor Continuously}: Track data quality, pipeline health, and feature distributions
+    \item \textbf{Test Pipelines}: Unit test steps, integration test pipelines, validate end-to-end
+    \item \textbf{Idempotency Matters}: Design steps to be safely retryable without side effects
+    \item \textbf{Backfills are Expensive}: Get pipeline logic right first time through rigorous testing
+\end{itemize}
+
+Data pipelines are the foundation of reliable ML systems. Investing in robust pipeline engineering prevents the majority of production ML failures and enables teams to iterate quickly with confidence.

@@ -1,0 +1,2225 @@
+\chapter{Systematic Model Development and Selection}
+
+\section{Introduction}
+
+Model selection is one of the most critical decisions in machine learning projects. Yet many teams approach it unsystematically: trying a few algorithms, picking the one with the highest validation accuracy, and moving to production. This naive approach often leads to models that fail under real-world conditions—overfitting to validation data, poor performance on edge cases, or unacceptable inference latency.
+
+\subsection{The Model Selection Challenge}
+
+Consider a fraud detection system where false negatives cost \$500 on average but false positives require manual review costing \$5. A model with 99\% accuracy might be worse than one with 95\% accuracy if the latter has a better precision-recall trade-off. Beyond predictive performance, production constraints matter: inference latency, memory footprint, model interpretability, and maintenance complexity all impact real-world success.
+
+\subsection{Why Systematic Model Development Matters}
+
+Studies show that 87\% of machine learning projects never make it to production. A primary reason is inadequate model selection processes that ignore:
+
+\begin{itemize}
+    \item \textbf{Statistical significance}: Performance differences may be due to random variation
+    \item \textbf{Business constraints}: Best model $\neq$ most accurate model
+    \item \textbf{Complexity trade-offs}: Complex models may not justify marginal gains
+    \item \textbf{Production requirements}: Inference time, memory, and scalability matter
+    \item \textbf{Temporal dynamics}: Models degrade over time requiring monitoring
+\end{itemize}
+
+\subsection{Chapter Overview}
+
+This chapter presents a comprehensive framework for systematic model development:
+
+\begin{enumerate}
+    \item \textbf{Model Candidate Framework}: Standardized representation of models with performance metrics
+    \item \textbf{Cross-Validation Strategies}: Specialized approaches for time series, imbalanced, and grouped data
+    \item \textbf{Statistical Model Comparison}: Rigorous testing for significant differences
+    \item \textbf{Complexity Analysis}: Quantifying model complexity and trade-offs
+    \item \textbf{Automated Selection}: Business constraint-aware model selection
+    \item \textbf{Production Monitoring}: Detecting degradation and triggering retraining
+    \item \textbf{Model Registry}: Versioning, metadata, and deployment management
+\end{enumerate}
+
+\section{Model Candidate Framework}
+
+We need a standardized way to represent models that captures not just performance metrics but also operational characteristics critical for production deployment.
+
+\subsection{Core Model Representation}
+
+\begin{lstlisting}[language=Python, caption={Model Candidate Framework with Comprehensive Metrics}]
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Protocol, Tuple
+from enum import Enum
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, mean_squared_error, mean_absolute_error, r2_score
+)
+from datetime import datetime
+import time
+import logging
+import json
+from pathlib import Path
+import pickle
+import hashlib
+import sys
+
+logger = logging.getLogger(__name__)
+
+class ModelType(Enum):
+    """Type of machine learning task."""
+    BINARY_CLASSIFICATION = "binary_classification"
+    MULTICLASS_CLASSIFICATION = "multiclass_classification"
+    REGRESSION = "regression"
+    RANKING = "ranking"
+
+class ComplexityLevel(Enum):
+    """Model complexity categorization."""
+    LOW = "low"  # Linear models, decision trees
+    MEDIUM = "medium"  # Ensembles, shallow neural networks
+    HIGH = "high"  # Deep neural networks, large ensembles
+
+@dataclass
+class PerformanceMetrics:
+    """Comprehensive performance metrics for a model."""
+    # Primary metrics
+    accuracy: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    f1_score: Optional[float] = None
+    roc_auc: Optional[float] = None
+
+    # Regression metrics
+    mse: Optional[float] = None
+    rmse: Optional[float] = None
+    mae: Optional[float] = None
+    r2: Optional[float] = None
+
+    # Confidence intervals (95% CI)
+    accuracy_ci: Optional[Tuple[float, float]] = None
+    precision_ci: Optional[Tuple[float, float]] = None
+    recall_ci: Optional[Tuple[float, float]] = None
+
+    # Cross-validation stats
+    cv_mean: Optional[float] = None
+    cv_std: Optional[float] = None
+    cv_scores: Optional[List[float]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            k: v for k, v in self.__dict__.items()
+            if v is not None
+        }
+
+@dataclass
+class ComplexityMetrics:
+    """Metrics quantifying model complexity."""
+    n_parameters: int
+    n_features: int
+    model_size_bytes: int
+    training_time_seconds: float
+    inference_time_ms: float  # Per sample
+    memory_mb: float
+    complexity_level: ComplexityLevel
+
+    def compute_complexity_score(self) -> float:
+        """
+        Compute normalized complexity score (0-100).
+        Higher = more complex.
+        """
+        # Normalize each component (log scale for parameters/size)
+        param_score = min(np.log10(self.n_parameters + 1) / 8 * 100, 100)
+        size_score = min(np.log10(self.model_size_bytes + 1) / 9 * 100, 100)
+        time_score = min(self.inference_time_ms / 100 * 100, 100)
+        memory_score = min(self.memory_mb / 1000 * 100, 100)
+
+        # Weighted average
+        complexity_score = (
+            0.3 * param_score +
+            0.2 * size_score +
+            0.3 * time_score +
+            0.2 * memory_score
+        )
+
+        return complexity_score
+
+@dataclass
+class ModelCandidate:
+    """
+    Comprehensive representation of a model candidate.
+
+    Tracks performance, complexity, metadata, and operational
+    characteristics for systematic model comparison.
+    """
+    name: str
+    model_type: ModelType
+    estimator: BaseEstimator
+
+    # Performance
+    performance: PerformanceMetrics
+    complexity: ComplexityMetrics
+
+    # Metadata
+    created_at: datetime
+    algorithm: str
+    hyperparameters: Dict[str, Any]
+    feature_names: List[str]
+
+    # Training context
+    training_samples: int
+    validation_samples: int
+    training_duration: float
+
+    # Versioning
+    version: str = "1.0.0"
+    git_commit: Optional[str] = None
+
+    # Business metrics
+    business_value_score: Optional[float] = None
+    production_ready: bool = False
+
+    def compute_model_hash(self) -> str:
+        """Compute hash of model for versioning."""
+        config = {
+            "algorithm": self.algorithm,
+            "hyperparameters": self.hyperparameters,
+            "feature_names": sorted(self.feature_names),
+            "model_type": self.model_type.value
+        }
+        config_str = json.dumps(config, sort_keys=True)
+        return hashlib.sha256(config_str.encode()).hexdigest()[:16]
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions with timing."""
+        start = time.time()
+        predictions = self.estimator.predict(X)
+        duration = (time.time() - start) * 1000 / len(X)
+        logger.debug(f"Prediction time: {duration:.2f}ms per sample")
+        return predictions
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Make probability predictions if supported."""
+        if not hasattr(self.estimator, 'predict_proba'):
+            raise AttributeError(f"{self.algorithm} does not support predict_proba")
+        return self.estimator.predict_proba(X)
+
+    def save(self, path: Path) -> None:
+        """Save model and metadata to disk."""
+        path.mkdir(parents=True, exist_ok=True)
+
+        # Save estimator
+        model_path = path / "model.pkl"
+        with open(model_path, 'wb') as f:
+            pickle.dump(self.estimator, f)
+
+        # Save metadata
+        metadata = {
+            "name": self.name,
+            "model_type": self.model_type.value,
+            "algorithm": self.algorithm,
+            "hyperparameters": self.hyperparameters,
+            "feature_names": self.feature_names,
+            "performance": self.performance.to_dict(),
+            "complexity": {
+                "n_parameters": self.complexity.n_parameters,
+                "n_features": self.complexity.n_features,
+                "model_size_bytes": self.complexity.model_size_bytes,
+                "training_time_seconds": self.complexity.training_time_seconds,
+                "inference_time_ms": self.complexity.inference_time_ms,
+                "memory_mb": self.complexity.memory_mb,
+                "complexity_level": self.complexity.complexity_level.value
+            },
+            "created_at": self.created_at.isoformat(),
+            "version": self.version,
+            "git_commit": self.git_commit,
+            "training_samples": self.training_samples,
+            "validation_samples": self.validation_samples,
+            "business_value_score": self.business_value_score,
+            "production_ready": self.production_ready
+        }
+
+        metadata_path = path / "metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(f"Saved model to {path}")
+
+    @classmethod
+    def load(cls, path: Path) -> 'ModelCandidate':
+        """Load model and metadata from disk."""
+        # Load estimator
+        model_path = path / "model.pkl"
+        with open(model_path, 'rb') as f:
+            estimator = pickle.load(f)
+
+        # Load metadata
+        metadata_path = path / "metadata.json"
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        # Reconstruct ModelCandidate
+        performance = PerformanceMetrics(**metadata["performance"])
+
+        complexity_data = metadata["complexity"]
+        complexity = ComplexityMetrics(
+            n_parameters=complexity_data["n_parameters"],
+            n_features=complexity_data["n_features"],
+            model_size_bytes=complexity_data["model_size_bytes"],
+            training_time_seconds=complexity_data["training_time_seconds"],
+            inference_time_ms=complexity_data["inference_time_ms"],
+            memory_mb=complexity_data["memory_mb"],
+            complexity_level=ComplexityLevel(complexity_data["complexity_level"])
+        )
+
+        return cls(
+            name=metadata["name"],
+            model_type=ModelType(metadata["model_type"]),
+            estimator=estimator,
+            performance=performance,
+            complexity=complexity,
+            created_at=datetime.fromisoformat(metadata["created_at"]),
+            algorithm=metadata["algorithm"],
+            hyperparameters=metadata["hyperparameters"],
+            feature_names=metadata["feature_names"],
+            training_samples=metadata["training_samples"],
+            validation_samples=metadata["validation_samples"],
+            training_duration=complexity_data["training_time_seconds"],
+            version=metadata["version"],
+            git_commit=metadata.get("git_commit"),
+            business_value_score=metadata.get("business_value_score"),
+            production_ready=metadata.get("production_ready", False)
+        )
+
+    def __str__(self) -> str:
+        """Human-readable representation."""
+        primary_metric = (
+            self.performance.accuracy if self.performance.accuracy is not None
+            else self.performance.r2
+        )
+        return (f"ModelCandidate(name='{self.name}', "
+                f"algorithm='{self.algorithm}', "
+                f"performance={primary_metric:.4f}, "
+                f"complexity_score={self.complexity.compute_complexity_score():.1f})")
+\end{lstlisting}
+
+\subsection{Model Builder}
+
+\begin{lstlisting}[language=Python, caption={Model Builder for Creating Candidates}]
+import psutil
+import os
+
+class ModelBuilder:
+    """Builder for creating ModelCandidate instances with complete metrics."""
+
+    def __init__(self, model_type: ModelType):
+        self.model_type = model_type
+
+    def build_candidate(
+        self,
+        name: str,
+        estimator: BaseEstimator,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        feature_names: List[str],
+        hyperparameters: Dict[str, Any],
+        version: str = "1.0.0"
+    ) -> ModelCandidate:
+        """
+        Build a complete ModelCandidate with all metrics computed.
+
+        Args:
+            name: Human-readable name
+            estimator: Fitted sklearn-compatible estimator
+            X_train, y_train: Training data
+            X_val, y_val: Validation data
+            feature_names: List of feature names
+            hyperparameters: Hyperparameter configuration
+            version: Model version string
+
+        Returns:
+            Complete ModelCandidate
+        """
+        logger.info(f"Building candidate: {name}")
+
+        # Train and measure time
+        start_time = time.time()
+        estimator.fit(X_train, y_train)
+        training_duration = time.time() - start_time
+
+        # Compute performance metrics
+        performance = self._compute_performance(estimator, X_val, y_val)
+
+        # Compute complexity metrics
+        complexity = self._compute_complexity(
+            estimator, X_val, feature_names, training_duration
+        )
+
+        # Create candidate
+        candidate = ModelCandidate(
+            name=name,
+            model_type=self.model_type,
+            estimator=estimator,
+            performance=performance,
+            complexity=complexity,
+            created_at=datetime.now(),
+            algorithm=type(estimator).__name__,
+            hyperparameters=hyperparameters,
+            feature_names=feature_names,
+            training_samples=len(X_train),
+            validation_samples=len(X_val),
+            training_duration=training_duration,
+            version=version
+        )
+
+        logger.info(f"Built candidate: {candidate}")
+        return candidate
+
+    def _compute_performance(
+        self,
+        estimator: BaseEstimator,
+        X_val: np.ndarray,
+        y_val: np.ndarray
+    ) -> PerformanceMetrics:
+        """Compute comprehensive performance metrics."""
+        y_pred = estimator.predict(X_val)
+
+        metrics = PerformanceMetrics()
+
+        if self.model_type in [ModelType.BINARY_CLASSIFICATION,
+                               ModelType.MULTICLASS_CLASSIFICATION]:
+            # Classification metrics
+            metrics.accuracy = accuracy_score(y_val, y_pred)
+            metrics.precision = precision_score(
+                y_val, y_pred, average='binary' if self.model_type ==
+                ModelType.BINARY_CLASSIFICATION else 'weighted', zero_division=0
+            )
+            metrics.recall = recall_score(
+                y_val, y_pred, average='binary' if self.model_type ==
+                ModelType.BINARY_CLASSIFICATION else 'weighted', zero_division=0
+            )
+            metrics.f1_score = f1_score(
+                y_val, y_pred, average='binary' if self.model_type ==
+                ModelType.BINARY_CLASSIFICATION else 'weighted', zero_division=0
+            )
+
+            # ROC AUC (requires predict_proba)
+            if hasattr(estimator, 'predict_proba'):
+                y_proba = estimator.predict_proba(X_val)
+                if self.model_type == ModelType.BINARY_CLASSIFICATION:
+                    metrics.roc_auc = roc_auc_score(y_val, y_proba[:, 1])
+                else:
+                    metrics.roc_auc = roc_auc_score(
+                        y_val, y_proba, multi_class='ovr', average='weighted'
+                    )
+
+        elif self.model_type == ModelType.REGRESSION:
+            # Regression metrics
+            metrics.mse = mean_squared_error(y_val, y_pred)
+            metrics.rmse = np.sqrt(metrics.mse)
+            metrics.mae = mean_absolute_error(y_val, y_pred)
+            metrics.r2 = r2_score(y_val, y_pred)
+
+        return metrics
+
+    def _compute_complexity(
+        self,
+        estimator: BaseEstimator,
+        X_sample: np.ndarray,
+        feature_names: List[str],
+        training_time: float
+    ) -> ComplexityMetrics:
+        """Compute complexity metrics."""
+        # Count parameters
+        n_params = self._count_parameters(estimator)
+
+        # Model size in bytes
+        model_bytes = len(pickle.dumps(estimator))
+
+        # Inference time (average over 100 samples)
+        n_samples = min(100, len(X_sample))
+        X_test = X_sample[:n_samples]
+
+        start = time.time()
+        _ = estimator.predict(X_test)
+        inference_time = (time.time() - start) * 1000 / n_samples
+
+        # Memory usage estimate
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+
+        # Determine complexity level
+        complexity_level = self._determine_complexity_level(estimator, n_params)
+
+        return ComplexityMetrics(
+            n_parameters=n_params,
+            n_features=len(feature_names),
+            model_size_bytes=model_bytes,
+            training_time_seconds=training_time,
+            inference_time_ms=inference_time,
+            memory_mb=memory_mb,
+            complexity_level=complexity_level
+        )
+
+    def _count_parameters(self, estimator: BaseEstimator) -> int:
+        """Count trainable parameters in model."""
+        # For sklearn models
+        if hasattr(estimator, 'coef_'):
+            return np.prod(estimator.coef_.shape)
+        elif hasattr(estimator, 'n_features_in_'):
+            return estimator.n_features_in_
+        elif hasattr(estimator, 'tree_'):
+            # Decision trees
+            return estimator.tree_.node_count
+        elif hasattr(estimator, 'estimators_'):
+            # Ensembles
+            return sum(
+                self._count_parameters(e) for e in estimator.estimators_
+            )
+        else:
+            # Default estimate
+            return 1000
+
+    def _determine_complexity_level(
+        self,
+        estimator: BaseEstimator,
+        n_params: int
+    ) -> ComplexityLevel:
+        """Determine complexity level based on model type and size."""
+        algo_name = type(estimator).__name__.lower()
+
+        if 'linear' in algo_name or 'logistic' in algo_name:
+            return ComplexityLevel.LOW
+        elif 'tree' in algo_name and 'forest' not in algo_name:
+            return ComplexityLevel.LOW
+        elif 'forest' in algo_name or 'gradient' in algo_name or 'xgb' in algo_name:
+            return ComplexityLevel.MEDIUM
+        elif n_params > 100000:
+            return ComplexityLevel.HIGH
+        else:
+            return ComplexityLevel.MEDIUM
+\end{lstlisting}
+
+\section{Cross-Validation Strategies}
+
+Different data types require specialized cross-validation strategies to ensure valid performance estimates.
+
+\subsection{Comprehensive Cross-Validation Framework}
+
+\begin{lstlisting}[language=Python, caption={Cross-Validation Strategies for Different Data Types}]
+from sklearn.model_selection import (
+    KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold, cross_val_score
+)
+from typing import Iterator, Union
+from abc import ABC, abstractmethod
+
+class CrossValidationStrategy(ABC):
+    """Abstract base class for cross-validation strategies."""
+
+    @abstractmethod
+    def split(self, X: np.ndarray, y: np.ndarray,
+             groups: Optional[np.ndarray] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        """Generate train/test indices for cross-validation."""
+        pass
+
+    @abstractmethod
+    def get_n_splits(self) -> int:
+        """Return number of splits."""
+        pass
+
+class StandardCVStrategy(CrossValidationStrategy):
+    """Standard k-fold cross-validation."""
+
+    def __init__(self, n_splits: int = 5, shuffle: bool = True, random_state: int = 42):
+        self.cv = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
+
+    def split(self, X: np.ndarray, y: np.ndarray,
+             groups: Optional[np.ndarray] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        return self.cv.split(X, y)
+
+    def get_n_splits(self) -> int:
+        return self.cv.n_splits
+
+class StratifiedCVStrategy(CrossValidationStrategy):
+    """Stratified k-fold for imbalanced classification."""
+
+    def __init__(self, n_splits: int = 5, shuffle: bool = True, random_state: int = 42):
+        self.cv = StratifiedKFold(n_splits=n_splits, shuffle=shuffle,
+                                  random_state=random_state)
+
+    def split(self, X: np.ndarray, y: np.ndarray,
+             groups: Optional[np.ndarray] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        return self.cv.split(X, y)
+
+    def get_n_splits(self) -> int:
+        return self.cv.n_splits
+
+class TimeSeriesCVStrategy(CrossValidationStrategy):
+    """
+    Time series cross-validation with expanding window.
+
+    Maintains temporal order and prevents data leakage.
+    """
+
+    def __init__(self, n_splits: int = 5, max_train_size: Optional[int] = None):
+        self.cv = TimeSeriesSplit(n_splits=n_splits, max_train_size=max_train_size)
+
+    def split(self, X: np.ndarray, y: np.ndarray,
+             groups: Optional[np.ndarray] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        return self.cv.split(X)
+
+    def get_n_splits(self) -> int:
+        return self.cv.n_splits
+
+class GroupedCVStrategy(CrossValidationStrategy):
+    """
+    Grouped k-fold for preventing data leakage across groups.
+
+    Example: Customer-level splits to prevent customer data in both
+    train and test sets.
+    """
+
+    def __init__(self, n_splits: int = 5):
+        self.cv = GroupKFold(n_splits=n_splits)
+
+    def split(self, X: np.ndarray, y: np.ndarray,
+             groups: Optional[np.ndarray] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        if groups is None:
+            raise ValueError("GroupedCVStrategy requires 'groups' parameter")
+        return self.cv.split(X, y, groups=groups)
+
+    def get_n_splits(self) -> int:
+        return self.cv.n_splits
+
+@dataclass
+class CrossValidationResult:
+    """Results from cross-validation."""
+    model_name: str
+    cv_scores: List[float]
+    mean_score: float
+    std_score: float
+    confidence_interval: Tuple[float, float]  # 95% CI
+    strategy: str
+    n_splits: int
+
+    def __str__(self) -> str:
+        return (f"{self.model_name}: {self.mean_score:.4f} +/- {self.std_score:.4f} "
+                f"(95% CI: [{self.confidence_interval[0]:.4f}, "
+                f"{self.confidence_interval[1]:.4f}])")
+
+class CrossValidator:
+    """
+    Comprehensive cross-validation with support for different data types.
+    """
+
+    def __init__(self, strategy: CrossValidationStrategy, scoring: str = 'accuracy'):
+        """
+        Args:
+            strategy: Cross-validation strategy
+            scoring: Scoring metric (sklearn scoring string)
+        """
+        self.strategy = strategy
+        self.scoring = scoring
+
+    def evaluate_model(
+        self,
+        estimator: BaseEstimator,
+        X: np.ndarray,
+        y: np.ndarray,
+        groups: Optional[np.ndarray] = None,
+        model_name: str = "model"
+    ) -> CrossValidationResult:
+        """
+        Evaluate model using cross-validation.
+
+        Returns:
+            CrossValidationResult with statistics and confidence intervals
+        """
+        logger.info(f"Cross-validating {model_name} with {self.strategy.__class__.__name__}")
+
+        # Perform cross-validation
+        cv_scores = []
+        for train_idx, test_idx in self.strategy.split(X, y, groups):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Train and evaluate
+            estimator.fit(X_train, y_train)
+            score = self._compute_score(estimator, X_test, y_test)
+            cv_scores.append(score)
+
+        # Calculate statistics
+        mean_score = np.mean(cv_scores)
+        std_score = np.std(cv_scores)
+
+        # 95% confidence interval (t-distribution)
+        from scipy import stats
+        n = len(cv_scores)
+        ci = stats.t.interval(
+            0.95, n - 1, loc=mean_score, scale=std_score / np.sqrt(n)
+        )
+
+        result = CrossValidationResult(
+            model_name=model_name,
+            cv_scores=cv_scores,
+            mean_score=mean_score,
+            std_score=std_score,
+            confidence_interval=ci,
+            strategy=self.strategy.__class__.__name__,
+            n_splits=self.strategy.get_n_splits()
+        )
+
+        logger.info(str(result))
+        return result
+
+    def _compute_score(self, estimator: BaseEstimator,
+                      X_test: np.ndarray, y_test: np.ndarray) -> float:
+        """Compute score based on scoring metric."""
+        from sklearn.metrics import get_scorer
+        scorer = get_scorer(self.scoring)
+        return scorer(estimator, X_test, y_test)
+
+    def compare_models(
+        self,
+        estimators: Dict[str, BaseEstimator],
+        X: np.ndarray,
+        y: np.ndarray,
+        groups: Optional[np.ndarray] = None
+    ) -> pd.DataFrame:
+        """
+        Compare multiple models using cross-validation.
+
+        Returns:
+            DataFrame with comparison results
+        """
+        results = []
+
+        for name, estimator in estimators.items():
+            cv_result = self.evaluate_model(estimator, X, y, groups, name)
+            results.append({
+                "model": name,
+                "mean_score": cv_result.mean_score,
+                "std_score": cv_result.std_score,
+                "ci_lower": cv_result.confidence_interval[0],
+                "ci_upper": cv_result.confidence_interval[1]
+            })
+
+        df = pd.DataFrame(results)
+        df = df.sort_values("mean_score", ascending=False)
+
+        logger.info(f"Compared {len(estimators)} models")
+        return df
+\end{lstlisting}
+
+\section{Statistical Model Comparison}
+
+Performance differences between models must be statistically significant, not due to random variation.
+
+\subsection{Statistical Testing Framework}
+
+\begin{lstlisting}[language=Python, caption={Statistical Model Comparison with Multiple Tests}]
+from scipy.stats import ttest_rel, wilcoxon
+from sklearn.metrics import accuracy_score
+from itertools import combinations
+
+@dataclass
+class ComparisonResult:
+    """Result of statistical comparison between two models."""
+    model_a: str
+    model_b: str
+    test_statistic: float
+    p_value: float
+    is_significant: bool
+    alpha: float
+    test_method: str
+    winner: Optional[str] = None
+
+    def __str__(self) -> str:
+        sig = "significant" if self.is_significant else "not significant"
+        winner_str = f", winner: {self.winner}" if self.winner else ""
+        return (f"{self.model_a} vs {self.model_b}: "
+                f"p={self.p_value:.4f} ({sig}{winner_str}) [{self.test_method}]")
+
+class ModelComparator:
+    """
+    Statistical comparison of model performance.
+
+    Supports:
+    - Paired t-test (for cross-validation scores)
+    - McNemar's test (for binary classification)
+    - Permutation test (non-parametric)
+    """
+
+    def __init__(self, alpha: float = 0.05):
+        """
+        Args:
+            alpha: Significance level for hypothesis tests
+        """
+        self.alpha = alpha
+
+    def compare_cv_scores(
+        self,
+        model_a_name: str,
+        model_a_scores: List[float],
+        model_b_name: str,
+        model_b_scores: List[float]
+    ) -> ComparisonResult:
+        """
+        Compare two models using paired t-test on CV scores.
+
+        Tests null hypothesis: models have equal performance.
+        """
+        if len(model_a_scores) != len(model_b_scores):
+            raise ValueError("Score arrays must have same length")
+
+        # Paired t-test
+        statistic, p_value = ttest_rel(model_a_scores, model_b_scores)
+
+        is_significant = p_value < self.alpha
+
+        # Determine winner
+        winner = None
+        if is_significant:
+            if np.mean(model_a_scores) > np.mean(model_b_scores):
+                winner = model_a_name
+            else:
+                winner = model_b_name
+
+        result = ComparisonResult(
+            model_a=model_a_name,
+            model_b=model_b_name,
+            test_statistic=statistic,
+            p_value=p_value,
+            is_significant=is_significant,
+            alpha=self.alpha,
+            test_method="paired_t_test",
+            winner=winner
+        )
+
+        logger.info(str(result))
+        return result
+
+    def mcnemar_test(
+        self,
+        model_a_name: str,
+        model_a_predictions: np.ndarray,
+        model_b_name: str,
+        model_b_predictions: np.ndarray,
+        y_true: np.ndarray
+    ) -> ComparisonResult:
+        """
+        McNemar's test for comparing binary classifiers.
+
+        Tests whether the disagreements between models are systematic.
+        """
+        # Create contingency table
+        a_correct = model_a_predictions == y_true
+        b_correct = model_b_predictions == y_true
+
+        # Count agreements and disagreements
+        both_correct = np.sum(a_correct & b_correct)
+        both_wrong = np.sum(~a_correct & ~b_correct)
+        a_correct_b_wrong = np.sum(a_correct & ~b_correct)
+        a_wrong_b_correct = np.sum(~a_correct & b_correct)
+
+        # McNemar's test statistic
+        # Uses only the disagreements
+        n = a_correct_b_wrong + a_wrong_b_correct
+
+        if n == 0:
+            # Models have identical predictions
+            p_value = 1.0
+            statistic = 0.0
+        else:
+            # Chi-squared test with continuity correction
+            statistic = (abs(a_correct_b_wrong - a_wrong_b_correct) - 1) ** 2 / n
+
+            from scipy.stats import chi2
+            p_value = 1 - chi2.cdf(statistic, df=1)
+
+        is_significant = p_value < self.alpha
+
+        # Determine winner
+        winner = None
+        if is_significant:
+            if a_correct_b_wrong > a_wrong_b_correct:
+                winner = model_a_name
+            else:
+                winner = model_b_name
+
+        result = ComparisonResult(
+            model_a=model_a_name,
+            model_b=model_b_name,
+            test_statistic=statistic,
+            p_value=p_value,
+            is_significant=is_significant,
+            alpha=self.alpha,
+            test_method="mcnemar_test",
+            winner=winner
+        )
+
+        logger.info(str(result))
+        logger.info(f"  Contingency: both_correct={both_correct}, "
+                   f"both_wrong={both_wrong}, "
+                   f"A_correct_B_wrong={a_correct_b_wrong}, "
+                   f"A_wrong_B_correct={a_wrong_b_correct}")
+
+        return result
+
+    def permutation_test(
+        self,
+        model_a_name: str,
+        model_a_scores: np.ndarray,
+        model_b_name: str,
+        model_b_scores: np.ndarray,
+        n_permutations: int = 10000
+    ) -> ComparisonResult:
+        """
+        Non-parametric permutation test for comparing models.
+
+        Tests whether the observed difference could occur by chance.
+        """
+        # Observed difference
+        observed_diff = np.mean(model_a_scores) - np.mean(model_b_scores)
+
+        # Combine scores
+        combined = np.concatenate([model_a_scores, model_b_scores])
+        n_a = len(model_a_scores)
+
+        # Permutation test
+        count_extreme = 0
+
+        np.random.seed(42)
+        for _ in range(n_permutations):
+            # Randomly permute
+            permuted = np.random.permutation(combined)
+            perm_a = permuted[:n_a]
+            perm_b = permuted[n_a:]
+
+            # Calculate permuted difference
+            perm_diff = np.mean(perm_a) - np.mean(perm_b)
+
+            # Count if as extreme as observed
+            if abs(perm_diff) >= abs(observed_diff):
+                count_extreme += 1
+
+        p_value = count_extreme / n_permutations
+        is_significant = p_value < self.alpha
+
+        # Determine winner
+        winner = None
+        if is_significant:
+            if observed_diff > 0:
+                winner = model_a_name
+            else:
+                winner = model_b_name
+
+        result = ComparisonResult(
+            model_a=model_a_name,
+            model_b=model_b_name,
+            test_statistic=observed_diff,
+            p_value=p_value,
+            is_significant=is_significant,
+            alpha=self.alpha,
+            test_method=f"permutation_test (n={n_permutations})",
+            winner=winner
+        )
+
+        logger.info(str(result))
+        return result
+
+    def compare_multiple_models(
+        self,
+        cv_results: Dict[str, List[float]]
+    ) -> List[ComparisonResult]:
+        """
+        Pairwise comparison of all model pairs.
+
+        Args:
+            cv_results: Dict mapping model names to CV scores
+
+        Returns:
+            List of ComparisonResults for all pairs
+        """
+        results = []
+
+        model_names = list(cv_results.keys())
+        for model_a, model_b in combinations(model_names, 2):
+            result = self.compare_cv_scores(
+                model_a, cv_results[model_a],
+                model_b, cv_results[model_b]
+            )
+            results.append(result)
+
+        # Sort by p-value
+        results.sort(key=lambda r: r.p_value)
+
+        logger.info(f"Completed {len(results)} pairwise comparisons")
+        return results
+\end{lstlisting}
+
+\section{Model Complexity and Performance Trade-offs}
+
+The best model balances predictive performance with operational complexity.
+
+\subsection{Complexity-Performance Analysis}
+
+\begin{lstlisting}[language=Python, caption={Model Complexity Trade-off Analysis}]
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+@dataclass
+class ComplexityTradeoff:
+    """Analysis of complexity-performance trade-off."""
+    model_name: str
+    performance_score: float
+    complexity_score: float
+    efficiency_score: float  # Performance per unit complexity
+    is_pareto_optimal: bool = False
+
+class ComplexityAnalyzer:
+    """
+    Analyze trade-offs between model performance and complexity.
+
+    Helps identify models on the Pareto frontier: no other model
+    is both simpler AND more accurate.
+    """
+
+    def analyze_tradeoffs(
+        self,
+        candidates: List[ModelCandidate],
+        performance_metric: str = "accuracy"
+    ) -> List[ComplexityTradeoff]:
+        """
+        Analyze complexity-performance trade-offs.
+
+        Args:
+            candidates: List of model candidates
+            performance_metric: Which metric to use for performance
+
+        Returns:
+            List of ComplexityTradeoff analyses
+        """
+        tradeoffs = []
+
+        for candidate in candidates:
+            # Extract performance score
+            perf_score = self._get_performance_metric(
+                candidate.performance, performance_metric
+            )
+
+            # Get complexity score
+            complexity_score = candidate.complexity.compute_complexity_score()
+
+            # Calculate efficiency (performance per unit complexity)
+            efficiency = perf_score / (complexity_score + 1)  # Add 1 to avoid div by 0
+
+            tradeoffs.append(ComplexityTradeoff(
+                model_name=candidate.name,
+                performance_score=perf_score,
+                complexity_score=complexity_score,
+                efficiency_score=efficiency
+            ))
+
+        # Identify Pareto optimal models
+        tradeoffs = self._identify_pareto_optimal(tradeoffs)
+
+        logger.info(f"Analyzed {len(candidates)} models for complexity trade-offs")
+        pareto_count = sum(1 for t in tradeoffs if t.is_pareto_optimal)
+        logger.info(f"Found {pareto_count} Pareto-optimal models")
+
+        return tradeoffs
+
+    def _get_performance_metric(
+        self,
+        performance: PerformanceMetrics,
+        metric_name: str
+    ) -> float:
+        """Extract specific performance metric."""
+        metric_value = getattr(performance, metric_name, None)
+        if metric_value is None:
+            raise ValueError(f"Metric '{metric_name}' not available")
+        return metric_value
+
+    def _identify_pareto_optimal(
+        self,
+        tradeoffs: List[ComplexityTradeoff]
+    ) -> List[ComplexityTradeoff]:
+        """
+        Identify Pareto-optimal models.
+
+        A model is Pareto-optimal if no other model is both:
+        - More accurate (higher performance score)
+        - Simpler (lower complexity score)
+        """
+        for i, candidate in enumerate(tradeoffs):
+            is_dominated = False
+
+            for j, other in enumerate(tradeoffs):
+                if i == j:
+                    continue
+
+                # Check if 'other' dominates 'candidate'
+                if (other.performance_score >= candidate.performance_score and
+                    other.complexity_score <= candidate.complexity_score and
+                    (other.performance_score > candidate.performance_score or
+                     other.complexity_score < candidate.complexity_score)):
+                    is_dominated = True
+                    break
+
+            candidate.is_pareto_optimal = not is_dominated
+
+        return tradeoffs
+
+    def plot_tradeoff(
+        self,
+        tradeoffs: List[ComplexityTradeoff],
+        output_path: Optional[Path] = None
+    ) -> None:
+        """
+        Visualize complexity-performance trade-off.
+
+        Creates scatter plot with Pareto frontier highlighted.
+        """
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Separate Pareto and non-Pareto models
+        pareto = [t for t in tradeoffs if t.is_pareto_optimal]
+        non_pareto = [t for t in tradeoffs if not t.is_pareto_optimal]
+
+        # Plot non-Pareto models
+        if non_pareto:
+            ax.scatter(
+                [t.complexity_score for t in non_pareto],
+                [t.performance_score for t in non_pareto],
+                c='lightblue', s=100, alpha=0.6, label='Other models'
+            )
+
+        # Plot Pareto-optimal models
+        if pareto:
+            ax.scatter(
+                [t.complexity_score for t in pareto],
+                [t.performance_score for t in pareto],
+                c='red', s=150, alpha=0.8, label='Pareto optimal', marker='*'
+            )
+
+            # Draw Pareto frontier
+            pareto_sorted = sorted(pareto, key=lambda t: t.complexity_score)
+            ax.plot(
+                [t.complexity_score for t in pareto_sorted],
+                [t.performance_score for t in pareto_sorted],
+                'r--', alpha=0.5, linewidth=2
+            )
+
+        # Annotate models
+        for t in tradeoffs:
+            ax.annotate(
+                t.model_name,
+                (t.complexity_score, t.performance_score),
+                xytext=(5, 5), textcoords='offset points',
+                fontsize=8, alpha=0.7
+            )
+
+        ax.set_xlabel('Complexity Score', fontsize=12)
+        ax.set_ylabel('Performance Score', fontsize=12)
+        ax.set_title('Model Complexity vs Performance Trade-off', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved trade-off plot to {output_path}")
+
+        plt.close()
+
+    def generate_report(self, tradeoffs: List[ComplexityTradeoff]) -> pd.DataFrame:
+        """Generate DataFrame report of trade-off analysis."""
+        data = []
+        for t in tradeoffs:
+            data.append({
+                "model": t.model_name,
+                "performance": t.performance_score,
+                "complexity": t.complexity_score,
+                "efficiency": t.efficiency_score,
+                "pareto_optimal": t.is_pareto_optimal
+            })
+
+        df = pd.DataFrame(data)
+        df = df.sort_values("efficiency", ascending=False)
+
+        return df
+\end{lstlisting}
+
+\section{Automated Model Selection}
+
+Integrate business constraints, performance requirements, and operational limits into automated model selection.
+
+\begin{lstlisting}[language=Python, caption={Automated Model Selection with Business Constraints}]
+@dataclass
+class BusinessConstraints:
+    """Business and operational constraints for model selection."""
+    max_inference_time_ms: Optional[float] = None
+    max_model_size_mb: Optional[float] = None
+    max_memory_mb: Optional[float] = None
+    min_accuracy: Optional[float] = None
+    min_recall: Optional[float] = None  # For high-recall applications
+    min_precision: Optional[float] = None  # For high-precision applications
+    require_interpretability: bool = False
+    max_complexity_level: Optional[ComplexityLevel] = None
+
+    def validate_candidate(self, candidate: ModelCandidate) -> Tuple[bool, List[str]]:
+        """
+        Check if candidate meets all constraints.
+
+        Returns:
+            (is_valid, list_of_violations)
+        """
+        violations = []
+
+        # Check inference time
+        if (self.max_inference_time_ms is not None and
+            candidate.complexity.inference_time_ms > self.max_inference_time_ms):
+            violations.append(
+                f"Inference time {candidate.complexity.inference_time_ms:.2f}ms "
+                f"exceeds limit {self.max_inference_time_ms}ms"
+            )
+
+        # Check model size
+        size_mb = candidate.complexity.model_size_bytes / 1024 / 1024
+        if self.max_model_size_mb is not None and size_mb > self.max_model_size_mb:
+            violations.append(
+                f"Model size {size_mb:.2f}MB exceeds limit {self.max_model_size_mb}MB"
+            )
+
+        # Check memory
+        if (self.max_memory_mb is not None and
+            candidate.complexity.memory_mb > self.max_memory_mb):
+            violations.append(
+                f"Memory {candidate.complexity.memory_mb:.2f}MB "
+                f"exceeds limit {self.max_memory_mb}MB"
+            )
+
+        # Check accuracy
+        if (self.min_accuracy is not None and
+            candidate.performance.accuracy is not None and
+            candidate.performance.accuracy < self.min_accuracy):
+            violations.append(
+                f"Accuracy {candidate.performance.accuracy:.4f} "
+                f"below minimum {self.min_accuracy}"
+            )
+
+        # Check recall
+        if (self.min_recall is not None and
+            candidate.performance.recall is not None and
+            candidate.performance.recall < self.min_recall):
+            violations.append(
+                f"Recall {candidate.performance.recall:.4f} "
+                f"below minimum {self.min_recall}"
+            )
+
+        # Check precision
+        if (self.min_precision is not None and
+            candidate.performance.precision is not None and
+            candidate.performance.precision < self.min_precision):
+            violations.append(
+                f"Precision {candidate.performance.precision:.4f} "
+                f"below minimum {self.min_precision}"
+            )
+
+        # Check complexity level
+        if (self.max_complexity_level is not None and
+            candidate.complexity.complexity_level.value >
+            self.max_complexity_level.value):
+            violations.append(
+                f"Complexity level {candidate.complexity.complexity_level.value} "
+                f"exceeds maximum {self.max_complexity_level.value}"
+            )
+
+        # Check interpretability
+        if self.require_interpretability:
+            interpretable_algos = ['linear', 'logistic', 'tree', 'ridge', 'lasso']
+            if not any(algo in candidate.algorithm.lower()
+                      for algo in interpretable_algos):
+                violations.append(
+                    f"Model {candidate.algorithm} not interpretable"
+                )
+
+        is_valid = len(violations) == 0
+        return is_valid, violations
+
+@dataclass
+class SelectionResult:
+    """Result of automated model selection."""
+    selected_model: ModelCandidate
+    all_candidates: List[ModelCandidate]
+    valid_candidates: List[ModelCandidate]
+    selection_criteria: str
+    constraints: BusinessConstraints
+    selection_score: float
+
+class AutomatedModelSelector:
+    """
+    Automated model selection with business constraints.
+
+    Scoring function:
+    score = performance_weight * performance +
+            simplicity_weight * (100 - complexity) +
+            efficiency_weight * efficiency
+    """
+
+    def __init__(self,
+                 performance_weight: float = 0.6,
+                 simplicity_weight: float = 0.2,
+                 efficiency_weight: float = 0.2):
+        """
+        Args:
+            performance_weight: Weight for predictive performance
+            simplicity_weight: Weight for model simplicity
+            efficiency_weight: Weight for inference efficiency
+        """
+        if abs(performance_weight + simplicity_weight + efficiency_weight - 1.0) > 1e-6:
+            raise ValueError("Weights must sum to 1.0")
+
+        self.performance_weight = performance_weight
+        self.simplicity_weight = simplicity_weight
+        self.efficiency_weight = efficiency_weight
+
+    def select_best_model(
+        self,
+        candidates: List[ModelCandidate],
+        constraints: BusinessConstraints,
+        performance_metric: str = "accuracy"
+    ) -> SelectionResult:
+        """
+        Select best model given candidates and constraints.
+
+        Args:
+            candidates: List of trained model candidates
+            constraints: Business and operational constraints
+            performance_metric: Primary performance metric
+
+        Returns:
+            SelectionResult with selected model and analysis
+        """
+        logger.info(f"Selecting from {len(candidates)} candidates")
+
+        # Filter by constraints
+        valid_candidates = []
+        for candidate in candidates:
+            is_valid, violations = constraints.validate_candidate(candidate)
+            if is_valid:
+                valid_candidates.append(candidate)
+            else:
+                logger.info(f"Candidate '{candidate.name}' failed constraints:")
+                for violation in violations:
+                    logger.info(f"  - {violation}")
+
+        if not valid_candidates:
+            raise ValueError("No candidates meet the specified constraints")
+
+        logger.info(f"{len(valid_candidates)} candidates meet constraints")
+
+        # Score valid candidates
+        scored_candidates = []
+        for candidate in valid_candidates:
+            score = self._compute_selection_score(candidate, performance_metric)
+            scored_candidates.append((candidate, score))
+
+        # Select best
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        best_candidate, best_score = scored_candidates[0]
+
+        logger.info(f"Selected model: {best_candidate.name} (score={best_score:.4f})")
+
+        result = SelectionResult(
+            selected_model=best_candidate,
+            all_candidates=candidates,
+            valid_candidates=valid_candidates,
+            selection_criteria=f"weighted_score (perf={self.performance_weight}, "
+                              f"simp={self.simplicity_weight}, eff={self.efficiency_weight})",
+            constraints=constraints,
+            selection_score=best_score
+        )
+
+        return result
+
+    def _compute_selection_score(
+        self,
+        candidate: ModelCandidate,
+        performance_metric: str
+    ) -> float:
+        """Compute weighted selection score."""
+        # Performance score (0-100)
+        perf_value = getattr(candidate.performance, performance_metric)
+        if perf_value is None:
+            raise ValueError(f"Metric '{performance_metric}' not available")
+
+        # Normalize to 0-100 (assuming metrics are 0-1 or already percentages)
+        if perf_value <= 1.0:
+            performance_score = perf_value * 100
+        else:
+            performance_score = perf_value
+
+        # Complexity score (0-100, lower is better, so invert)
+        complexity_score = candidate.complexity.compute_complexity_score()
+        simplicity_score = 100 - complexity_score
+
+        # Efficiency score (performance per ms of inference time)
+        efficiency_score = min(
+            (performance_score / (candidate.complexity.inference_time_ms + 0.1)) * 10,
+            100
+        )
+
+        # Weighted combination
+        total_score = (
+            self.performance_weight * performance_score +
+            self.simplicity_weight * simplicity_score +
+            self.efficiency_weight * efficiency_score
+        )
+
+        return total_score
+\end{lstlisting}
+
+\section{Performance Degradation Detection}
+
+Models degrade over time due to data drift, concept drift, or operational changes. Automated monitoring detects degradation and triggers retraining.
+
+\begin{lstlisting}[language=Python, caption={Performance Degradation Detection and Retraining Triggers}]
+import sqlite3
+from collections import deque
+
+@dataclass
+class PerformanceSnapshot:
+    """Snapshot of model performance at a point in time."""
+    timestamp: datetime
+    metric_name: str
+    metric_value: float
+    n_samples: int
+    data_hash: str  # Hash of recent data characteristics
+
+@dataclass
+class DegradationAlert:
+    """Alert for detected performance degradation."""
+    model_name: str
+    metric_name: str
+    baseline_value: float
+    current_value: float
+    degradation_pct: float
+    timestamp: datetime
+    severity: str  # 'low', 'medium', 'high', 'critical'
+    should_retrain: bool
+
+class PerformanceMonitor:
+    """
+    Monitor model performance over time and detect degradation.
+
+    Triggers retraining when:
+    - Performance drops below threshold
+    - Consistent downward trend detected
+    - Sudden sharp decline
+    """
+
+    def __init__(self,
+                 db_path: Path,
+                 baseline_window: int = 100,
+                 monitoring_window: int = 50,
+                 degradation_threshold_pct: float = 5.0,
+                 critical_threshold_pct: float = 10.0):
+        """
+        Args:
+            db_path: Path to SQLite database
+            baseline_window: Window size for baseline performance
+            monitoring_window: Window size for current performance
+            degradation_threshold_pct: % drop to trigger alert
+            critical_threshold_pct: % drop to trigger immediate retraining
+        """
+        self.db_path = db_path
+        self.baseline_window = baseline_window
+        self.monitoring_window = monitoring_window
+        self.degradation_threshold = degradation_threshold_pct
+        self.critical_threshold = critical_threshold_pct
+
+        self.performance_history: deque = deque(maxlen=baseline_window * 2)
+        self._init_database()
+
+    def _init_database(self) -> None:
+        """Initialize monitoring database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS performance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                n_samples INTEGER NOT NULL,
+                data_hash TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS degradation_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                metric_name TEXT NOT NULL,
+                baseline_value REAL NOT NULL,
+                current_value REAL NOT NULL,
+                degradation_pct REAL NOT NULL,
+                severity TEXT NOT NULL,
+                should_retrain BOOLEAN NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_snapshots_model_time
+            ON performance_snapshots(model_name, timestamp)
+        ''')
+
+        conn.commit()
+        conn.close()
+
+    def record_performance(
+        self,
+        model_name: str,
+        metric_name: str,
+        metric_value: float,
+        n_samples: int,
+        data_hash: str,
+        timestamp: Optional[datetime] = None
+    ) -> Optional[DegradationAlert]:
+        """
+        Record performance snapshot and check for degradation.
+
+        Returns:
+            DegradationAlert if degradation detected, else None
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+
+        # Record to database
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT INTO performance_snapshots
+            (model_name, timestamp, metric_name, metric_value, n_samples, data_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (model_name, timestamp.isoformat(), metric_name, metric_value,
+              n_samples, data_hash))
+
+        conn.commit()
+        conn.close()
+
+        # Update in-memory history
+        snapshot = PerformanceSnapshot(
+            timestamp=timestamp,
+            metric_name=metric_name,
+            metric_value=metric_value,
+            n_samples=n_samples,
+            data_hash=data_hash
+        )
+        self.performance_history.append(snapshot)
+
+        # Check for degradation
+        if len(self.performance_history) >= self.baseline_window + self.monitoring_window:
+            alert = self._check_degradation(model_name, metric_name)
+            if alert:
+                self._record_alert(alert)
+                return alert
+
+        return None
+
+    def _check_degradation(
+        self,
+        model_name: str,
+        metric_name: str
+    ) -> Optional[DegradationAlert]:
+        """Check if performance has degraded significantly."""
+        history = list(self.performance_history)
+
+        # Calculate baseline (early window)
+        baseline_values = [
+            s.metric_value for s in history[:self.baseline_window]
+            if s.metric_name == metric_name
+        ]
+
+        if not baseline_values:
+            return None
+
+        baseline_mean = np.mean(baseline_values)
+
+        # Calculate current performance (recent window)
+        current_values = [
+            s.metric_value for s in history[-self.monitoring_window:]
+            if s.metric_name == metric_name
+        ]
+
+        if not current_values:
+            return None
+
+        current_mean = np.mean(current_values)
+
+        # Calculate degradation percentage
+        degradation_pct = (baseline_mean - current_mean) / baseline_mean * 100
+
+        # Check if degradation exceeds threshold
+        if degradation_pct >= self.degradation_threshold:
+            # Determine severity
+            if degradation_pct >= self.critical_threshold:
+                severity = "critical"
+                should_retrain = True
+            elif degradation_pct >= self.degradation_threshold * 1.5:
+                severity = "high"
+                should_retrain = True
+            elif degradation_pct >= self.degradation_threshold:
+                severity = "medium"
+                should_retrain = False
+            else:
+                severity = "low"
+                should_retrain = False
+
+            alert = DegradationAlert(
+                model_name=model_name,
+                metric_name=metric_name,
+                baseline_value=baseline_mean,
+                current_value=current_mean,
+                degradation_pct=degradation_pct,
+                timestamp=datetime.now(),
+                severity=severity,
+                should_retrain=should_retrain
+            )
+
+            logger.warning(f"DEGRADATION ALERT: {model_name} - "
+                          f"{metric_name} dropped {degradation_pct:.2f}% "
+                          f"({baseline_mean:.4f} -> {current_mean:.4f}), "
+                          f"severity={severity}")
+
+            return alert
+
+        return None
+
+    def _record_alert(self, alert: DegradationAlert) -> None:
+        """Record alert to database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT INTO degradation_alerts
+            (model_name, timestamp, metric_name, baseline_value, current_value,
+             degradation_pct, severity, should_retrain)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            alert.model_name,
+            alert.timestamp.isoformat(),
+            alert.metric_name,
+            alert.baseline_value,
+            alert.current_value,
+            alert.degradation_pct,
+            alert.severity,
+            alert.should_retrain
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def get_alert_history(
+        self,
+        model_name: str,
+        days: int = 30
+    ) -> pd.DataFrame:
+        """Get degradation alert history."""
+        conn = sqlite3.connect(self.db_path)
+
+        cutoff = datetime.now() - timedelta(days=days)
+
+        query = '''
+            SELECT * FROM degradation_alerts
+            WHERE model_name = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+        '''
+
+        df = pd.read_sql_query(query, conn, params=(model_name, cutoff.isoformat()))
+        conn.close()
+
+        return df
+
+    def plot_performance_trend(
+        self,
+        model_name: str,
+        metric_name: str,
+        days: int = 30,
+        output_path: Optional[Path] = None
+    ) -> None:
+        """Plot performance trend over time."""
+        conn = sqlite3.connect(self.db_path)
+
+        cutoff = datetime.now() - timedelta(days=days)
+
+        query = '''
+            SELECT timestamp, metric_value
+            FROM performance_snapshots
+            WHERE model_name = ? AND metric_name = ? AND timestamp >= ?
+            ORDER BY timestamp
+        '''
+
+        df = pd.read_sql_query(
+            query, conn,
+            params=(model_name, metric_name, cutoff.isoformat()),
+            parse_dates=['timestamp']
+        )
+        conn.close()
+
+        if df.empty:
+            logger.warning("No performance data available")
+            return
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(df['timestamp'], df['metric_value'], 'b-', linewidth=2)
+        ax.scatter(df['timestamp'], df['metric_value'], c='blue', s=30, alpha=0.6)
+
+        # Add trend line
+        from scipy.stats import linregress
+        x_numeric = (df['timestamp'] - df['timestamp'].min()).dt.total_seconds()
+        slope, intercept, _, _, _ = linregress(x_numeric, df['metric_value'])
+        trend_line = slope * x_numeric + intercept
+        ax.plot(df['timestamp'], trend_line, 'r--', linewidth=2, alpha=0.7,
+               label=f'Trend (slope={slope:.6f})')
+
+        ax.set_xlabel('Time', fontsize=12)
+        ax.set_ylabel(metric_name, fontsize=12)
+        ax.set_title(f'{model_name} - {metric_name} Over Time', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved performance trend plot to {output_path}")
+
+        plt.close()
+\end{lstlisting}
+
+\section{Real-World Scenario: Model Selection for Medical Diagnosis}
+
+\subsection{MedTech's Diabetic Retinopathy Detection System}
+
+MedTech developed an AI system to detect diabetic retinopathy from retinal images. This high-stakes medical application required careful model selection balancing accuracy, interpretability, and operational constraints.
+
+\subsection{Initial Challenge}
+
+The team trained 8 candidate models:
+
+\begin{enumerate}
+    \item Logistic Regression (baseline)
+    \item Random Forest
+    \item XGBoost
+    \item LightGBM
+    \item ResNet-50 (deep CNN)
+    \item EfficientNet-B3
+    \item Vision Transformer (ViT)
+    \item Ensemble (ResNet + XGBoost)
+\end{enumerate}
+
+Initial results showed ViT had highest accuracy (94.2\%), but the team needed systematic selection considering business constraints.
+
+\subsection{Business Constraints}
+
+\begin{itemize}
+    \item \textbf{Minimum recall: 95\%} (cannot miss true positives in medical context)
+    \item \textbf{Maximum inference time: 500ms} (for clinical workflow integration)
+    \item \textbf{Maximum model size: 100MB} (edge device deployment)
+    \item \textbf{Interpretability preferred} (for clinical validation)
+\end{itemize}
+
+\subsection{Systematic Model Selection Process}
+
+\textbf{Step 1: Cross-Validation with Grouped Strategy}
+
+Using GroupedCVStrategy to prevent patient data leakage (same patient's images only in train OR test), the team found:
+
+\begin{itemize}
+    \item ViT: 94.2\% accuracy, but 92\% recall (failed minimum recall constraint)
+    \item EfficientNet-B3: 93.8\% accuracy, 96\% recall
+    \item Ensemble: 94.5\% accuracy, 97\% recall
+\end{itemize}
+
+\textbf{Step 2: Statistical Comparison}
+
+McNemar's test comparing EfficientNet and Ensemble:
+\begin{itemize}
+    \item p-value = 0.03 (statistically significant difference)
+    \item Ensemble significantly better
+\end{itemize}
+
+\textbf{Step 3: Complexity Analysis}
+
+\begin{itemize}
+    \item EfficientNet-B3: 45MB, 320ms inference, complexity score = 42
+    \item Ensemble: 180MB (failed size constraint), 450ms inference
+    \item ResNet-50: 98MB, 280ms, complexity score = 58, recall = 95.5\%
+\end{itemize}
+
+\textbf{Step 4: Automated Selection}
+
+Using AutomatedModelSelector with constraints, three models passed:
+\begin{itemize}
+    \item EfficientNet-B3: selection score = 87.3
+    \item ResNet-50: selection score = 84.1
+    \item XGBoost: selection score = 79.2
+\end{itemize}
+
+EfficientNet-B3 selected as best balance.
+
+\subsection{Production Deployment and Monitoring}
+
+After 6 months in production:
+\begin{itemize}
+    \item PerformanceMonitor detected 6.2\% recall degradation
+    \item Investigation revealed distribution shift in imaging equipment
+    \item Automated retraining triggered with updated data
+    \item Performance restored to 96.1\% recall
+\end{itemize}
+
+\subsection{Key Outcomes}
+
+\begin{itemize}
+    \item \textbf{Saved 3 months}: Systematic approach vs. trial-and-error
+    \item \textbf{Met all constraints}: Business requirements guaranteed
+    \item \textbf{FDA approval}: Statistical rigor supported regulatory submission
+    \item \textbf{Proactive monitoring}: Degradation detected before clinical impact
+\end{itemize}
+
+\subsection{Lessons Learned}
+
+\begin{enumerate}
+    \item Highest accuracy $\neq$ best model for deployment
+    \item Statistical significance testing prevented premature conclusions
+    \item Grouped CV was critical to prevent patient data leakage
+    \item Automated monitoring caught degradation 2 weeks before manual review would have
+    \item Business constraints must be formalized and validated programmatically
+\end{enumerate}
+
+\section{Model Registry Integration}
+
+For production ML systems, a model registry provides versioning, metadata management, and deployment tracking.
+
+\begin{lstlisting}[language=Python, caption={Model Registry for Production Management}]
+from typing import List, Optional
+import shutil
+
+@dataclass
+class ModelRegistryEntry:
+    """Entry in model registry."""
+    model_id: str
+    name: str
+    version: str
+    algorithm: str
+    performance_metrics: Dict[str, float]
+    complexity_metrics: Dict[str, float]
+    registered_at: datetime
+    model_path: Path
+    stage: str  # 'development', 'staging', 'production', 'archived'
+    tags: List[str]
+    description: str
+
+class ModelRegistry:
+    """
+    Central registry for managing model lifecycle.
+
+    Features:
+    - Version tracking
+    - Stage management (dev -> staging -> production)
+    - Metadata storage
+    - Model artifact management
+    """
+
+    def __init__(self, registry_path: Path):
+        """
+        Args:
+            registry_path: Base path for registry storage
+        """
+        self.registry_path = registry_path
+        self.registry_path.mkdir(parents=True, exist_ok=True)
+
+        self.metadata_file = self.registry_path / "registry.json"
+        self.models_dir = self.registry_path / "models"
+        self.models_dir.mkdir(exist_ok=True)
+
+        self.entries: Dict[str, ModelRegistryEntry] = {}
+        self._load_registry()
+
+    def register_model(
+        self,
+        candidate: ModelCandidate,
+        stage: str = "development",
+        tags: Optional[List[str]] = None,
+        description: str = ""
+    ) -> str:
+        """
+        Register a model candidate in the registry.
+
+        Returns:
+            model_id: Unique identifier for registered model
+        """
+        # Generate model ID
+        model_id = f"{candidate.name}_{candidate.version}_{candidate.compute_model_hash()}"
+
+        # Create model directory
+        model_path = self.models_dir / model_id
+        model_path.mkdir(exist_ok=True)
+
+        # Save model
+        candidate.save(model_path)
+
+        # Create registry entry
+        entry = ModelRegistryEntry(
+            model_id=model_id,
+            name=candidate.name,
+            version=candidate.version,
+            algorithm=candidate.algorithm,
+            performance_metrics=candidate.performance.to_dict(),
+            complexity_metrics={
+                "n_parameters": candidate.complexity.n_parameters,
+                "inference_time_ms": candidate.complexity.inference_time_ms,
+                "model_size_bytes": candidate.complexity.model_size_bytes
+            },
+            registered_at=datetime.now(),
+            model_path=model_path,
+            stage=stage,
+            tags=tags or [],
+            description=description
+        )
+
+        self.entries[model_id] = entry
+        self._save_registry()
+
+        logger.info(f"Registered model: {model_id} (stage={stage})")
+        return model_id
+
+    def transition_stage(self, model_id: str, new_stage: str) -> None:
+        """Transition model to new stage."""
+        if model_id not in self.entries:
+            raise ValueError(f"Model {model_id} not found in registry")
+
+        valid_stages = ['development', 'staging', 'production', 'archived']
+        if new_stage not in valid_stages:
+            raise ValueError(f"Invalid stage: {new_stage}")
+
+        old_stage = self.entries[model_id].stage
+        self.entries[model_id].stage = new_stage
+        self._save_registry()
+
+        logger.info(f"Transitioned {model_id}: {old_stage} -> {new_stage}")
+
+    def get_production_model(self, name: str) -> Optional[ModelCandidate]:
+        """Get current production model by name."""
+        production_entries = [
+            e for e in self.entries.values()
+            if e.name == name and e.stage == 'production'
+        ]
+
+        if not production_entries:
+            return None
+
+        # Return most recently registered
+        latest_entry = max(production_entries, key=lambda e: e.registered_at)
+        return ModelCandidate.load(latest_entry.model_path)
+
+    def list_models(self, stage: Optional[str] = None,
+                   tags: Optional[List[str]] = None) -> List[ModelRegistryEntry]:
+        """List models, optionally filtered by stage and tags."""
+        results = list(self.entries.values())
+
+        if stage:
+            results = [e for e in results if e.stage == stage]
+
+        if tags:
+            results = [e for e in results if any(t in e.tags for t in tags)]
+
+        return results
+
+    def delete_model(self, model_id: str) -> None:
+        """Delete model from registry and remove artifacts."""
+        if model_id not in self.entries:
+            raise ValueError(f"Model {model_id} not found")
+
+        entry = self.entries[model_id]
+
+        # Cannot delete production models
+        if entry.stage == 'production':
+            raise ValueError("Cannot delete production model. Archive it first.")
+
+        # Remove artifacts
+        if entry.model_path.exists():
+            shutil.rmtree(entry.model_path)
+
+        # Remove from registry
+        del self.entries[model_id]
+        self._save_registry()
+
+        logger.info(f"Deleted model: {model_id}")
+
+    def _load_registry(self) -> None:
+        """Load registry from disk."""
+        if not self.metadata_file.exists():
+            return
+
+        with open(self.metadata_file, 'r') as f:
+            data = json.load(f)
+
+        for model_id, entry_data in data.items():
+            self.entries[model_id] = ModelRegistryEntry(
+                model_id=entry_data["model_id"],
+                name=entry_data["name"],
+                version=entry_data["version"],
+                algorithm=entry_data["algorithm"],
+                performance_metrics=entry_data["performance_metrics"],
+                complexity_metrics=entry_data["complexity_metrics"],
+                registered_at=datetime.fromisoformat(entry_data["registered_at"]),
+                model_path=Path(entry_data["model_path"]),
+                stage=entry_data["stage"],
+                tags=entry_data["tags"],
+                description=entry_data["description"]
+            )
+
+    def _save_registry(self) -> None:
+        """Save registry to disk."""
+        data = {}
+        for model_id, entry in self.entries.items():
+            data[model_id] = {
+                "model_id": entry.model_id,
+                "name": entry.name,
+                "version": entry.version,
+                "algorithm": entry.algorithm,
+                "performance_metrics": entry.performance_metrics,
+                "complexity_metrics": entry.complexity_metrics,
+                "registered_at": entry.registered_at.isoformat(),
+                "model_path": str(entry.model_path),
+                "stage": entry.stage,
+                "tags": entry.tags,
+                "description": entry.description
+            }
+
+        with open(self.metadata_file, 'w') as f:
+            json.dump(data, f, indent=2)
+\end{lstlisting}
+
+\section{A/B Testing Preparation}
+
+\begin{lstlisting}[language=Python, caption={A/B Testing Framework for Model Comparison}]
+@dataclass
+class ABTestConfig:
+    """Configuration for A/B test."""
+    model_a_id: str
+    model_b_id: str
+    traffic_split: float  # Fraction to model B (0.0-1.0)
+    sample_size_per_variant: int
+    success_metric: str
+    minimum_effect_size: float  # Minimum detectable effect
+    alpha: float = 0.05
+    power: float = 0.80
+
+class ABTestManager:
+    """Manage A/B tests for model comparison in production."""
+
+    def __init__(self, registry: ModelRegistry):
+        self.registry = registry
+
+    def setup_ab_test(
+        self,
+        model_a_id: str,
+        model_b_id: str,
+        success_metric: str,
+        minimum_effect_size: float = 0.05,
+        traffic_split: float = 0.5
+    ) -> ABTestConfig:
+        """
+        Set up A/B test configuration.
+
+        Calculates required sample size using power analysis.
+        """
+        from statsmodels.stats.power import zt_ind_solve_power
+
+        # Calculate required sample size
+        effect_size = minimum_effect_size
+        sample_size = int(zt_ind_solve_power(
+            effect_size=effect_size,
+            alpha=0.05,
+            power=0.80,
+            ratio=1.0,
+            alternative='two-sided'
+        ))
+
+        config = ABTestConfig(
+            model_a_id=model_a_id,
+            model_b_id=model_b_id,
+            traffic_split=traffic_split,
+            sample_size_per_variant=sample_size,
+            success_metric=success_metric,
+            minimum_effect_size=minimum_effect_size
+        )
+
+        logger.info(f"A/B test configured: {model_a_id} vs {model_b_id}")
+        logger.info(f"Required sample size per variant: {sample_size}")
+
+        return config
+
+    def analyze_ab_test(
+        self,
+        config: ABTestConfig,
+        results_a: np.ndarray,
+        results_b: np.ndarray
+    ) -> Dict[str, Any]:
+        """
+        Analyze A/B test results.
+
+        Args:
+            config: Test configuration
+            results_a: Metric values for model A
+            results_b: Metric values for model B
+
+        Returns:
+            Dictionary with test results
+        """
+        from scipy.stats import ttest_ind
+
+        # Two-sample t-test
+        statistic, p_value = ttest_ind(results_a, results_b)
+
+        # Calculate effect size (Cohen's d)
+        pooled_std = np.sqrt(
+            (np.std(results_a)**2 + np.std(results_b)**2) / 2
+        )
+        cohens_d = (np.mean(results_b) - np.mean(results_a)) / pooled_std
+
+        # Determine winner
+        is_significant = p_value < config.alpha
+        winner = None
+        if is_significant:
+            if np.mean(results_b) > np.mean(results_a):
+                winner = config.model_b_id
+            else:
+                winner = config.model_a_id
+
+        # Calculate confidence intervals
+        from scipy import stats
+        ci_a = stats.t.interval(
+            0.95, len(results_a) - 1,
+            loc=np.mean(results_a),
+            scale=stats.sem(results_a)
+        )
+        ci_b = stats.t.interval(
+            0.95, len(results_b) - 1,
+            loc=np.mean(results_b),
+            scale=stats.sem(results_b)
+        )
+
+        results = {
+            "model_a_mean": np.mean(results_a),
+            "model_a_ci": ci_a,
+            "model_b_mean": np.mean(results_b),
+            "model_b_ci": ci_b,
+            "p_value": p_value,
+            "is_significant": is_significant,
+            "cohens_d": cohens_d,
+            "winner": winner,
+            "recommendation": self._get_recommendation(
+                is_significant, winner, cohens_d, config
+            )
+        }
+
+        return results
+
+    def _get_recommendation(
+        self,
+        is_significant: bool,
+        winner: Optional[str],
+        cohens_d: float,
+        config: ABTestConfig
+    ) -> str:
+        """Generate recommendation based on test results."""
+        if not is_significant:
+            return "No significant difference. Keep current model."
+
+        if winner == config.model_b_id:
+            if abs(cohens_d) >= config.minimum_effect_size:
+                return f"Deploy {config.model_b_id}. Significant improvement detected."
+            else:
+                return "Difference significant but effect size small. Consider operational costs."
+        else:
+            return f"Keep {config.model_a_id}. New model did not improve performance."
+\end{lstlisting}
+
+\section{Exercises}
+
+\subsection{Exercise 1: Building Model Candidates (Easy)}
+
+Create ModelCandidate instances for three different algorithms (Logistic Regression, Random Forest, XGBoost) on a binary classification dataset. Compare their performance metrics and complexity scores.
+
+\subsection{Exercise 2: Cross-Validation Strategies (Easy)}
+
+Implement and compare StandardCVStrategy, StratifiedCVStrategy, and TimeSeriesCVStrategy on appropriate datasets. Visualize how each strategy splits the data.
+
+\subsection{Exercise 3: Statistical Model Comparison (Medium)}
+
+Generate synthetic cross-validation scores for 5 models with varying levels of overlap. Use paired t-test, McNemar's test, and permutation test to compare them. Identify which models have statistically significant differences.
+
+\subsection{Exercise 4: Complexity-Performance Trade-off (Medium)}
+
+Create 10 model candidates with varying complexity levels. Plot the Pareto frontier and identify optimal models. Implement a custom scoring function that balances performance and simplicity for your specific use case.
+
+\subsection{Exercise 5: Automated Model Selection with Constraints (Medium)}
+
+Define business constraints for a real-world application (e.g., fraud detection with maximum 50ms inference time, minimum 90\% recall). Train multiple models and use AutomatedModelSelector to find the best candidate that meets all constraints.
+
+\subsection{Exercise 6: Performance Degradation Simulation (Advanced)}
+
+Simulate model performance degradation over time by:
+\begin{enumerate}
+    \item Starting with baseline performance
+    \item Gradually introducing distribution shift
+    \item Using PerformanceMonitor to detect degradation
+    \item Triggering automated retraining at appropriate thresholds
+\end{enumerate}
+
+Create visualizations showing performance trends and alert history.
+
+\subsection{Exercise 7: End-to-End Model Development Pipeline (Advanced)}
+
+Build a complete model development pipeline:
+
+\begin{enumerate}
+    \item Train 5-8 diverse model candidates
+    \item Apply appropriate cross-validation strategy
+    \item Perform statistical comparisons
+    \item Analyze complexity trade-offs
+    \item Apply business constraints
+    \item Select best model automatically
+    \item Register in model registry
+    \item Set up A/B test configuration
+    \item Deploy with performance monitoring
+\end{enumerate}
+
+Document all decisions and create a comprehensive report suitable for stakeholders.
+
+\section{Summary}
+
+This chapter presented a systematic framework for model development and selection:
+
+\begin{itemize}
+    \item \textbf{Model Candidate Framework}: Comprehensive representation with performance and complexity metrics, versioning, and metadata tracking
+    \item \textbf{Cross-Validation Strategies}: Specialized approaches for standard, stratified, time series, and grouped data to prevent leakage
+    \item \textbf{Statistical Comparison}: Rigorous testing with paired t-tests, McNemar's test, and permutation tests for significance
+    \item \textbf{Complexity Analysis}: Pareto frontier identification and efficiency scoring balancing performance with operational cost
+    \item \textbf{Automated Selection}: Business constraint-aware selection with configurable weighting of performance, simplicity, and efficiency
+    \item \textbf{Performance Monitoring}: Degradation detection with automated retraining triggers and alerting
+    \item \textbf{Model Registry}: Production-ready versioning, stage management, and artifact tracking
+    \item \textbf{A/B Testing}: Statistical framework for production model comparison with power analysis
+\end{itemize}
+
+Systematic model selection transforms ML development from trial-and-error into an engineering discipline. By formalizing business constraints, applying statistical rigor, and monitoring production performance, teams can confidently deploy models that deliver sustained business value.
