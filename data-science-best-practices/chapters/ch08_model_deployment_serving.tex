@@ -1788,6 +1788,703 @@ class ModelRegistry:
         return models
 \end{lstlisting}
 
+\section{Enterprise Deployment Patterns}
+
+Production ML systems require sophisticated deployment architectures that support microservices, multi-cloud strategies, and edge computing scenarios.
+
+\subsection{Microservices Architecture with Service Mesh}
+
+Modern ML deployments use microservices patterns to separate concerns and enable independent scaling.
+
+\begin{lstlisting}[language=Python, caption={Microservices Architecture for ML Deployment}]
+from typing import Protocol, List
+from abc import ABC, abstractmethod
+import consul
+import etcd3
+
+class ServiceDiscovery(Protocol):
+    """Service discovery interface."""
+
+    def register_service(
+        self,
+        service_name: str,
+        host: str,
+        port: int,
+        metadata: Dict[str, Any]
+    ) -> None:
+        """Register service with discovery system."""
+        ...
+
+    def discover_service(self, service_name: str) -> List[Dict[str, Any]]:
+        """Discover available service instances."""
+        ...
+
+class ModelMicroservice:
+    """
+    ML model microservice with service mesh integration.
+
+    Features:
+    - Service registration and discovery
+    - Health checks with liveness/readiness
+    - Distributed tracing integration
+    - Circuit breaker for dependencies
+    - Request/response logging
+    """
+
+    def __init__(
+        self,
+        service_name: str,
+        model_service: ModelService,
+        service_discovery: ServiceDiscovery,
+        feature_store_url: str,
+        monitoring_url: str
+    ):
+        """
+        Args:
+            service_name: Microservice identifier
+            model_service: Underlying model service
+            service_discovery: Service discovery client
+            feature_store_url: Feature store endpoint
+            monitoring_url: Monitoring service endpoint
+        """
+        self.service_name = service_name
+        self.model_service = model_service
+        self.service_discovery = service_discovery
+        self.feature_store_url = feature_store_url
+        self.monitoring_url = monitoring_url
+
+        # Service mesh integration
+        self.app = FastAPI(title=service_name)
+        self._register_mesh_routes()
+
+    def _register_mesh_routes(self) -> None:
+        """Register service mesh compatible routes."""
+
+        @self.app.post("/v1/predict")
+        async def predict_v1(
+            request: PredictionRequest,
+            x_request_id: Optional[str] = Header(None),
+            x_trace_id: Optional[str] = Header(None)
+        ) -> PredictionResponse:
+            """
+            Service mesh compatible prediction endpoint.
+
+            Extracts trace headers for distributed tracing.
+            """
+            # Start trace span
+            with self._start_trace_span("predict", x_trace_id) as span:
+                span.set_attribute("request_id", x_request_id or "unknown")
+                span.set_attribute("model_version", self.model_service.model_version)
+
+                try:
+                    # Enrich features from feature store if needed
+                    enriched_features = await self._enrich_features(
+                        request.features,
+                        x_trace_id
+                    )
+
+                    # Predict
+                    result = self.model_service.predict(
+                        features=enriched_features,
+                        return_probabilities=request.return_probabilities,
+                        explain=request.explain
+                    )
+
+                    # Log to monitoring service
+                    await self._log_prediction(result, x_request_id)
+
+                    return PredictionResponse(**result, prediction_id=x_request_id)
+
+                except Exception as e:
+                    span.set_attribute("error", True)
+                    span.set_attribute("error_message", str(e))
+                    raise
+
+        @self.app.get("/mesh/health")
+        async def mesh_health() -> Dict[str, str]:
+            """Service mesh health endpoint."""
+            return {
+                "status": "healthy" if self.model_service.status == ModelStatus.READY else "unhealthy",
+                "service": self.service_name,
+                "version": self.model_service.model_version
+            }
+
+    async def _enrich_features(
+        self,
+        features: Dict[str, Any],
+        trace_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+        Enrich features from feature store.
+
+        Args:
+            features: Raw features
+            trace_id: Distributed trace ID
+
+        Returns:
+            Enriched features
+        """
+        try:
+            # Call feature store microservice
+            headers = {"X-Trace-ID": trace_id} if trace_id else {}
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.feature_store_url}/features",
+                params={"entity_id": features.get("entity_id")},
+                headers=headers,
+                timeout=1.0
+            )
+
+            if response.status_code == 200:
+                additional_features = response.json()
+                return {**features, **additional_features}
+
+            return features
+
+        except Exception as e:
+            logger.warning(f"Feature enrichment failed: {e}")
+            return features
+
+    async def _log_prediction(
+        self,
+        result: Dict[str, Any],
+        request_id: str
+    ) -> None:
+        """Log prediction to monitoring service."""
+        try:
+            await asyncio.to_thread(
+                requests.post,
+                f"{self.monitoring_url}/log",
+                json={
+                    "service": self.service_name,
+                    "request_id": request_id,
+                    "prediction": result["prediction"],
+                    "latency_ms": result["latency_ms"],
+                    "timestamp": datetime.now().isoformat()
+                },
+                timeout=0.5
+            )
+        except Exception as e:
+            logger.warning(f"Monitoring log failed: {e}")
+
+    def _start_trace_span(self, operation: str, trace_id: Optional[str]):
+        """Start distributed tracing span."""
+        from opentelemetry import trace
+        from opentelemetry.trace import Status, StatusCode
+
+        tracer = trace.get_tracer(__name__)
+        return tracer.start_as_current_span(
+            operation,
+            attributes={"trace_id": trace_id or "unknown"}
+        )
+
+    def start(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+        """Start microservice and register with service mesh."""
+        # Load model
+        self.model_service.load_model()
+
+        # Register with service discovery
+        self.service_discovery.register_service(
+            service_name=self.service_name,
+            host=host,
+            port=port,
+            metadata={
+                "model_version": self.model_service.model_version,
+                "health_endpoint": f"http://{host}:{port}/mesh/health"
+            }
+        )
+
+        # Start server
+        logger.info(f"Starting {self.service_name} on {host}:{port}")
+        uvicorn.run(self.app, host=host, port=port)
+\end{lstlisting}
+
+\subsection{Multi-Cloud Deployment Strategy}
+
+Enterprise deployments require multi-cloud strategies to avoid vendor lock-in and ensure high availability.
+
+\begin{lstlisting}[language=Python, caption={Multi-Cloud Deployment Manager}]
+from enum import Enum
+from typing import Dict, List, Optional
+
+class CloudProvider(Enum):
+    """Supported cloud providers."""
+    AWS = "aws"
+    AZURE = "azure"
+    GCP = "gcp"
+    ON_PREM = "on_prem"
+
+@dataclass
+class DeploymentTarget:
+    """Multi-cloud deployment target."""
+    provider: CloudProvider
+    region: str
+    endpoint: str
+    credentials: Dict[str, str]
+    is_primary: bool
+    health_status: str = "unknown"
+    last_sync: Optional[datetime] = None
+
+class MultiCloudDeploymentManager:
+    """
+    Multi-cloud deployment manager with vendor-agnostic patterns.
+
+    Features:
+    - Deploy to multiple cloud providers
+    - Synchronize model versions across clouds
+    - Failover between providers
+    - Geographic traffic routing
+    - Consistent deployment configuration
+    """
+
+    def __init__(self, targets: List[DeploymentTarget]):
+        """
+        Args:
+            targets: List of deployment targets across cloud providers
+        """
+        self.targets = {
+            f"{t.provider.value}_{t.region}": t for t in targets
+        }
+        self.primary_target = next(
+            (t for t in targets if t.is_primary),
+            targets[0] if targets else None
+        )
+
+    def deploy_model(
+        self,
+        model_path: Path,
+        model_version: str,
+        target_providers: Optional[List[CloudProvider]] = None
+    ) -> Dict[str, bool]:
+        """
+        Deploy model to multiple cloud providers.
+
+        Args:
+            model_path: Local model file path
+            model_version: Version identifier
+            target_providers: Specific providers to deploy to (None = all)
+
+        Returns:
+            Deployment status per target
+        """
+        results = {}
+
+        # Filter targets
+        targets_to_deploy = self.targets.values()
+        if target_providers:
+            targets_to_deploy = [
+                t for t in targets_to_deploy
+                if t.provider in target_providers
+            ]
+
+        # Deploy to each target
+        for target in targets_to_deploy:
+            target_key = f"{target.provider.value}_{target.region}"
+            logger.info(f"Deploying to {target_key}")
+
+            success = self._deploy_to_target(
+                target=target,
+                model_path=model_path,
+                model_version=model_version
+            )
+
+            results[target_key] = success
+
+            if success:
+                target.last_sync = datetime.now()
+
+        return results
+
+    def _deploy_to_target(
+        self,
+        target: DeploymentTarget,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Deploy to specific cloud target."""
+        try:
+            if target.provider == CloudProvider.AWS:
+                return self._deploy_aws(target, model_path, model_version)
+            elif target.provider == CloudProvider.AZURE:
+                return self._deploy_azure(target, model_path, model_version)
+            elif target.provider == CloudProvider.GCP:
+                return self._deploy_gcp(target, model_path, model_version)
+            elif target.provider == CloudProvider.ON_PREM:
+                return self._deploy_on_prem(target, model_path, model_version)
+            else:
+                logger.error(f"Unknown provider: {target.provider}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Deployment to {target.provider.value} failed: {e}")
+            return False
+
+    def _deploy_aws(
+        self,
+        target: DeploymentTarget,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Deploy to AWS SageMaker or EKS."""
+        import boto3
+
+        # Upload model to S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=target.credentials['access_key'],
+            aws_secret_access_key=target.credentials['secret_key'],
+            region_name=target.region
+        )
+
+        bucket_name = target.credentials['bucket']
+        s3_key = f"models/{model_version}/model.pkl"
+
+        s3_client.upload_file(
+            str(model_path),
+            bucket_name,
+            s3_key
+        )
+
+        # Update EKS deployment or SageMaker endpoint
+        # Implementation depends on chosen AWS service
+        logger.info(f"Deployed to AWS S3: s3://{bucket_name}/{s3_key}")
+        return True
+
+    def _deploy_azure(
+        self,
+        target: DeploymentTarget,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Deploy to Azure ML or AKS."""
+        from azure.storage.blob import BlobServiceClient
+
+        # Upload to Azure Blob Storage
+        blob_service = BlobServiceClient(
+            account_url=target.credentials['account_url'],
+            credential=target.credentials['account_key']
+        )
+
+        container_name = target.credentials['container']
+        blob_name = f"models/{model_version}/model.pkl"
+
+        blob_client = blob_service.get_blob_client(
+            container=container_name,
+            blob=blob_name
+        )
+
+        with open(model_path, 'rb') as data:
+            blob_client.upload_blob(data, overwrite=True)
+
+        logger.info(f"Deployed to Azure Blob: {container_name}/{blob_name}")
+        return True
+
+    def _deploy_gcp(
+        self,
+        target: DeploymentTarget,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Deploy to GCP Vertex AI or GKE."""
+        from google.cloud import storage
+
+        # Upload to GCS
+        storage_client = storage.Client(
+            project=target.credentials['project_id'],
+            credentials=target.credentials.get('credentials_path')
+        )
+
+        bucket = storage_client.bucket(target.credentials['bucket'])
+        blob = bucket.blob(f"models/{model_version}/model.pkl")
+
+        blob.upload_from_filename(str(model_path))
+
+        logger.info(f"Deployed to GCS: gs://{target.credentials['bucket']}/models/{model_version}")
+        return True
+
+    def _deploy_on_prem(
+        self,
+        target: DeploymentTarget,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Deploy to on-premises infrastructure."""
+        # Copy to network share or trigger on-prem deployment pipeline
+        deployment_path = Path(target.credentials['deployment_path'])
+        deployment_path.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(model_path, deployment_path / f"model_{model_version}.pkl")
+
+        logger.info(f"Deployed to on-prem: {deployment_path}")
+        return True
+
+    def check_health(self) -> Dict[str, bool]:
+        """Check health of all deployment targets."""
+        health_status = {}
+
+        for key, target in self.targets.items():
+            try:
+                response = requests.get(
+                    f"{target.endpoint}/health",
+                    timeout=5
+                )
+                is_healthy = response.status_code == 200
+                target.health_status = "healthy" if is_healthy else "unhealthy"
+                health_status[key] = is_healthy
+
+            except Exception as e:
+                logger.error(f"Health check failed for {key}: {e}")
+                target.health_status = "error"
+                health_status[key] = False
+
+        return health_status
+
+    def failover(self, failed_provider: CloudProvider) -> Optional[DeploymentTarget]:
+        """
+        Execute failover to healthy target.
+
+        Args:
+            failed_provider: Provider that failed
+
+        Returns:
+            Failover target or None
+        """
+        # Find healthy targets from different providers
+        healthy_targets = [
+            t for t in self.targets.values()
+            if t.provider != failed_provider and t.health_status == "healthy"
+        ]
+
+        if not healthy_targets:
+            logger.error("No healthy failover targets available")
+            return None
+
+        # Prefer primary if available
+        failover_target = next(
+            (t for t in healthy_targets if t.is_primary),
+            healthy_targets[0]
+        )
+
+        logger.info(f"Failing over to {failover_target.provider.value}_{failover_target.region}")
+        return failover_target
+\end{lstlisting}
+
+\subsection{Edge Deployment with Model Synchronization}
+
+Edge deployments require model optimization and synchronization strategies for low-latency inference.
+
+\begin{lstlisting}[language=Python, caption={Edge Deployment Manager}]
+from typing import Set
+import onnx
+import onnxruntime as ort
+
+class EdgeDeploymentManager:
+    """
+    Manage edge deployments with model optimization and synchronization.
+
+    Features:
+    - Model optimization for edge devices (quantization, pruning)
+    - Synchronization between cloud and edge
+    - Offline inference capability
+    - Bandwidth-efficient updates
+    - Edge health monitoring
+    """
+
+    def __init__(
+        self,
+        cloud_registry: ModelRegistry,
+        edge_devices: List[str]
+    ):
+        """
+        Args:
+            cloud_registry: Central model registry
+            edge_devices: List of edge device identifiers
+        """
+        self.cloud_registry = cloud_registry
+        self.edge_devices = edge_devices
+        self.edge_versions: Dict[str, str] = {}
+
+    def optimize_for_edge(
+        self,
+        model_path: Path,
+        output_path: Path,
+        optimization_level: str = "aggressive"
+    ) -> Path:
+        """
+        Optimize model for edge deployment.
+
+        Args:
+            model_path: Path to original model
+            output_path: Path for optimized model
+            optimization_level: 'conservative', 'balanced', or 'aggressive'
+
+        Returns:
+            Path to optimized model
+        """
+        logger.info(f"Optimizing model for edge ({optimization_level})")
+
+        # Load model
+        model = joblib.load(model_path)
+
+        # Convert to ONNX for efficiency
+        onnx_path = output_path.with_suffix('.onnx')
+
+        # For scikit-learn models
+        if hasattr(model, 'predict'):
+            from skl2onnx import convert_sklearn
+            from skl2onnx.common.data_types import FloatTensorType
+
+            # Define input shape
+            initial_type = [('float_input', FloatTensorType([None, model.n_features_in_]))]
+
+            onnx_model = convert_sklearn(
+                model,
+                initial_types=initial_type,
+                target_opset=13
+            )
+
+            # Save ONNX model
+            with open(onnx_path, 'wb') as f:
+                f.write(onnx_model.SerializeToString())
+
+        # Quantize model based on optimization level
+        if optimization_level in ['balanced', 'aggressive']:
+            quantized_path = self._quantize_model(onnx_path, optimization_level)
+            final_path = quantized_path
+        else:
+            final_path = onnx_path
+
+        logger.info(f"Optimized model saved to {final_path}")
+        logger.info(f"Size reduction: {model_path.stat().st_size / 1024:.1f}KB -> "
+                   f"{final_path.stat().st_size / 1024:.1f}KB")
+
+        return final_path
+
+    def _quantize_model(self, onnx_path: Path, level: str) -> Path:
+        """Quantize ONNX model."""
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+
+        quantized_path = onnx_path.with_name(
+            onnx_path.stem + '_quantized.onnx'
+        )
+
+        # Dynamic quantization
+        quantize_dynamic(
+            model_input=str(onnx_path),
+            model_output=str(quantized_path),
+            weight_type=QuantType.QUInt8 if level == 'aggressive' else QuantType.QInt8
+        )
+
+        return quantized_path
+
+    def deploy_to_edge(
+        self,
+        model_path: Path,
+        model_version: str,
+        target_devices: Optional[List[str]] = None
+    ) -> Dict[str, bool]:
+        """
+        Deploy optimized model to edge devices.
+
+        Args:
+            model_path: Optimized model path
+            model_version: Version identifier
+            target_devices: Specific devices (None = all)
+
+        Returns:
+            Deployment status per device
+        """
+        devices = target_devices or self.edge_devices
+        results = {}
+
+        # Optimize model
+        optimized_path = self.optimize_for_edge(
+            model_path,
+            Path(f"/tmp/edge_model_{model_version}.onnx")
+        )
+
+        for device_id in devices:
+            logger.info(f"Deploying to edge device: {device_id}")
+
+            success = self._transfer_to_device(
+                device_id=device_id,
+                model_path=optimized_path,
+                model_version=model_version
+            )
+
+            if success:
+                self.edge_versions[device_id] = model_version
+
+            results[device_id] = success
+
+        return results
+
+    def _transfer_to_device(
+        self,
+        device_id: str,
+        model_path: Path,
+        model_version: str
+    ) -> bool:
+        """Transfer model to edge device."""
+        try:
+            # In practice, this would use device-specific transfer mechanism
+            # (MQTT, HTTP upload, rsync, etc.)
+
+            # Simulate bandwidth-efficient delta update
+            device_endpoint = f"http://{device_id}:8080"
+
+            with open(model_path, 'rb') as f:
+                model_data = f.read()
+
+            # Upload with resumable transfer
+            response = requests.post(
+                f"{device_endpoint}/update_model",
+                files={'model': model_data},
+                data={'version': model_version},
+                timeout=60
+            )
+
+            return response.status_code == 200
+
+        except Exception as e:
+            logger.error(f"Transfer to {device_id} failed: {e}")
+            return False
+
+    def synchronize_edge_devices(self) -> Dict[str, bool]:
+        """
+        Synchronize all edge devices with latest cloud model.
+
+        Returns:
+            Sync status per device
+        """
+        # Get latest production model from cloud
+        latest_model = self.cloud_registry.get_model(
+            name="edge_model",
+            status="production"
+        )
+
+        if not latest_model:
+            logger.error("No production model available for edge sync")
+            return {}
+
+        # Deploy to devices that need update
+        devices_to_update = [
+            device_id for device_id, version in self.edge_versions.items()
+            if version != latest_model.version
+        ]
+
+        if not devices_to_update:
+            logger.info("All edge devices already synchronized")
+            return {device_id: True for device_id in self.edge_devices}
+
+        logger.info(f"Synchronizing {len(devices_to_update)} edge devices")
+        return self.deploy_to_edge(
+            model_path=latest_model.file_path,
+            model_version=latest_model.version,
+            target_devices=devices_to_update
+        )
+\end{lstlisting}
+
 \section{CI/CD Pipeline for Model Deployment}
 
 Automated deployment pipelines ensure consistent, tested deployments with proper validation.

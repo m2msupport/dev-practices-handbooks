@@ -32,6 +32,682 @@ This chapter provides a complete framework for systematic feature engineering:
     \item \textbf{Feature Store Integration}: Versioning and serving architecture
 \end{enumerate}
 
+\section{Advanced Feature Engineering Frameworks}
+
+Modern feature engineering goes beyond manual transformations. This section presents automated and advanced techniques for systematic feature generation at scale.
+
+\subsection{Automated Feature Generation with Genetic Programming}
+
+Genetic programming can automatically discover complex feature transformations by evolving mathematical expressions that maximize predictive power.
+
+\begin{lstlisting}[language=Python, caption={Automated Feature Generation Using Genetic Programming}]
+from gplearn.genetic import SymbolicTransformer
+from sklearn.preprocessing import StandardScaler
+from typing import List, Callable
+import numpy as np
+import pandas as pd
+
+class GeneticFeatureGenerator:
+    """
+    Generate features using genetic programming and symbolic regression.
+    Automatically discovers mathematical transformations.
+    """
+
+    def __init__(self,
+                 population_size: int = 1000,
+                 generations: int = 20,
+                 tournament_size: int = 20,
+                 function_set: List[str] = None):
+        """
+        Args:
+            population_size: Number of programs in each generation
+            generations: Number of generations to evolve
+            tournament_size: Selection tournament size
+            function_set: Mathematical functions to use ('add', 'sub', 'mul',
+                         'div', 'sqrt', 'log', 'abs', 'neg', 'inv', 'max', 'min')
+        """
+        if function_set is None:
+            function_set = ['add', 'sub', 'mul', 'div', 'sqrt', 'log', 'abs']
+
+        self.gp_transformer = SymbolicTransformer(
+            population_size=population_size,
+            generations=generations,
+            tournament_size=tournament_size,
+            function_set=function_set,
+            parsimony_coefficient=0.001,  # Penalize complex expressions
+            random_state=42,
+            n_jobs=-1,
+            verbose=1
+        )
+        self.feature_metadata: List[FeatureMetadata] = []
+
+    def fit_transform(self, X: pd.DataFrame, y: pd.Series,
+                     n_components: int = 10) -> pd.DataFrame:
+        """
+        Generate new features using genetic programming.
+
+        Args:
+            X: Input features
+            y: Target variable
+            n_components: Number of features to generate
+
+        Returns:
+            DataFrame with original and generated features
+        """
+        self.gp_transformer.n_components = n_components
+
+        # Fit genetic programming transformer
+        logger.info(f"Evolving {n_components} features over {self.gp_transformer.generations} generations...")
+        X_gp = self.gp_transformer.fit_transform(X.values, y.values)
+
+        # Create feature names and metadata
+        result = X.copy()
+        for i in range(n_components):
+            feature_name = f"gp_feature_{i}"
+            result[feature_name] = X_gp[:, i]
+
+            # Get the evolved program (mathematical expression)
+            program = self.gp_transformer._best_programs[i]
+
+            self.feature_metadata.append(FeatureMetadata(
+                name=feature_name,
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=X.columns.tolist(),
+                transformation=f"Genetic program: {str(program)}",
+                scope=TransformationScope.ROW_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0",
+                importance=float(program.fitness_),
+                description=f"Auto-generated via genetic programming (fitness={program.fitness_:.4f})"
+            ))
+
+        logger.info(f"Generated {n_components} features with genetic programming")
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.feature_metadata
+
+
+class SymbolicRegressionFeatures:
+    """
+    Use symbolic regression to discover interpretable feature transformations.
+    Useful for finding domain-meaningful formulas.
+    """
+
+    def __init__(self, max_complexity: int = 10):
+        """
+        Args:
+            max_complexity: Maximum complexity of discovered formulas
+        """
+        self.max_complexity = max_complexity
+        self.discovered_formulas: Dict[str, str] = {}
+        self.metadata: List[FeatureMetadata] = []
+
+    def discover_transformations(self, X: pd.DataFrame, y: pd.Series,
+                                 columns: List[str] = None) -> pd.DataFrame:
+        """
+        Discover interpretable transformations for specific columns.
+
+        Uses symbolic regression to find simple formulas that improve
+        correlation with target variable.
+        """
+        if columns is None:
+            columns = X.select_dtypes(include=[np.number]).columns.tolist()
+
+        result = X.copy()
+
+        for col in columns:
+            if col not in X.columns:
+                continue
+
+            # Try common transformations and score them
+            x_vals = X[col].values.reshape(-1, 1)
+
+            transformations = {
+                f"{col}_squared": lambda x: x ** 2,
+                f"{col}_cubed": lambda x: x ** 3,
+                f"{col}_sqrt": lambda x: np.sqrt(np.abs(x)),
+                f"{col}_log1p": lambda x: np.log1p(np.abs(x)),
+                f"{col}_exp": lambda x: np.exp(np.clip(x, -10, 10)),
+                f"{col}_inv": lambda x: 1 / (x + 1e-10),
+                f"{col}_sin": lambda x: np.sin(x),
+                f"{col}_cos": lambda x: np.cos(x),
+            }
+
+            # Score each transformation by correlation with target
+            for trans_name, trans_func in transformations.items():
+                try:
+                    transformed = trans_func(X[col].values)
+
+                    # Calculate correlation with target
+                    if not np.any(np.isnan(transformed)) and not np.any(np.isinf(transformed)):
+                        corr = np.abs(np.corrcoef(transformed, y.values)[0, 1])
+
+                        # Only keep if improves correlation significantly
+                        original_corr = np.abs(np.corrcoef(X[col].values, y.values)[0, 1])
+
+                        if corr > original_corr * 1.1:  # At least 10% improvement
+                            result[trans_name] = transformed
+                            self.discovered_formulas[trans_name] = trans_name.split('_', 1)[1]
+
+                            self.metadata.append(FeatureMetadata(
+                                name=trans_name,
+                                feature_type=FeatureType.NUMERICAL,
+                                source_columns=[col],
+                                transformation=self.discovered_formulas[trans_name],
+                                scope=TransformationScope.ROW_LEVEL,
+                                created_at=datetime.now(),
+                                version="1.0.0",
+                                importance=float(corr),
+                                description=f"Symbolic transformation (target_corr={corr:.4f})"
+                            ))
+
+                except Exception as e:
+                    logger.debug(f"Transformation {trans_name} failed: {e}")
+                    continue
+
+        logger.info(f"Discovered {len(self.discovered_formulas)} beneficial transformations")
+        return result
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\subsection{Domain-Specific Feature Libraries}
+
+Different data types require specialized feature engineering approaches. Here we provide comprehensive libraries for time series, text, and graph data.
+
+\begin{lstlisting}[language=Python, caption={Time Series Feature Library with Seasonality Detection}]
+from statsmodels.tsa.seasonal import seasonal_decompose
+from scipy.signal import find_peaks
+from sklearn.decomposition import PCA
+import warnings
+
+class TimeSeriesFeatureLibrary:
+    """
+    Comprehensive time series feature extraction including:
+    - Trend and seasonality decomposition
+    - Autocorrelation features
+    - Statistical moments over windows
+    - Change point detection
+    """
+
+    def __init__(self, timestamp_col: str, value_col: str,
+                 freq: str = 'D', seasonal_period: int = None):
+        """
+        Args:
+            timestamp_col: Name of timestamp column
+            value_col: Name of value column to extract features from
+            freq: Frequency of time series ('D', 'H', 'M', etc.)
+            seasonal_period: Period for seasonal decomposition (auto-detect if None)
+        """
+        self.timestamp_col = timestamp_col
+        self.value_col = value_col
+        self.freq = freq
+        self.seasonal_period = seasonal_period
+        self.metadata: List[FeatureMetadata] = []
+
+    def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Extract comprehensive time series features."""
+        result = df.copy()
+        result[self.timestamp_col] = pd.to_datetime(result[self.timestamp_col])
+        result = result.sort_values(self.timestamp_col)
+
+        # 1. Seasonal decomposition
+        if len(result) >= 2 * (self.seasonal_period or 7):
+            result = self._add_seasonal_features(result)
+
+        # 2. Lag features with automatic selection
+        optimal_lags = self._select_optimal_lags(result[self.value_col])
+        result = self._add_lag_features(result, optimal_lags)
+
+        # 3. Rolling statistics
+        result = self._add_rolling_features(result)
+
+        # 4. Autocorrelation features
+        result = self._add_autocorrelation_features(result)
+
+        # 5. Change point indicators
+        result = self._add_changepoint_features(result)
+
+        return result
+
+    def _add_seasonal_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Decompose time series into trend, seasonal, and residual components."""
+        try:
+            ts = df.set_index(self.timestamp_col)[self.value_col]
+
+            # Determine seasonal period if not provided
+            if self.seasonal_period is None:
+                period = self._detect_seasonality(ts)
+            else:
+                period = self.seasonal_period
+
+            if period is None or period < 2:
+                logger.info("No clear seasonality detected")
+                return df
+
+            # Perform decomposition
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                decomposition = seasonal_decompose(ts, model='additive',
+                                                   period=period, extrapolate_trend='freq')
+
+            df[f'{self.value_col}_trend'] = decomposition.trend.values
+            df[f'{self.value_col}_seasonal'] = decomposition.seasonal.values
+            df[f'{self.value_col}_residual'] = decomposition.resid.values
+
+            self.metadata.extend([
+                FeatureMetadata(
+                    name=f'{self.value_col}_trend',
+                    feature_type=FeatureType.NUMERICAL,
+                    source_columns=[self.value_col],
+                    transformation=f"seasonal_decompose trend (period={period})",
+                    scope=TransformationScope.GLOBAL_LEVEL,
+                    created_at=datetime.now(),
+                    version="1.0.0"
+                ),
+                FeatureMetadata(
+                    name=f'{self.value_col}_seasonal',
+                    feature_type=FeatureType.NUMERICAL,
+                    source_columns=[self.value_col],
+                    transformation=f"seasonal_decompose seasonal (period={period})",
+                    scope=TransformationScope.GLOBAL_LEVEL,
+                    created_at=datetime.now(),
+                    version="1.0.0"
+                )
+            ])
+
+            logger.info(f"Added seasonal decomposition features (period={period})")
+
+        except Exception as e:
+            logger.warning(f"Seasonal decomposition failed: {e}")
+
+        return df
+
+    def _detect_seasonality(self, ts: pd.Series, max_period: int = 365) -> Optional[int]:
+        """Detect seasonality using autocorrelation."""
+        from statsmodels.tsa.stattools import acf
+
+        # Compute autocorrelation
+        autocorr = acf(ts.dropna(), nlags=min(len(ts) // 2, max_period), fft=True)
+
+        # Find peaks in autocorrelation
+        peaks, properties = find_peaks(autocorr[1:], height=0.1)
+
+        if len(peaks) > 0:
+            # Return the most prominent peak
+            peak_idx = peaks[np.argmax(properties['peak_heights'])]
+            return peak_idx + 1
+
+        return None
+
+    def _select_optimal_lags(self, series: pd.Series, max_lags: int = 30) -> List[int]:
+        """Select optimal lag values using PACF."""
+        from statsmodels.tsa.stattools import pacf
+
+        # Compute partial autocorrelation
+        pacf_values = pacf(series.dropna(), nlags=max_lags)
+
+        # Select lags with significant PACF (>0.1)
+        significant_lags = [i for i in range(1, len(pacf_values))
+                           if abs(pacf_values[i]) > 0.1]
+
+        # Limit to top 5 lags
+        return sorted(significant_lags[:5])
+
+    def _add_lag_features(self, df: pd.DataFrame, lags: List[int]) -> pd.DataFrame:
+        """Add lag features."""
+        for lag in lags:
+            col_name = f'{self.value_col}_lag_{lag}'
+            df[col_name] = df[self.value_col].shift(lag)
+
+            self.metadata.append(FeatureMetadata(
+                name=col_name,
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=[self.value_col],
+                transformation=f"lag {lag} (auto-selected via PACF)",
+                scope=TransformationScope.ROW_LEVEL,
+                created_at=datetime.now(),
+                version="1.0.0"
+            ))
+
+        return df
+
+    def _add_rolling_features(self, df: pd.DataFrame,
+                             windows: List[int] = [7, 14, 30]) -> pd.DataFrame:
+        """Add rolling window statistics."""
+        for window in windows:
+            if window >= len(df):
+                continue
+
+            df[f'{self.value_col}_rolling_mean_{window}'] = \
+                df[self.value_col].rolling(window, min_periods=1).mean()
+            df[f'{self.value_col}_rolling_std_{window}'] = \
+                df[self.value_col].rolling(window, min_periods=1).std()
+            df[f'{self.value_col}_rolling_min_{window}'] = \
+                df[self.value_col].rolling(window, min_periods=1).min()
+            df[f'{self.value_col}_rolling_max_{window}'] = \
+                df[self.value_col].rolling(window, min_periods=1).max()
+
+            # Rolling rate of change
+            df[f'{self.value_col}_rolling_roc_{window}'] = \
+                df[self.value_col].pct_change(periods=window)
+
+        return df
+
+    def _add_autocorrelation_features(self, df: pd.DataFrame,
+                                     lags: List[int] = [1, 7, 30]) -> pd.DataFrame:
+        """Add autocorrelation at specific lags as features."""
+        for lag in lags:
+            df[f'{self.value_col}_autocorr_{lag}'] = \
+                df[self.value_col].rolling(window=lag+10, min_periods=lag+1)\
+                    .apply(lambda x: x.autocorr(lag=lag), raw=False)
+
+        return df
+
+    def _add_changepoint_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Detect and mark change points in the time series."""
+        # Simple change point detection using rolling statistics
+        window = min(30, len(df) // 4)
+
+        rolling_mean = df[self.value_col].rolling(window, min_periods=1).mean()
+        rolling_std = df[self.value_col].rolling(window, min_periods=1).std()
+
+        # Detect points where value exceeds 2 standard deviations from rolling mean
+        df[f'{self.value_col}_is_outlier'] = (
+            np.abs(df[self.value_col] - rolling_mean) > 2 * rolling_std
+        ).astype(int)
+
+        # Detect trend changes (derivative changes sign)
+        df[f'{self.value_col}_trend_change'] = (
+            np.sign(df[self.value_col].diff()).diff().fillna(0) != 0
+        ).astype(int)
+
+        return df
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\subsection{Feature Interaction Discovery with Statistical Testing}
+
+Manually specifying all feature interactions is infeasible for high-dimensional data. This class automatically discovers significant interactions.
+
+\begin{lstlisting}[language=Python, caption={Automated Feature Interaction Discovery}]
+from itertools import combinations
+from scipy.stats import f_oneway, chi2_contingency
+from statsmodels.stats.multitest import multipletests
+
+class FeatureInteractionDiscovery:
+    """
+    Automatically discover significant feature interactions using:
+    - Statistical tests (ANOVA, chi-squared)
+    - Multiple testing corrections (Bonferroni, FDR)
+    - Interaction strength scoring
+    """
+
+    def __init__(self, max_interactions: int = 100,
+                 significance_level: float = 0.05,
+                 correction_method: str = 'fdr_bh'):
+        """
+        Args:
+            max_interactions: Maximum number of interactions to test
+            significance_level: P-value threshold after correction
+            correction_method: Multiple testing correction
+                              ('bonferroni', 'fdr_bh', 'fdr_by')
+        """
+        self.max_interactions = max_interactions
+        self.significance_level = significance_level
+        self.correction_method = correction_method
+        self.significant_interactions: List[tuple] = []
+        self.metadata: List[FeatureMetadata] = []
+
+    def discover_interactions(self, X: pd.DataFrame, y: pd.Series,
+                             candidate_features: List[str] = None) -> pd.DataFrame:
+        """
+        Test all pairs of features for significant interactions with target.
+
+        Returns DataFrame with original features plus significant interactions.
+        """
+        if candidate_features is None:
+            candidate_features = X.select_dtypes(include=[np.number]).columns.tolist()
+
+        # Limit candidates if too many
+        if len(candidate_features) > 50:
+            logger.warning(f"Too many candidates ({len(candidate_features)}), "
+                          f"selecting top 50 by variance")
+            variances = X[candidate_features].var()
+            candidate_features = variances.nlargest(50).index.tolist()
+
+        # Generate all pairs
+        pairs = list(combinations(candidate_features, 2))
+
+        # Limit number of tests
+        if len(pairs) > self.max_interactions:
+            pairs = pairs[:self.max_interactions]
+
+        logger.info(f"Testing {len(pairs)} feature interactions...")
+
+        # Test each interaction
+        interaction_scores = []
+        for feat1, feat2 in pairs:
+            score, p_value = self._test_interaction(X[feat1], X[feat2], y)
+            interaction_scores.append({
+                'feature1': feat1,
+                'feature2': feat2,
+                'score': score,
+                'p_value': p_value
+            })
+
+        # Apply multiple testing correction
+        p_values = [item['p_value'] for item in interaction_scores]
+        reject, corrected_pvals, _, _ = multipletests(
+            p_values,
+            alpha=self.significance_level,
+            method=self.correction_method
+        )
+
+        # Keep only significant interactions
+        result = X.copy()
+        for i, (item, is_significant, corrected_p) in enumerate(
+            zip(interaction_scores, reject, corrected_pvals)
+        ):
+            if is_significant:
+                feat1 = item['feature1']
+                feat2 = item['feature2']
+
+                # Create interaction feature
+                interaction_name = f"{feat1}_X_{feat2}"
+                result[interaction_name] = X[feat1] * X[feat2]
+
+                self.significant_interactions.append((feat1, feat2))
+
+                self.metadata.append(FeatureMetadata(
+                    name=interaction_name,
+                    feature_type=FeatureType.NUMERICAL,
+                    source_columns=[feat1, feat2],
+                    transformation=f"multiplicative interaction (p={corrected_p:.4f})",
+                    scope=TransformationScope.ROW_LEVEL,
+                    created_at=datetime.now(),
+                    version="1.0.0",
+                    importance=item['score'],
+                    description=f"Statistically significant interaction ({self.correction_method})"
+                ))
+
+        logger.info(f"Found {len(self.significant_interactions)} significant interactions "
+                   f"(α={self.significance_level}, correction={self.correction_method})")
+
+        return result
+
+    def _test_interaction(self, feat1: pd.Series, feat2: pd.Series,
+                         y: pd.Series) -> tuple:
+        """
+        Test if interaction between two features is significant.
+
+        Returns (score, p_value) where higher score = stronger interaction.
+        """
+        # Create interaction term
+        interaction = feat1 * feat2
+
+        # Test if interaction improves prediction of target
+        # For numerical target: use correlation
+        # For categorical target: use ANOVA
+
+        if pd.api.types.is_numeric_dtype(y):
+            # Correlation of interaction with target
+            corr = np.corrcoef(interaction.fillna(0), y)[0, 1]
+            score = abs(corr)
+
+            # Compute p-value using t-test
+            n = len(interaction)
+            t_stat = corr * np.sqrt(n - 2) / np.sqrt(1 - corr**2)
+            from scipy.stats import t
+            p_value = 2 * (1 - t.cdf(abs(t_stat), n - 2))
+        else:
+            # ANOVA for categorical target
+            groups = [interaction[y == label].dropna()
+                     for label in y.unique()]
+            groups = [g for g in groups if len(g) > 0]
+
+            if len(groups) < 2:
+                return 0.0, 1.0
+
+            f_stat, p_value = f_oneway(*groups)
+            score = f_stat
+
+        return score, p_value
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
+\subsection{Feature Embeddings for High-Cardinality Categoricals}
+
+For categorical features with thousands of unique values, embeddings learned from neural networks can capture semantic relationships.
+
+\begin{lstlisting}[language=Python, caption={Entity Embedding for High-Cardinality Features}]
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+class EntityEmbedding:
+    """
+    Learn dense embeddings for high-cardinality categorical features.
+
+    Useful for features like:
+    - Product IDs (10k+ unique products)
+    - User IDs (100k+ users)
+    - Store locations (1000+ stores)
+    """
+
+    def __init__(self, embedding_dim: int = 10, epochs: int = 50):
+        """
+        Args:
+            embedding_dim: Dimension of learned embeddings
+            epochs: Number of training epochs
+        """
+        self.embedding_dim = embedding_dim
+        self.epochs = epochs
+        self.embeddings_: Dict[str, nn.Embedding] = {}
+        self.encoders_: Dict[str, Dict] = {}
+        self.metadata: List[FeatureMetadata] = []
+
+    def fit_transform(self, df: pd.DataFrame, categorical_cols: List[str],
+                     target_col: str) -> pd.DataFrame:
+        """
+        Learn embeddings for categorical columns and transform data.
+
+        Returns DataFrame with embedding dimensions as new features.
+        """
+        result = df.copy()
+
+        for col in categorical_cols:
+            if col not in df.columns:
+                continue
+
+            # Encode categories to integers
+            unique_vals = df[col].unique()
+            val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
+            self.encoders_[col] = val_to_idx
+
+            # Create embedding model
+            n_categories = len(unique_vals)
+            embedding = self._train_embedding(
+                df[col], df[target_col], n_categories
+            )
+            self.embeddings_[col] = embedding
+
+            # Transform data using learned embeddings
+            encoded = df[col].map(val_to_idx).fillna(0).astype(int)
+            embedding_values = embedding(torch.LongTensor(encoded.values)).detach().numpy()
+
+            # Add embedding dimensions as features
+            for dim in range(self.embedding_dim):
+                feat_name = f"{col}_emb_{dim}"
+                result[feat_name] = embedding_values[:, dim]
+
+                self.metadata.append(FeatureMetadata(
+                    name=feat_name,
+                    feature_type=FeatureType.EMBEDDING,
+                    source_columns=[col],
+                    transformation=f"neural embedding dimension {dim}/{self.embedding_dim}",
+                    scope=TransformationScope.GLOBAL_LEVEL,
+                    created_at=datetime.now(),
+                    version="1.0.0",
+                    description=f"Learned embedding for {col} (n_categories={n_categories})"
+                ))
+
+            logger.info(f"Created {self.embedding_dim}-dim embedding for '{col}' "
+                       f"({n_categories} categories)")
+
+        return result
+
+    def _train_embedding(self, categorical_series: pd.Series,
+                        target: pd.Series, n_categories: int) -> nn.Embedding:
+        """Train embedding using simple neural network."""
+
+        class EmbeddingModel(nn.Module):
+            def __init__(self, n_categories, embedding_dim):
+                super().__init__()
+                self.embedding = nn.Embedding(n_categories, embedding_dim)
+                self.fc = nn.Linear(embedding_dim, 1)
+
+            def forward(self, x):
+                embedded = self.embedding(x)
+                out = self.fc(embedded)
+                return out.squeeze()
+
+        # Prepare data
+        encoder = self.encoders_[categorical_series.name]
+        X_encoded = categorical_series.map(encoder).fillna(0).astype(int).values
+        y_values = target.values if pd.api.types.is_numeric_dtype(target) \
+                   else pd.factorize(target)[0]
+
+        # Create model
+        model = EmbeddingModel(n_categories, self.embedding_dim)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = nn.MSELoss()
+
+        # Training loop
+        X_tensor = torch.LongTensor(X_encoded)
+        y_tensor = torch.FloatTensor(y_values)
+
+        model.train()
+        for epoch in range(self.epochs):
+            optimizer.zero_grad()
+            outputs = model(X_tensor)
+            loss = criterion(outputs, y_tensor)
+            loss.backward()
+            optimizer.step()
+
+        # Return learned embedding layer
+        return model.embedding
+
+    def get_metadata(self) -> List[FeatureMetadata]:
+        return self.metadata
+\end{lstlisting}
+
 \section{Feature Engineering Pipeline Framework}
 
 A robust feature engineering pipeline must ensure transformations are reproducible, validated, and production-ready. We'll build a framework that tracks every transformation, validates feature quality, and prevents common pitfalls like data leakage.
@@ -1817,6 +2493,390 @@ The team retrained the model with updated reference distributions and prevented 
     \item \textbf{Documentation pays off}: The FeatureMetadata system made it trivial to understand feature lineage when debugging issues
 \end{enumerate}
 
+\section{Industry Scenarios: Feature Engineering Failures and Successes}
+
+\subsection{Scenario 1: The Feature Engineering Arms Race}
+
+FinanceAI, a quantitative trading firm, fell into a classic trap: believing more features automatically meant better performance. Their initial model used 50 carefully engineered features and achieved 63\% accuracy on stock movement prediction.
+
+\textbf{The Escalation}
+
+The team started generating features aggressively:
+\begin{itemize}
+    \item \textbf{Week 1}: Added polynomial combinations of existing features (200 new features)
+    \item \textbf{Week 2}: Created rolling windows at 12 different time intervals for each feature (600 more features)
+    \item \textbf{Week 3}: Added interaction terms between all pairs (10,000+ features)
+    \item \textbf{Week 4}: Generated automatic transformations (log, sqrt, square) for all numerical features (15,000+ total)
+\end{itemize}
+
+Training accuracy improved to 78\%, and the team celebrated. However, validation accuracy dropped to 54\% -- worse than the original model.
+
+\textbf{The Problems}
+
+\begin{enumerate}
+    \item \textbf{Massive overfitting}: With 15,000 features and only 50,000 training samples, the model memorized noise
+    \item \textbf{Training time explosion}: Model training went from 5 minutes to 8 hours
+    \item \textbf{Production inference latency}: Feature computation at prediction time exceeded acceptable 100ms SLA, taking 2.3 seconds
+    \item \textbf{Feature maintenance nightmare}: Nobody understood what most features meant or where they came from
+    \item \textbf{Data leakage}: Several rolling window features accidentally included future information
+\end{enumerate}
+
+\textbf{The Solution}
+
+Senior ML engineer Dr. James Park intervened:
+\begin{itemize}
+    \item Implemented rigorous feature selection using mutual information and stability analysis
+    \item Applied L1 regularization to identify truly important features
+    \item Reduced feature count to 85 features (vs. original 50)
+    \item Implemented FeatureMetadata tracking for lineage and documentation
+    \item Added automated leakage detection tests in CI/CD
+\end{itemize}
+
+\textbf{Results}: Validation accuracy improved to 67\% (4 percentage points better than baseline), training time reduced to 12 minutes, inference latency at 45ms. Most importantly, features were interpretable and maintainable.
+
+\textbf{Key Lesson}: Feature quantity is not quality. Systematic selection and validation are essential. Every feature should have a hypothesis and be validated for stability and non-redundancy.
+
+\subsection{Scenario 2: The Real-Time Serving Nightmare}
+
+RetailStream built a sophisticated customer churn prediction model using batch-computed features with impressive offline metrics: 0.91 AUC, 85\% precision at 70\% recall. The team was confident as they moved to production real-time serving.
+
+\textbf{The Training Setup}
+
+Features were computed using Spark batch jobs running nightly:
+\begin{itemize}
+    \item 30-day rolling aggregations (purchase frequency, average order value, category diversity)
+    \item User-to-cohort similarity scores (computed via matrix factorization on full user base)
+    \item Relative features (user's metrics vs. cohort averages)
+    \item Complex graph features (social network connectivity, influence scores)
+\end{itemize}
+
+\textbf{The Production Reality}
+
+When deployed for real-time predictions, disasters struck:
+\begin{enumerate}
+    \item \textbf{Latency catastrophe}: Rolling aggregations required querying 30 days of transaction history per user. p99 latency: 4.7 seconds (SLA: 200ms)
+    \item \textbf{Data inconsistency}: Batch features used different data sources than production databases, causing training/serving skew
+    \item \textbf{Cold start failure}: New users had no historical data; features returned NULL, causing model crashes
+    \item \textbf{Resource exhaustion}: Peak traffic (Black Friday) overwhelmed the database with feature computation queries
+    \item \textbf{Staleness}: Batch features updated nightly; intraday user behavior changes were invisible
+\end{enumerate}
+
+Customer-facing applications timed out, causing \$2.3M in lost revenue over a three-day period before the system was rolled back.
+
+\textbf{The Architectural Redesign}
+
+The team rebuilt with production-first thinking:
+\begin{itemize}
+    \item \textbf{Feature Store with dual serving}: Batch features pre-computed and cached in low-latency store (Redis); streaming features computed in real-time from Kafka
+    \item \textbf{Feature complexity tiers}:
+    \begin{itemize}
+        \item \textit{Tier 1 (real-time)}: Simple aggregations from last 24 hours, cached user profiles
+        \item \textit{Tier 2 (near-real-time)}: Updated hourly, acceptable 1-hour staleness
+        \item \textit{Tier 3 (batch)}: Complex features updated nightly, used only for non-critical paths
+    \end{itemize}
+    \item \textbf{Fallback mechanisms}: Default values for cold start scenarios; graceful degradation if feature computation exceeds latency budget
+    \item \textbf{Training/serving parity}: Shared feature computation code between batch training and online serving
+\end{itemize}
+
+\textbf{Results}: p99 latency reduced to 87ms, zero production incidents over 6 months, model performance maintained at 0.89 AUC (slight drop acceptable for reliability).
+
+\textbf{Key Lesson}: Design features with production constraints from day one. Latency, scalability, and consistency are not afterthoughts. The best feature is useless if it cannot be served reliably.
+
+\subsection{Scenario 3: The Data Leakage Disaster}
+
+MedPredict developed a hospital readmission prediction model with remarkable offline performance: 0.94 AUC. Hospitals were eager to adopt it. However, after deployment, the model's real-world accuracy plummeted to barely better than random chance.
+
+\textbf{The Hidden Leakage}
+
+After weeks of investigation, the team discovered multiple leakage sources:
+
+\begin{enumerate}
+    \item \textbf{Temporal leakage}: Features included "total medications prescribed" -- but this was computed from the ENTIRE hospital stay, including medications prescribed AFTER the readmission decision point
+    \item \textbf{Lab result leakage}: "Average lab result stability" was calculated over a 7-day window that included days AFTER discharge
+    \item \textbf{Implicit target leakage}: "Number of follow-up appointments scheduled" was highly predictive -- because patients likely to be readmitted were proactively scheduled for more follow-ups by doctors
+    \item \textbf{Data preprocessing leakage}: Missing value imputation used mean from entire dataset, including future test set patients
+    \item \textbf{Feature selection leakage}: Feature importance was calculated on the full dataset before train/test split
+\end{enumerate}
+
+The model had essentially learned to predict the past from the future -- useless in production where only historical data exists at prediction time.
+
+\textbf{The Consequences}
+
+\begin{itemize}
+    \item Three hospitals had already integrated the model; all had to be notified and systems reverted
+    \item Regulatory scrutiny: FDA raised questions about ML validation processes
+    \item Reputation damage: Published case studies had to be retracted
+    \item Six months of development time lost
+\end{itemize}
+
+\textbf{The Systematic Fix}
+
+The team implemented rigorous anti-leakage protocols:
+
+\begin{lstlisting}[language=Python, caption={Automated Temporal Leakage Detection}]
+class TemporalLeakageDetector:
+    """Detect potential temporal leakage in feature engineering."""
+
+    def __init__(self, prediction_time_col: str,
+                 event_time_col: str):
+        self.prediction_time = prediction_time_col
+        self.event_time = event_time_col
+
+    def validate_features(self, df: pd.DataFrame,
+                         feature_metadata: List[FeatureMetadata]) -> Dict[str, str]:
+        """
+        Validate that features only use data available before prediction time.
+
+        Returns:
+            Dictionary of {feature_name: violation_description}
+        """
+        violations = {}
+
+        for feature in feature_metadata:
+            # Check if feature uses future data
+            if feature.scope == TransformationScope.AGGREGATE:
+                # Validate aggregation windows
+                if hasattr(feature, 'window_end'):
+                    future_data = df[
+                        df[feature.window_end] > df[self.prediction_time]
+                    ]
+                    if len(future_data) > 0:
+                        violations[feature.name] = (
+                            f"Aggregation window extends beyond prediction time "
+                            f"for {len(future_data)} rows"
+                        )
+
+            # Check for target leakage in source columns
+            suspicious_keywords = ['after', 'post', 'future', 'outcome',
+                                  'result', 'followup', 'readmit']
+            for col in feature.source_columns:
+                if any(keyword in col.lower() for keyword in suspicious_keywords):
+                    violations[feature.name] = (
+                        f"Source column '{col}' contains suspicious "
+                        f"keyword indicating potential leakage"
+                    )
+
+        return violations
+
+    def test_feature_validity(self, X: pd.DataFrame, y: pd.Series,
+                             feature_cols: List[str]) -> Dict[str, float]:
+        """
+        Test for leakage by checking if features predict target TOO well.
+        Suspiciously high correlation may indicate leakage.
+        """
+        suspicious_features = {}
+
+        for col in feature_cols:
+            if col not in X.columns:
+                continue
+
+            # Calculate correlation with target
+            if X[col].dtype in ['float64', 'int64']:
+                corr = np.abs(X[col].corr(y))
+
+                # Single feature with correlation > 0.9 is suspicious
+                if corr > 0.9:
+                    suspicious_features[col] = corr
+
+        return suspicious_features
+\end{lstlisting}
+
+Additional safeguards:
+\begin{itemize}
+    \item \textbf{Strict temporal splits}: Test data only includes patients admitted AFTER all training data
+    \item \textbf{Feature cutoff times}: All features explicitly tagged with knowledge cutoff timestamp
+    \item \textbf{Code review protocol}: Two senior reviewers must approve all new features
+    \item \textbf{Automated leakage tests}: CI/CD pipeline includes temporal validation checks
+    \item \textbf{Documentation requirements}: Every feature must document its temporal validity
+\end{itemize}
+
+\textbf{Results}: The rebuilt model achieved 0.78 AUC (lower but honest), maintained performance in production, and passed regulatory audit.
+
+\textbf{Key Lesson}: Data leakage is insidious and often invisible in offline metrics. Implement automated leakage detection, enforce strict temporal discipline, and always validate with forward-looking temporal splits.
+
+\subsection{Scenario 4: The Feature Store Migration}
+
+GlobalBank operated 47 different ML models across fraud detection, credit risk, customer segmentation, and recommendation systems. Each team independently engineered features, leading to massive duplication, inconsistency, and waste.
+
+\textbf{The Chaos}
+
+\begin{itemize}
+    \item "Customer lifetime value" was computed 12 different ways by 12 teams
+    \item "Days since last transaction" existed in 8 variants with subtle differences
+    \item Shared features (e.g., "account age") were recomputed in each model's pipeline
+    \item No versioning: Features changed without notice, breaking downstream models
+    \item Total compute cost for redundant feature computation: \$380K/year
+\end{itemize}
+
+\textbf{The Migration Initiative}
+
+The ML Platform team launched a centralized feature store migration:
+
+\begin{lstlisting}[language=Python, caption={Enterprise Feature Store Architecture}]
+class EnterpriseFeatureStore:
+    """
+    Production feature store with versioning, governance, and monitoring.
+    Supports both batch training and real-time serving.
+    """
+
+    def __init__(self,
+                 offline_store: str,  # S3, BigQuery, etc.
+                 online_store: str):  # Redis, DynamoDB, etc.
+        self.offline_store = offline_store
+        self.online_store = online_store
+        self.feature_registry: Dict[str, FeatureDefinition] = {}
+
+    def register_feature_group(self,
+                              name: str,
+                              features: List[FeatureDefinition],
+                              owner: str,
+                              compute_mode: str = "batch") -> None:
+        """
+        Register a group of related features with governance metadata.
+
+        Args:
+            name: Feature group name (e.g., "customer_demographics")
+            features: List of feature definitions
+            owner: Team/individual responsible for maintaining
+            compute_mode: "batch", "streaming", or "on-demand"
+        """
+        feature_group = FeatureGroup(
+            name=name,
+            features=features,
+            owner=owner,
+            compute_mode=compute_mode,
+            created_at=datetime.now(),
+            documentation_url=f"https://wiki.company.com/features/{name}"
+        )
+
+        # Validate no naming conflicts
+        for feature in features:
+            if feature.name in self.feature_registry:
+                existing = self.feature_registry[feature.name]
+                raise ValueError(
+                    f"Feature '{feature.name}' already exists "
+                    f"(owner: {existing.owner})"
+                )
+
+        # Register each feature
+        for feature in features:
+            self.feature_registry[feature.name] = feature
+            logger.info(f"Registered feature: {feature.name} (group: {name})")
+
+    def get_historical_features(self,
+                               entity_df: pd.DataFrame,
+                               features: List[str],
+                               feature_version: str = "latest") -> pd.DataFrame:
+        """
+        Get point-in-time correct features for training.
+        Ensures no data leakage by respecting event timestamps.
+        """
+        result = entity_df.copy()
+
+        for feature_name in features:
+            if feature_name not in self.feature_registry:
+                raise ValueError(f"Feature '{feature_name}' not found in registry")
+
+            feature_def = self.feature_registry[feature_name]
+
+            # Retrieve from offline store with point-in-time join
+            feature_values = self._point_in_time_join(
+                entity_df=entity_df,
+                feature_def=feature_def,
+                version=feature_version
+            )
+
+            result[feature_name] = feature_values
+
+        return result
+
+    def get_online_features(self,
+                           entity_ids: List[str],
+                           features: List[str]) -> pd.DataFrame:
+        """
+        Get features for real-time serving (low latency).
+        Retrieves from online store (Redis, DynamoDB, etc.)
+        """
+        # Query online store for low-latency retrieval
+        feature_vectors = []
+
+        for entity_id in entity_ids:
+            entity_features = {}
+            for feature_name in features:
+                # Retrieve from online store
+                cache_key = f"{entity_id}:{feature_name}"
+                value = self._get_from_online_store(cache_key)
+                entity_features[feature_name] = value
+
+            feature_vectors.append(entity_features)
+
+        return pd.DataFrame(feature_vectors)
+
+    def materialize_features(self,
+                            feature_group: str,
+                            start_time: datetime,
+                            end_time: datetime) -> None:
+        """
+        Compute and materialize features for a time range.
+        Stores in both offline (training) and online (serving) stores.
+        """
+        logger.info(f"Materializing feature group '{feature_group}' "
+                   f"from {start_time} to {end_time}")
+
+        # Compute features (batch job)
+        features_df = self._compute_feature_group(
+            feature_group, start_time, end_time
+        )
+
+        # Write to offline store (for training)
+        self._write_offline_store(feature_group, features_df)
+
+        # Write to online store (for serving)
+        self._write_online_store(feature_group, features_df)
+
+        logger.info(f"Materialized {len(features_df)} rows for {feature_group}")
+\end{lstlisting}
+
+\textbf{The Migration Challenges}
+
+\begin{enumerate}
+    \item \textbf{Reconciling definitions}: "Customer lifetime value" had 12 implementations; teams had to agree on canonical version
+    \item \textbf{Backward compatibility}: Couldn't break existing models; needed versioning and migration paths
+    \item \textbf{Performance regression}: Some teams had optimized local pipelines; feature store added latency
+    \item \textbf{Cultural resistance}: Teams reluctant to give up control and depend on shared infrastructure
+    \item \textbf{Governance overhead}: Establishing ownership, documentation, and approval processes
+\end{enumerate}
+
+\textbf{The Phased Approach}
+
+\begin{itemize}
+    \item \textbf{Phase 1 (Months 1-3)}: Pilot with fraud detection team; prove value and iron out issues
+    \item \textbf{Phase 2 (Months 4-6)}: Migrate high-value shared features (customer demographics, transaction aggregates)
+    \item \textbf{Phase 3 (Months 7-12)}: Gradual migration of remaining teams; deprecate redundant pipelines
+    \item \textbf{Phase 4 (Ongoing)}: Establish feature governance: approval process, documentation standards, monitoring
+\end{itemize}
+
+\textbf{Results After 12 Months}
+
+\begin{itemize}
+    \item 347 features registered in feature store (from 2,000+ redundant features)
+    \item Compute cost reduced by 62\% (\$235K/year savings)
+    \item Model development time reduced by 40\% (reusing existing features)
+    \item Feature consistency across models improved data governance compliance
+    \item Real-time serving latency: p95 = 23ms, p99 = 47ms
+    \item 23 models successfully migrated; 24 more in progress
+\end{itemize}
+
+\textbf{Key Lessons}
+
+\begin{enumerate}
+    \item \textbf{Start small}: Pilot with one team to prove value and learn
+    \item \textbf{Incentivize adoption}: Show clear benefits (reduced development time, cost savings)
+    \item \textbf{Maintain backward compatibility}: Support gradual migration, not forced big-bang
+    \item \textbf{Governance is essential}: Without ownership and documentation, feature store becomes a dumping ground
+    \item \textbf{Monitor performance}: Track serving latency, feature freshness, and compute costs
+\end{enumerate}
+
 \section{Feature Store Integration}
 
 For organizations with multiple ML systems, a feature store provides centralized feature management, versioning, and serving.
@@ -1915,6 +2975,1863 @@ class FeatureVersionManager:
         return sorted([f.stem.replace("feature_version_", "") for f in version_files])
 \end{lstlisting}
 
+\section{Enterprise Feature Management}
+
+At scale, feature engineering becomes an organizational challenge requiring governance, cost optimization, and real-time serving capabilities.
+
+\subsection{Production Feature Store Implementation}
+
+\begin{lstlisting}[language=Python, caption={Production-Ready Feature Store with Real-Time Serving}]
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, List
+import redis
+import pyarrow.parquet as pq
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+
+class FeatureStore(ABC):
+    """
+    Abstract base class for feature stores supporting:
+    - Online serving (low-latency, real-time)
+    - Offline serving (batch, point-in-time correct)
+    - Feature versioning and lineage
+    - Consistency guarantees
+    """
+
+    @abstractmethod
+    def write_features(self, entity_key: str, features: Dict[str, Any],
+                      timestamp: datetime, feature_view: str) -> None:
+        """Write features to both online and offline stores."""
+        pass
+
+    @abstractmethod
+    def get_online_features(self, entity_keys: List[str],
+                           feature_names: List[str]) -> pd.DataFrame:
+        """Retrieve features for real-time inference (< 10ms)."""
+        pass
+
+    @abstractmethod
+    def get_historical_features(self, entity_df: pd.DataFrame,
+                               feature_names: List[str],
+                               timestamp_column: str) -> pd.DataFrame:
+        """Retrieve point-in-time correct features for training."""
+        pass
+
+
+class RedisParquetFeatureStore(FeatureStore):
+    """
+    Feature store implementation using:
+    - Redis for online serving (low latency)
+    - Parquet files for offline serving (historical accuracy)
+    - Dual-write for consistency
+    """
+
+    def __init__(self, redis_host: str, redis_port: int,
+                 offline_storage_path: Path,
+                 ttl_seconds: int = 86400 * 30):  # 30 days default
+        """
+        Args:
+            redis_host: Redis server host
+            redis_port: Redis server port
+            offline_storage_path: Path for Parquet files
+            ttl_seconds: TTL for online features
+        """
+        self.redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            decode_responses=False  # Store binary data
+        )
+        self.offline_storage_path = offline_storage_path
+        self.offline_storage_path.mkdir(parents=True, exist_ok=True)
+        self.ttl_seconds = ttl_seconds
+        self.executor = ThreadPoolExecutor(max_workers=10)
+
+    def write_features(self, entity_key: str, features: Dict[str, Any],
+                      timestamp: datetime, feature_view: str) -> None:
+        """
+        Dual-write to online (Redis) and offline (Parquet) stores.
+
+        Ensures eventual consistency between serving paths.
+        """
+        # Write to online store (Redis)
+        redis_key = f"{feature_view}:{entity_key}"
+        feature_data = {
+            'timestamp': timestamp.isoformat(),
+            **features
+        }
+
+        # Serialize to JSON and store
+        import json
+        self.redis_client.set(
+            redis_key,
+            json.dumps(feature_data),
+            ex=self.ttl_seconds
+        )
+
+        # Async write to offline store
+        self.executor.submit(
+            self._write_to_offline_store,
+            entity_key, features, timestamp, feature_view
+        )
+
+        logger.debug(f"Wrote features for {entity_key} to {feature_view}")
+
+    def _write_to_offline_store(self, entity_key: str, features: Dict[str, Any],
+                                timestamp: datetime, feature_view: str) -> None:
+        """Append features to Parquet file for offline storage."""
+        # Create DataFrame row
+        row_data = {
+            'entity_key': entity_key,
+            'timestamp': timestamp,
+            **features
+        }
+        df_row = pd.DataFrame([row_data])
+
+        # Partition by date for efficient retrieval
+        date_partition = timestamp.strftime("%Y-%m-%d")
+        partition_path = (
+            self.offline_storage_path / feature_view / date_partition
+        )
+        partition_path.mkdir(parents=True, exist_ok=True)
+
+        # Append to Parquet file
+        parquet_file = partition_path / f"{entity_key[:2]}.parquet"
+
+        if parquet_file.exists():
+            # Append to existing file
+            existing_df = pd.read_parquet(parquet_file)
+            combined_df = pd.concat([existing_df, df_row], ignore_index=True)
+            combined_df.to_parquet(parquet_file, index=False)
+        else:
+            # Create new file
+            df_row.to_parquet(parquet_file, index=False)
+
+    def get_online_features(self, entity_keys: List[str],
+                           feature_names: List[str],
+                           feature_view: str = "default") -> pd.DataFrame:
+        """
+        Retrieve features from Redis for real-time serving.
+
+        Optimized for low latency (<10ms for 100 entities).
+        """
+        import json
+
+        # Batch retrieve from Redis using pipeline
+        pipeline = self.redis_client.pipeline()
+        for entity_key in entity_keys:
+            redis_key = f"{feature_view}:{entity_key}"
+            pipeline.get(redis_key)
+
+        results = pipeline.execute()
+
+        # Parse results
+        rows = []
+        for entity_key, redis_data in zip(entity_keys, results):
+            if redis_data is None:
+                # Feature not found, use nulls
+                row = {'entity_key': entity_key}
+                row.update({feat: None for feat in feature_names})
+            else:
+                feature_data = json.loads(redis_data)
+                row = {'entity_key': entity_key}
+                row.update({
+                    feat: feature_data.get(feat)
+                    for feat in feature_names
+                })
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def get_historical_features(self, entity_df: pd.DataFrame,
+                               feature_names: List[str],
+                               timestamp_column: str,
+                               feature_view: str = "default") -> pd.DataFrame:
+        """
+        Retrieve point-in-time correct features for training.
+
+        Ensures no data leakage by only using features available
+        at the specified timestamp.
+        """
+        # Determine date range
+        min_date = entity_df[timestamp_column].min()
+        max_date = entity_df[timestamp_column].max()
+
+        # Load relevant Parquet partitions
+        date_range = pd.date_range(start=min_date, end=max_date, freq='D')
+
+        all_features = []
+        for date in date_range:
+            date_str = date.strftime("%Y-%m-%d")
+            partition_path = (
+                self.offline_storage_path / feature_view / date_str
+            )
+
+            if not partition_path.exists():
+                continue
+
+            # Read all Parquet files in partition
+            for parquet_file in partition_path.glob("*.parquet"):
+                df_partition = pd.read_parquet(parquet_file)
+                all_features.append(df_partition)
+
+        if not all_features:
+            logger.warning(f"No historical features found for {feature_view}")
+            return entity_df
+
+        # Combine all partitions
+        features_df = pd.concat(all_features, ignore_index=True)
+
+        # Point-in-time join: for each entity at each timestamp,
+        # get the most recent feature values before that timestamp
+        result_rows = []
+
+        for _, row in entity_df.iterrows():
+            entity_key = row['entity_key']
+            timestamp = row[timestamp_column]
+
+            # Filter features for this entity before timestamp
+            entity_features = features_df[
+                (features_df['entity_key'] == entity_key) &
+                (features_df['timestamp'] <= timestamp)
+            ]
+
+            if len(entity_features) == 0:
+                # No historical features available
+                feature_row = {feat: None for feat in feature_names}
+            else:
+                # Get most recent feature values
+                latest = entity_features.sort_values('timestamp').iloc[-1]
+                feature_row = {feat: latest.get(feat) for feat in feature_names}
+
+            result_rows.append({**row.to_dict(), **feature_row})
+
+        return pd.DataFrame(result_rows)
+
+
+class FeatureGovernance:
+    """
+    Feature governance framework tracking:
+    - Feature ownership
+    - Documentation and lineage
+    - Access controls
+    - Data quality SLAs
+    """
+
+    def __init__(self, governance_db_path: Path):
+        self.db_path = governance_db_path
+        self._init_database()
+
+    def _init_database(self) -> None:
+        """Initialize governance database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Feature registry
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feature_registry (
+                feature_id TEXT PRIMARY KEY,
+                feature_name TEXT NOT NULL,
+                feature_view TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                description TEXT,
+                created_at DATETIME NOT NULL,
+                last_updated DATETIME,
+                status TEXT DEFAULT 'active',
+                sla_freshness_minutes INTEGER,
+                sla_completeness_pct REAL
+            )
+        ''')
+
+        # Access log
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feature_access_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_id TEXT NOT NULL,
+                accessed_by TEXT NOT NULL,
+                access_type TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                row_count INTEGER,
+                FOREIGN KEY(feature_id) REFERENCES feature_registry(feature_id)
+            )
+        ''')
+
+        # Data quality metrics
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feature_quality_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_id TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                completeness_pct REAL,
+                uniqueness_pct REAL,
+                validity_pct REAL,
+                freshness_minutes INTEGER,
+                FOREIGN KEY(feature_id) REFERENCES feature_registry(feature_id)
+            )
+        ''')
+
+        conn.commit()
+        conn.close()
+
+    def register_feature(self, feature_name: str, feature_view: str,
+                        owner: str, description: str,
+                        sla_freshness_minutes: Optional[int] = None,
+                        sla_completeness_pct: float = 95.0) -> str:
+        """Register a new feature with governance metadata."""
+        feature_id = hashlib.sha256(
+            f"{feature_view}:{feature_name}".encode()
+        ).hexdigest()[:16]
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO feature_registry
+            (feature_id, feature_name, feature_view, owner, description,
+             created_at, last_updated, sla_freshness_minutes, sla_completeness_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            feature_id, feature_name, feature_view, owner, description,
+            datetime.now().isoformat(), datetime.now().isoformat(),
+            sla_freshness_minutes, sla_completeness_pct
+        ))
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"Registered feature: {feature_name} (owner: {owner})")
+        return feature_id
+
+    def log_access(self, feature_id: str, accessed_by: str,
+                  access_type: str, row_count: int = 0) -> None:
+        """Log feature access for audit trail."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            INSERT INTO feature_access_log
+            (feature_id, accessed_by, access_type, timestamp, row_count)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            feature_id, accessed_by, access_type,
+            datetime.now().isoformat(), row_count
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def check_sla_compliance(self, feature_id: str) -> Dict[str, bool]:
+        """Check if feature meets its SLAs."""
+        conn = sqlite3.connect(self.db_path)
+
+        # Get SLA requirements
+        sla_query = '''
+            SELECT sla_freshness_minutes, sla_completeness_pct
+            FROM feature_registry WHERE feature_id = ?
+        '''
+        sla_df = pd.read_sql_query(sla_query, conn, params=(feature_id,))
+
+        if len(sla_df) == 0:
+            return {"error": "Feature not found"}
+
+        sla_freshness = sla_df.iloc[0]['sla_freshness_minutes']
+        sla_completeness = sla_df.iloc[0]['sla_completeness_pct']
+
+        # Get latest quality metrics
+        metrics_query = '''
+            SELECT * FROM feature_quality_metrics
+            WHERE feature_id = ?
+            ORDER BY timestamp DESC LIMIT 1
+        '''
+        metrics_df = pd.read_sql_query(metrics_query, conn, params=(feature_id,))
+
+        conn.close()
+
+        if len(metrics_df) == 0:
+            return {"compliance": False, "reason": "No metrics available"}
+
+        latest_metrics = metrics_df.iloc[0]
+
+        # Check compliance
+        freshness_ok = (
+            sla_freshness is None or
+            latest_metrics['freshness_minutes'] <= sla_freshness
+        )
+        completeness_ok = latest_metrics['completeness_pct'] >= sla_completeness
+
+        return {
+            "compliance": freshness_ok and completeness_ok,
+            "freshness_ok": freshness_ok,
+            "completeness_ok": completeness_ok,
+            "metrics": latest_metrics.to_dict()
+        }
+\end{lstlisting}
+
+\subsection{Feature Cost Optimization}
+
+Feature computation and storage have real costs. This class optimizes the cost-performance trade-off.
+
+\begin{lstlisting}[language=Python, caption={Feature Cost-Performance Optimization}]
+from dataclasses import dataclass
+from typing import List, Dict
+import time
+
+@dataclass
+class FeatureCostMetrics:
+    """Cost and performance metrics for a feature."""
+    feature_name: str
+    compute_time_ms: float
+    storage_bytes: int
+    query_time_ms: float
+    importance_score: float
+    cost_per_prediction: float  # Estimated cost
+    efficiency_score: float  # Importance / cost ratio
+
+class FeatureOptimizer:
+    """
+    Optimize feature set for cost-performance trade-offs:
+    - Identify redundant expensive features
+    - Balance compute cost vs. model performance
+    - Recommend feature caching strategies
+    """
+
+    def __init__(self, cost_per_cpu_hour: float = 0.05,
+                 cost_per_gb_month: float = 0.02):
+        """
+        Args:
+            cost_per_cpu_hour: Compute cost per CPU hour
+            cost_per_gb_month: Storage cost per GB per month
+        """
+        self.cost_per_cpu_hour = cost_per_cpu_hour
+        self.cost_per_gb_month = cost_per_gb_month
+        self.feature_metrics: Dict[str, FeatureCostMetrics] = {}
+
+    def profile_features(self, feature_pipeline: FeatureEngineeringPipeline,
+                        X_sample: pd.DataFrame, y_sample: pd.Series,
+                        n_runs: int = 10) -> List[FeatureCostMetrics]:
+        """
+        Profile computational cost of each feature.
+
+        Measures:
+        - Compute time (transformation)
+        - Storage size
+        - Query time (retrieval)
+        - Feature importance
+        """
+        metrics = []
+
+        for step in feature_pipeline.steps:
+            for metadata in step.metadata:
+                feature_name = metadata.name
+
+                # Measure compute time
+                compute_times = []
+                for _ in range(n_runs):
+                    start = time.perf_counter()
+                    step.execute(X_sample)
+                    compute_times.append((time.perf_counter() - start) * 1000)
+
+                compute_time_ms = np.mean(compute_times)
+
+                # Measure storage size
+                if feature_name in X_sample.columns:
+                    storage_bytes = X_sample[feature_name].memory_usage(deep=True)
+                else:
+                    storage_bytes = 0
+
+                # Estimate query time (simplified)
+                query_time_ms = storage_bytes / 1_000_000  # Rough estimate
+
+                # Get importance score (from metadata or compute)
+                importance_score = metadata.importance or 0.0
+
+                # Calculate cost per prediction
+                # Cost = (compute_time * cpu_cost) + (storage * storage_cost)
+                compute_cost = (compute_time_ms / 1000 / 3600) * self.cost_per_cpu_hour
+                storage_cost = (storage_bytes / 1e9 / 30) * self.cost_per_gb_month
+                cost_per_prediction = compute_cost + storage_cost
+
+                # Efficiency score
+                efficiency_score = (
+                    importance_score / cost_per_prediction
+                    if cost_per_prediction > 0 else 0.0
+                )
+
+                metric = FeatureCostMetrics(
+                    feature_name=feature_name,
+                    compute_time_ms=compute_time_ms,
+                    storage_bytes=storage_bytes,
+                    query_time_ms=query_time_ms,
+                    importance_score=importance_score,
+                    cost_per_prediction=cost_per_prediction,
+                    efficiency_score=efficiency_score
+                )
+
+                metrics.append(metric)
+                self.feature_metrics[feature_name] = metric
+
+        # Sort by efficiency score
+        metrics.sort(key=lambda x: x.efficiency_score, reverse=True)
+
+        return metrics
+
+    def recommend_optimizations(self, metrics: List[FeatureCostMetrics],
+                               performance_threshold: float = 0.95) -> Dict[str, List[str]]:
+        """
+        Recommend cost optimizations while maintaining performance.
+
+        Args:
+            performance_threshold: Fraction of total importance to retain (0-1)
+
+        Returns:
+            Dictionary with optimization recommendations
+        """
+        # Sort by importance
+        sorted_metrics = sorted(metrics, key=lambda x: x.importance_score, reverse=True)
+
+        total_importance = sum(m.importance_score for m in metrics)
+        target_importance = total_importance * performance_threshold
+
+        # Greedy selection: keep features until reaching target importance
+        cumulative_importance = 0
+        keep_features = []
+        drop_features = []
+
+        for metric in sorted_metrics:
+            if cumulative_importance < target_importance:
+                keep_features.append(metric.feature_name)
+                cumulative_importance += metric.importance_score
+            else:
+                drop_features.append(metric.feature_name)
+
+        # Identify expensive features to cache
+        cache_candidates = [
+            m.feature_name for m in metrics
+            if m.compute_time_ms > 100 and m.feature_name in keep_features
+        ]
+
+        # Identify features for batch precomputation
+        precompute_candidates = [
+            m.feature_name for m in metrics
+            if m.compute_time_ms > 50 and m.query_time_ms < 10
+        ]
+
+        recommendations = {
+            "keep": keep_features,
+            "drop": drop_features,
+            "cache": cache_candidates,
+            "precompute": precompute_candidates,
+            "summary": {
+                "features_kept": len(keep_features),
+                "features_dropped": len(drop_features),
+                "importance_retained": cumulative_importance / total_importance,
+                "estimated_cost_savings": sum(
+                    self.feature_metrics[f].cost_per_prediction
+                    for f in drop_features
+                )
+            }
+        }
+
+        return recommendations
+
+    def generate_cost_report(self) -> pd.DataFrame:
+        """Generate detailed cost-performance report."""
+        if not self.feature_metrics:
+            return pd.DataFrame()
+
+        rows = []
+        for metric in self.feature_metrics.values():
+            rows.append({
+                'feature': metric.feature_name,
+                'compute_ms': metric.compute_time_ms,
+                'storage_mb': metric.storage_bytes / 1e6,
+                'importance': metric.importance_score,
+                'cost_per_pred': metric.cost_per_prediction,
+                'efficiency': metric.efficiency_score
+            })
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values('efficiency', ascending=False)
+
+        return df
+\end{lstlisting}
+
+\section{Mathematical Foundations for Feature Engineering}
+
+Rigorous statistical and information-theoretic foundations ensure features are meaningful and statistically sound.
+
+\subsection{Information Theory Metrics}
+
+\begin{lstlisting}[language=Python, caption={Information Theory for Feature Selection}]
+from scipy.stats import entropy
+from sklearn.metrics import mutual_info_score, normalized_mutual_info_score
+
+class InformationTheoryFeatureSelector:
+    """
+    Feature selection using information theory metrics:
+    - Mutual information with target
+    - Conditional mutual information
+    - Information gain ratio
+    - Redundancy analysis
+    """
+
+    def __init__(self, n_bins: int = 10):
+        """
+        Args:
+            n_bins: Number of bins for discretizing continuous variables
+        """
+        self.n_bins = n_bins
+        self.feature_mi_scores: Dict[str, float] = {}
+        self.redundancy_matrix: Optional[pd.DataFrame] = None
+
+    def compute_mutual_information(self, X: pd.DataFrame, y: pd.Series,
+                                   features: List[str] = None) -> Dict[str, float]:
+        """
+        Compute mutual information between each feature and target.
+
+        MI(X;Y) = H(X) + H(Y) - H(X,Y)
+
+        Measures reduction in uncertainty about Y when X is known.
+        """
+        if features is None:
+            features = X.columns.tolist()
+
+        mi_scores = {}
+
+        for feature in features:
+            if feature not in X.columns:
+                continue
+
+            x = X[feature]
+
+            # Discretize if continuous
+            if pd.api.types.is_numeric_dtype(x) and x.nunique() > self.n_bins:
+                x_discrete = pd.qcut(x, q=self.n_bins, labels=False,
+                                    duplicates='drop')
+            else:
+                x_discrete = x
+
+            # Compute mutual information
+            mi = mutual_info_score(x_discrete.fillna(-1), y)
+            mi_scores[feature] = mi
+
+        self.feature_mi_scores = mi_scores
+
+        logger.info(f"Computed MI for {len(mi_scores)} features")
+        return mi_scores
+
+    def compute_redundancy(self, X: pd.DataFrame,
+                          features: List[str] = None) -> pd.DataFrame:
+        """
+        Compute pairwise feature redundancy using mutual information.
+
+        High MI between features indicates redundancy.
+        """
+        if features is None:
+            features = X.columns.tolist()
+
+        n = len(features)
+        redundancy_matrix = np.zeros((n, n))
+
+        for i, feat1 in enumerate(features):
+            for j, feat2 in enumerate(features):
+                if i >= j:
+                    continue
+
+                x1 = X[feat1]
+                x2 = X[feat2]
+
+                # Discretize if needed
+                if pd.api.types.is_numeric_dtype(x1) and x1.nunique() > self.n_bins:
+                    x1 = pd.qcut(x1, q=self.n_bins, labels=False, duplicates='drop')
+
+                if pd.api.types.is_numeric_dtype(x2) and x2.nunique() > self.n_bins:
+                    x2 = pd.qcut(x2, q=self.n_bins, labels=False, duplicates='drop')
+
+                # Normalized MI (0-1)
+                nmi = normalized_mutual_info_score(
+                    x1.fillna(-1),
+                    x2.fillna(-1)
+                )
+
+                redundancy_matrix[i, j] = nmi
+                redundancy_matrix[j, i] = nmi
+
+        self.redundancy_matrix = pd.DataFrame(
+            redundancy_matrix,
+            index=features,
+            columns=features
+        )
+
+        return self.redundancy_matrix
+
+    def select_mrmr_features(self, X: pd.DataFrame, y: pd.Series,
+                            k: int = 10) -> List[str]:
+        """
+        Select features using mRMR (minimum Redundancy Maximum Relevance).
+
+        Balances:
+        - Relevance: High MI with target
+        - Redundancy: Low MI with already selected features
+        """
+        if not self.feature_mi_scores:
+            self.compute_mutual_information(X, y)
+
+        if self.redundancy_matrix is None:
+            self.compute_redundancy(X)
+
+        selected_features = []
+        candidate_features = list(self.feature_mi_scores.keys())
+
+        # Start with feature with highest MI
+        first_feature = max(candidate_features,
+                           key=lambda f: self.feature_mi_scores[f])
+        selected_features.append(first_feature)
+        candidate_features.remove(first_feature)
+
+        # Iteratively add features
+        while len(selected_features) < k and candidate_features:
+            mrmr_scores = {}
+
+            for candidate in candidate_features:
+                # Relevance: MI with target
+                relevance = self.feature_mi_scores[candidate]
+
+                # Redundancy: average MI with selected features
+                redundancies = [
+                    self.redundancy_matrix.loc[candidate, selected]
+                    for selected in selected_features
+                ]
+                redundancy = np.mean(redundancies) if redundancies else 0
+
+                # mRMR score
+                mrmr_scores[candidate] = relevance - redundancy
+
+            # Select feature with highest mRMR score
+            best_candidate = max(mrmr_scores.items(), key=lambda x: x[1])[0]
+            selected_features.append(best_candidate)
+            candidate_features.remove(best_candidate)
+
+        logger.info(f"Selected {len(selected_features)} features using mRMR")
+        return selected_features
+
+    def compute_conditional_mi(self, X: pd.DataFrame, y: pd.Series,
+                              feature: str, condition_feature: str) -> float:
+        """
+        Compute conditional mutual information: MI(feature; y | condition).
+
+        Measures information about y provided by feature,
+        given that condition_feature is already known.
+        """
+        # This is a simplified implementation
+        # Full implementation would require proper discretization and counting
+
+        x = X[feature].fillna(-1)
+        z = X[condition_feature].fillna(-1)
+
+        # Discretize
+        if pd.api.types.is_numeric_dtype(x) and x.nunique() > self.n_bins:
+            x = pd.qcut(x, q=self.n_bins, labels=False, duplicates='drop')
+
+        if pd.api.types.is_numeric_dtype(z) and z.nunique() > self.n_bins:
+            z = pd.qcut(z, q=self.n_bins, labels=False, duplicates='drop')
+
+        # CMI(X;Y|Z) = MI(X;Y,Z) - MI(X;Z)
+        # Simplified: compute for each value of Z and average
+        cmi_values = []
+
+        for z_val in z.unique():
+            mask = (z == z_val)
+            if mask.sum() < 10:  # Skip small groups
+                continue
+
+            x_subset = x[mask]
+            y_subset = y[mask]
+
+            mi = mutual_info_score(x_subset, y_subset)
+            cmi_values.append(mi)
+
+        return np.mean(cmi_values) if cmi_values else 0.0
+\end{lstlisting}
+
+\subsection{Causal Feature Selection}
+
+\begin{lstlisting}[language=Python, caption={Causal Feature Selection with Confounding Adjustment}]
+from scipy.stats import pearsonr, spearmanr
+import networkx as nx
+
+class CausalFeatureSelector:
+    """
+    Select features based on causal relationships rather than just correlation.
+
+    Addresses:
+    - Confounding variables
+    - Spurious correlations
+    - Causal discovery
+    """
+
+    def __init__(self):
+        self.causal_graph: Optional[nx.DiGraph] = None
+        self.adjustment_sets: Dict[str, List[str]] = {}
+
+    def discover_causal_structure(self, X: pd.DataFrame,
+                                  y: pd.Series,
+                                  alpha: float = 0.05) -> nx.DiGraph:
+        """
+        Discover causal structure using PC algorithm (simplified).
+
+        Returns directed acyclic graph representing causal relationships.
+        """
+        from pgmpy.estimators import PC
+
+        # Combine X and y
+        data = X.copy()
+        data['target'] = y
+
+        # Run PC algorithm for causal discovery
+        pc = PC(data)
+        causal_graph = pc.estimate(significance_level=alpha)
+
+        self.causal_graph = causal_graph
+
+        logger.info(f"Discovered causal graph with {len(causal_graph.nodes())} nodes "
+                   f"and {len(causal_graph.edges())} edges")
+
+        return causal_graph
+
+    def identify_confounders(self, feature: str, target: str = 'target') -> List[str]:
+        """
+        Identify confounding variables for feature -> target relationship.
+
+        A confounder causes both the feature and the target.
+        """
+        if self.causal_graph is None:
+            raise ValueError("Call discover_causal_structure first")
+
+        confounders = []
+
+        for node in self.causal_graph.nodes():
+            if node == feature or node == target:
+                continue
+
+            # Check if node causes both feature and target
+            causes_feature = self.causal_graph.has_edge(node, feature)
+            causes_target = self.causal_graph.has_edge(node, target)
+
+            if causes_feature and causes_target:
+                confounders.append(node)
+
+        return confounders
+
+    def compute_adjusted_correlation(self, X: pd.DataFrame, y: pd.Series,
+                                    feature: str,
+                                    confounders: List[str] = None) -> float:
+        """
+        Compute correlation between feature and target,
+        adjusted for confounding variables.
+
+        Uses partial correlation to control for confounders.
+        """
+        if confounders is None or len(confounders) == 0:
+            # No adjustment needed
+            return abs(pearsonr(X[feature], y)[0])
+
+        # Perform linear regression to remove confounding effects
+        from sklearn.linear_model import LinearRegression
+
+        # Regress feature on confounders
+        model_feature = LinearRegression()
+        model_feature.fit(X[confounders], X[feature])
+        residual_feature = X[feature] - model_feature.predict(X[confounders])
+
+        # Regress target on confounders
+        model_target = LinearRegression()
+        model_target.fit(X[confounders], y)
+        residual_target = y - model_target.predict(X[confounders])
+
+        # Partial correlation = correlation of residuals
+        partial_corr = abs(pearsonr(residual_feature, residual_target)[0])
+
+        return partial_corr
+
+    def select_causal_features(self, X: pd.DataFrame, y: pd.Series,
+                              threshold: float = 0.1) -> List[str]:
+        """
+        Select features based on adjusted causal effect on target.
+
+        Returns features with significant causal relationship to target.
+        """
+        if self.causal_graph is None:
+            self.discover_causal_structure(X, y)
+
+        causal_features = []
+
+        for feature in X.columns:
+            # Identify confounders
+            confounders = self.identify_confounders(feature)
+
+            # Compute adjusted correlation
+            adj_corr = self.compute_adjusted_correlation(
+                X, y, feature, confounders
+            )
+
+            if adj_corr >= threshold:
+                causal_features.append(feature)
+                self.adjustment_sets[feature] = confounders
+
+        logger.info(f"Selected {len(causal_features)} features "
+                   f"with causal relationship (threshold={threshold})")
+
+        return causal_features
+\end{lstlisting}
+
+\section{Advanced Feature Engineering Techniques}
+
+This section covers cutting-edge feature engineering methods that go beyond traditional approaches, incorporating automated feature selection with regularization, deep feature synthesis, neural feature learning, multi-modal fusion, and adaptive online learning.
+
+\subsection{Automated Feature Selection with Regularization Paths}
+
+Regularization paths provide a systematic way to understand feature importance across different regularization strengths, enabling robust feature selection.
+
+\begin{lstlisting}[language=Python, caption={Feature Selection Using Regularization Paths}]
+from sklearn.linear_model import LassoCV, ElasticNetCV
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+class RegularizationPathSelector:
+    """
+    Use regularization paths to identify stable, important features.
+    Analyzes feature coefficients across different regularization strengths.
+    """
+
+    def __init__(self, method: str = "lasso", n_alphas: int = 100):
+        """
+        Args:
+            method: "lasso", "elasticnet", or "ridge"
+            n_alphas: Number of regularization strengths to test
+        """
+        self.method = method
+        self.n_alphas = n_alphas
+        self.scaler = StandardScaler()
+        self.coefficients_path: Dict[str, np.ndarray] = {}
+        self.selected_features: List[str] = []
+
+    def fit(self, X: pd.DataFrame, y: pd.Series,
+           stability_threshold: float = 0.8) -> List[str]:
+        """
+        Fit regularization path and select stable features.
+
+        Args:
+            X: Feature matrix
+            y: Target variable
+            stability_threshold: Fraction of alphas where feature must be nonzero
+
+        Returns:
+            List of selected feature names
+        """
+        # Standardize features
+        X_scaled = self.scaler.fit_transform(X)
+
+        # Fit model with cross-validated regularization
+        if self.method == "lasso":
+            alphas = np.logspace(-4, 1, self.n_alphas)
+            model = LassoCV(alphas=alphas, cv=5, random_state=42, n_jobs=-1)
+        elif self.method == "elasticnet":
+            alphas = np.logspace(-4, 1, self.n_alphas)
+            model = ElasticNetCV(alphas=alphas, cv=5, random_state=42, n_jobs=-1)
+        else:
+            raise ValueError(f"Method {self.method} not supported")
+
+        model.fit(X_scaled, y)
+
+        # Get regularization path
+        # For each alpha, train model and record coefficients
+        feature_stability = {col: 0 for col in X.columns}
+        self.coefficients_path = {col: [] for col in X.columns}
+
+        for alpha in alphas:
+            if self.method == "lasso":
+                from sklearn.linear_model import Lasso
+                model_alpha = Lasso(alpha=alpha, random_state=42)
+            else:
+                from sklearn.linear_model import ElasticNet
+                model_alpha = ElasticNet(alpha=alpha, random_state=42)
+
+            model_alpha.fit(X_scaled, y)
+
+            # Record coefficients
+            for idx, col in enumerate(X.columns):
+                coef = model_alpha.coef_[idx]
+                self.coefficients_path[col].append(coef)
+
+                # Track if feature is active (non-zero)
+                if abs(coef) > 1e-10:
+                    feature_stability[col] += 1
+
+        # Select features that are stable across regularization path
+        for col, count in feature_stability.items():
+            stability = count / len(alphas)
+            if stability >= stability_threshold:
+                self.selected_features.append(col)
+
+        logger.info(f"Selected {len(self.selected_features)} stable features "
+                   f"(stability >= {stability_threshold})")
+
+        return self.selected_features
+
+    def plot_regularization_path(self, top_n: int = 20) -> None:
+        """Plot coefficient paths for top features."""
+        if not self.coefficients_path:
+            raise ValueError("Must fit() before plotting")
+
+        # Get features with highest coefficient magnitude at optimal alpha
+        feature_importance = {
+            col: max(abs(np.array(coefs)))
+            for col, coefs in self.coefficients_path.items()
+        }
+        top_features = sorted(
+            feature_importance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:top_n]
+
+        plt.figure(figsize=(12, 6))
+        alphas = np.logspace(-4, 1, self.n_alphas)
+
+        for feature_name, _ in top_features:
+            coef_path = self.coefficients_path[feature_name]
+            plt.plot(alphas, coef_path, label=feature_name)
+
+        plt.xscale('log')
+        plt.xlabel('Regularization strength (alpha)')
+        plt.ylabel('Coefficient value')
+        plt.title(f'{self.method.capitalize()} Regularization Path')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+
+class StabilitySelectionMethod:
+    """
+    Stability selection: Run feature selection on bootstrap samples
+    and select features that appear frequently.
+    """
+
+    def __init__(self, base_estimator=None, n_bootstrap: int = 100,
+                 threshold: float = 0.6, sample_fraction: float = 0.5):
+        """
+        Args:
+            base_estimator: Feature selection method (default: LassoCV)
+            n_bootstrap: Number of bootstrap iterations
+            threshold: Minimum selection frequency to keep feature
+            sample_fraction: Fraction of data to sample in each iteration
+        """
+        if base_estimator is None:
+            base_estimator = LassoCV(cv=5, random_state=42)
+
+        self.base_estimator = base_estimator
+        self.n_bootstrap = n_bootstrap
+        self.threshold = threshold
+        self.sample_fraction = sample_fraction
+        self.feature_scores: Dict[str, float] = {}
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> List[str]:
+        """
+        Perform stability selection via bootstrap sampling.
+
+        Returns:
+            Features selected in at least threshold fraction of iterations
+        """
+        feature_selection_count = {col: 0 for col in X.columns}
+        n_samples = int(len(X) * self.sample_fraction)
+
+        for iteration in range(self.n_bootstrap):
+            # Bootstrap sample
+            indices = np.random.choice(len(X), size=n_samples, replace=False)
+            X_boot = X.iloc[indices]
+            y_boot = y.iloc[indices]
+
+            # Fit feature selector
+            self.base_estimator.fit(X_boot, y_boot)
+
+            # Get selected features (non-zero coefficients)
+            if hasattr(self.base_estimator, 'coef_'):
+                selected_mask = np.abs(self.base_estimator.coef_) > 1e-10
+                selected_features = X.columns[selected_mask].tolist()
+            elif hasattr(self.base_estimator, 'feature_importances_'):
+                # For tree-based methods
+                threshold_val = np.median(self.base_estimator.feature_importances_)
+                selected_mask = self.base_estimator.feature_importances_ > threshold_val
+                selected_features = X.columns[selected_mask].tolist()
+            else:
+                continue
+
+            # Increment counts
+            for feature in selected_features:
+                feature_selection_count[feature] += 1
+
+        # Calculate stability scores
+        self.feature_scores = {
+            col: count / self.n_bootstrap
+            for col, count in feature_selection_count.items()
+        }
+
+        # Select stable features
+        stable_features = [
+            col for col, score in self.feature_scores.items()
+            if score >= self.threshold
+        ]
+
+        logger.info(f"Stability selection: {len(stable_features)} features "
+                   f"selected in >={self.threshold*100}% of iterations")
+
+        return stable_features
+
+    def get_stability_scores(self) -> pd.Series:
+        """Get stability score for each feature."""
+        return pd.Series(self.feature_scores).sort_values(ascending=False)
+\end{lstlisting}
+
+\subsection{Deep Feature Synthesis with Automated Primitive Composition}
+
+Deep feature synthesis automatically generates features by composing transformation primitives, discovering complex feature interactions.
+
+\begin{lstlisting}[language=Python, caption={Deep Feature Synthesis Implementation}]
+from typing import Callable, List, Dict
+from itertools import combinations
+import featuretools as ft
+
+class DeepFeatureSynthesis:
+    """
+    Automated deep feature synthesis using primitive composition.
+    Generates features by stacking transformation primitives.
+    """
+
+    def __init__(self, max_depth: int = 2,
+                 primitives: List[str] = None):
+        """
+        Args:
+            max_depth: Maximum depth of feature stacking
+            primitives: List of primitives to use (default: common set)
+        """
+        self.max_depth = max_depth
+
+        if primitives is None:
+            # Default primitive set
+            self.primitives = [
+                "add", "subtract", "multiply", "divide",
+                "log", "sqrt", "square", "abs",
+                "mean", "sum", "std", "min", "max",
+                "count", "mode"
+            ]
+        else:
+            self.primitives = primitives
+
+        self.synthesized_features: List[FeatureMetadata] = []
+
+    def synthesize_features(self, df: pd.DataFrame,
+                           entity_columns: Dict[str, str],
+                           target_entity: str,
+                           agg_primitives: List[str] = None,
+                           trans_primitives: List[str] = None) -> pd.DataFrame:
+        """
+        Synthesize features using featuretools deep feature synthesis.
+
+        Args:
+            df: Input dataframe
+            entity_columns: Dict mapping entity names to their ID columns
+            target_entity: Entity to generate features for
+            agg_primitives: Aggregation primitives (sum, mean, count, etc.)
+            trans_primitives: Transform primitives (log, sqrt, etc.)
+
+        Returns:
+            DataFrame with original and synthesized features
+        """
+        if agg_primitives is None:
+            agg_primitives = ["sum", "mean", "std", "count", "max", "min"]
+
+        if trans_primitives is None:
+            trans_primitives = ["divide", "multiply", "add", "subtract"]
+
+        # Create entity set
+        es = ft.EntitySet(id="data")
+
+        # Add entities
+        for entity_name, id_column in entity_columns.items():
+            es = es.add_dataframe(
+                dataframe_name=entity_name,
+                dataframe=df,
+                index=id_column
+            )
+
+        # Run deep feature synthesis
+        feature_matrix, feature_defs = ft.dfs(
+            entityset=es,
+            target_dataframe_name=target_entity,
+            agg_primitives=agg_primitives,
+            trans_primitives=trans_primitives,
+            max_depth=self.max_depth,
+            verbose=True
+        )
+
+        # Create metadata for synthesized features
+        for feature_def in feature_defs:
+            metadata = FeatureMetadata(
+                name=str(feature_def.get_name()),
+                feature_type=FeatureType.NUMERICAL,
+                source_columns=feature_def.get_feature_names(),
+                transformation=str(feature_def),
+                scope=TransformationScope.AGGREGATE,
+                created_at=datetime.now(),
+                version="1.0.0",
+                description=f"Deep feature synthesis: {str(feature_def)}"
+            )
+            self.synthesized_features.append(metadata)
+
+        logger.info(f"Synthesized {len(feature_defs)} features using DFS "
+                   f"(max_depth={self.max_depth})")
+
+        return feature_matrix
+
+    def get_feature_lineage(self) -> pd.DataFrame:
+        """Get lineage information for synthesized features."""
+        lineage = []
+        for feature in self.synthesized_features:
+            lineage.append({
+                'feature_name': feature.name,
+                'source_columns': ', '.join(feature.source_columns),
+                'transformation': feature.transformation,
+                'depth': feature.transformation.count('(')
+            })
+
+        return pd.DataFrame(lineage)
+\end{lstlisting}
+
+\subsection{Feature Learning from Neural Networks}
+
+Extract learned representations from neural networks as features, combining deep learning's representation power with traditional ML's interpretability.
+
+\begin{lstlisting}[language=Python, caption={Neural Feature Learning with Interpretability}]
+from sklearn.decomposition import PCA
+from tensorflow import keras
+from tensorflow.keras import layers
+import shap
+
+class NeuralFeatureLearner:
+    """
+    Learn features using neural networks and extract interpretable representations.
+    """
+
+    def __init__(self, encoding_dim: int = 32,
+                 hidden_layers: List[int] = None):
+        """
+        Args:
+            encoding_dim: Dimension of learned feature representation
+            hidden_layers: Sizes of hidden layers (default: [128, 64])
+        """
+        self.encoding_dim = encoding_dim
+        self.hidden_layers = hidden_layers or [128, 64]
+        self.autoencoder = None
+        self.encoder = None
+        self.feature_importance: Optional[np.ndarray] = None
+
+    def build_autoencoder(self, input_dim: int) -> None:
+        """Build autoencoder architecture for feature learning."""
+        # Encoder
+        input_layer = keras.Input(shape=(input_dim,))
+        encoded = input_layer
+
+        for hidden_size in self.hidden_layers:
+            encoded = layers.Dense(hidden_size, activation='relu')(encoded)
+            encoded = layers.Dropout(0.2)(encoded)
+
+        # Bottleneck (learned features)
+        encoded = layers.Dense(self.encoding_dim, activation='relu',
+                              name='bottleneck')(encoded)
+
+        # Decoder
+        decoded = encoded
+        for hidden_size in reversed(self.hidden_layers):
+            decoded = layers.Dense(hidden_size, activation='relu')(decoded)
+
+        decoded = layers.Dense(input_dim, activation='linear')(decoded)
+
+        # Models
+        self.autoencoder = keras.Model(input_layer, decoded)
+        self.encoder = keras.Model(input_layer, encoded)
+
+        self.autoencoder.compile(optimizer='adam', loss='mse')
+
+    def fit(self, X: pd.DataFrame, epochs: int = 50,
+           batch_size: int = 256) -> None:
+        """
+        Train autoencoder to learn feature representations.
+        """
+        if self.autoencoder is None:
+            self.build_autoencoder(X.shape[1])
+
+        # Train autoencoder
+        self.autoencoder.fit(
+            X.values, X.values,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=0.2,
+            verbose=1
+        )
+
+        logger.info(f"Trained autoencoder with {self.encoding_dim}-dim encoding")
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Transform data to learned feature representation.
+
+        Returns:
+            DataFrame with learned features (encoding_dim columns)
+        """
+        if self.encoder is None:
+            raise ValueError("Must fit() before transform()")
+
+        # Get encoded representation
+        encoded = self.encoder.predict(X.values)
+
+        # Create DataFrame with learned features
+        feature_cols = [f"neural_feature_{i}" for i in range(self.encoding_dim)]
+        result = pd.DataFrame(encoded, columns=feature_cols, index=X.index)
+
+        return result
+
+    def explain_features(self, X: pd.DataFrame,
+                        original_feature_names: List[str]) -> pd.DataFrame:
+        """
+        Use SHAP to explain which original features contribute to learned features.
+
+        Returns:
+            DataFrame with feature importance for each learned feature
+        """
+        if self.encoder is None:
+            raise ValueError("Must fit() before explaining")
+
+        # Use SHAP to explain encoder
+        explainer = shap.DeepExplainer(self.encoder, X.values[:100])
+        shap_values = explainer.shap_values(X.values[:100])
+
+        # Calculate average absolute SHAP value for each original feature
+        # across all learned features
+        importance = np.abs(shap_values).mean(axis=0)
+
+        importance_df = pd.DataFrame({
+            'original_feature': original_feature_names,
+            'importance': importance.mean(axis=1)  # Average across learned features
+        }).sort_values('importance', ascending=False)
+
+        return importance_df
+\end{lstlisting}
+
+\subsection{Multi-Modal Feature Fusion}
+
+Combine features from different data modalities (tabular, text, images) using attention mechanisms for unified representations.
+
+\begin{lstlisting}[language=Python, caption={Multi-Modal Feature Fusion with Attention}]
+class MultiModalFeatureFusion:
+    """
+    Fuse features from multiple modalities (tabular, text, images)
+    using attention mechanisms.
+    """
+
+    def __init__(self, fusion_dim: int = 64):
+        """
+        Args:
+            fusion_dim: Dimension of fused feature representation
+        """
+        self.fusion_dim = fusion_dim
+        self.modality_encoders: Dict[str, keras.Model] = {}
+        self.fusion_model: Optional[keras.Model] = None
+
+    def add_tabular_encoder(self, input_dim: int) -> None:
+        """Add encoder for tabular features."""
+        inputs = keras.Input(shape=(input_dim,))
+        x = layers.Dense(128, activation='relu')(inputs)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Dense(self.fusion_dim, activation='relu')(x)
+
+        self.modality_encoders['tabular'] = keras.Model(inputs, x)
+
+    def add_text_encoder(self, vocab_size: int, max_length: int) -> None:
+        """Add encoder for text features (embeddings + LSTM)."""
+        inputs = keras.Input(shape=(max_length,))
+        x = layers.Embedding(vocab_size, 128)(inputs)
+        x = layers.LSTM(64, return_sequences=False)(x)
+        x = layers.Dense(self.fusion_dim, activation='relu')(x)
+
+        self.modality_encoders['text'] = keras.Model(inputs, x)
+
+    def build_fusion_model(self, modalities: List[str]) -> None:
+        """
+        Build attention-based fusion model for specified modalities.
+
+        Args:
+            modalities: List of modality names to fuse (e.g., ['tabular', 'text'])
+        """
+        # Collect modality embeddings
+        modality_inputs = {}
+        modality_embeddings = []
+
+        for modality in modalities:
+            if modality not in self.modality_encoders:
+                raise ValueError(f"Encoder for modality '{modality}' not found")
+
+            encoder = self.modality_encoders[modality]
+            modality_inputs[modality] = encoder.input
+            embedding = encoder.output
+            modality_embeddings.append(embedding)
+
+        # Stack embeddings
+        stacked = layers.concatenate(modality_embeddings)
+        stacked = layers.Reshape((len(modalities), self.fusion_dim))(stacked)
+
+        # Multi-head attention for fusion
+        attention_output = layers.MultiHeadAttention(
+            num_heads=4,
+            key_dim=self.fusion_dim
+        )(stacked, stacked)
+
+        # Global average pooling across modalities
+        fused = layers.GlobalAveragePooling1D()(attention_output)
+
+        # Final fusion layer
+        fused = layers.Dense(self.fusion_dim, activation='relu')(fused)
+
+        self.fusion_model = keras.Model(
+            inputs=list(modality_inputs.values()),
+            outputs=fused
+        )
+
+        logger.info(f"Built multi-modal fusion model for {modalities}")
+
+    def transform(self, data: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Transform multi-modal data to fused features.
+
+        Args:
+            data: Dictionary mapping modality names to data arrays
+
+        Returns:
+            Fused feature matrix
+        """
+        if self.fusion_model is None:
+            raise ValueError("Must build_fusion_model() first")
+
+        # Prepare inputs in correct order
+        inputs = [data[modality] for modality in self.modality_encoders.keys()]
+
+        # Get fused representation
+        fused_features = self.fusion_model.predict(inputs)
+
+        return fused_features
+\end{lstlisting}
+
+\subsection{Online Feature Learning with Concept Drift Adaptation}
+
+Adapt features dynamically in production as data distributions shift, maintaining model performance under concept drift.
+
+\begin{lstlisting}[language=Python, caption={Adaptive Online Feature Learning}]
+from river import drift, preprocessing, compose
+
+class OnlineFeatureLearner:
+    """
+    Learn and adapt features online as new data arrives.
+    Detects concept drift and re-learns features when needed.
+    """
+
+    def __init__(self, drift_detector: str = "adwin",
+                 adaptation_threshold: float = 0.1):
+        """
+        Args:
+            drift_detector: Drift detection method ("adwin", "ddm", "kswin")
+            adaptation_threshold: Drift score threshold for re-learning
+        """
+        self.drift_detector_name = drift_detector
+        self.adaptation_threshold = adaptation_threshold
+
+        # Initialize drift detector
+        if drift_detector == "adwin":
+            self.drift_detector = drift.ADWIN()
+        elif drift_detector == "ddm":
+            self.drift_detector = drift.DDM()
+        elif drift_detector == "kswin":
+            self.drift_detector = drift.KSWIN()
+        else:
+            raise ValueError(f"Unknown drift detector: {drift_detector}")
+
+        self.feature_transforms: Dict[str, Callable] = {}
+        self.drift_detected_count = 0
+        self.online_scaler = preprocessing.StandardScaler()
+
+    def update(self, x: Dict, y: float, error: float) -> bool:
+        """
+        Update feature learner with new observation and prediction error.
+
+        Args:
+            x: Feature dictionary
+            y: True target value
+            error: Prediction error
+
+        Returns:
+            True if drift detected and adaptation triggered
+        """
+        # Update drift detector with error
+        self.drift_detector.update(error)
+
+        # Check for drift
+        if self.drift_detector.drift_detected:
+            self.drift_detected_count += 1
+            logger.warning(f"Concept drift detected! (count: {self.drift_detected_count})")
+
+            # Trigger feature adaptation
+            self._adapt_features(x, y)
+            return True
+
+        # Update online feature transforms
+        self._update_transforms(x)
+
+        return False
+
+    def _update_transforms(self, x: Dict) -> None:
+        """Update online feature transformations (scaling, encoding, etc.)."""
+        # Update online scaler
+        self.online_scaler.learn_one(x)
+
+    def _adapt_features(self, x: Dict, y: float) -> None:
+        """
+        Adapt feature transformations in response to drift.
+        Re-learn feature parameters from recent data window.
+        """
+        logger.info("Adapting features in response to concept drift...")
+
+        # Reset online scaler to adapt to new distribution
+        self.online_scaler = preprocessing.StandardScaler()
+
+        # Could also trigger:
+        # - Re-training categorical encoders with new categories
+        # - Updating binning thresholds for numerical features
+        # - Re-computing interaction features with updated importance
+
+    def transform(self, x: Dict) -> Dict:
+        """
+        Transform features using current (adapted) transformations.
+
+        Args:
+            x: Raw feature dictionary
+
+        Returns:
+            Transformed feature dictionary
+        """
+        # Apply online scaling
+        x_scaled = self.online_scaler.transform_one(x)
+
+        # Apply custom learned transformations
+        for feature_name, transform_func in self.feature_transforms.items():
+            if feature_name in x_scaled:
+                x_scaled[f"{feature_name}_transformed"] = transform_func(
+                    x_scaled[feature_name]
+                )
+
+        return x_scaled
+
+    def get_drift_statistics(self) -> Dict[str, Any]:
+        """Get statistics about detected drift events."""
+        return {
+            'total_drift_events': self.drift_detected_count,
+            'detector_type': self.drift_detector_name,
+            'current_drift_score': getattr(self.drift_detector, 'estimation', None)
+        }
+\end{lstlisting}
+
+\section{Feature Platform Architecture Patterns}
+
+Building enterprise-grade feature platforms requires careful architectural design to support scalability, reliability, and governance. This section presents comprehensive architecture patterns for production feature systems.
+
+\subsection{Layered Feature Platform Architecture}
+
+\begin{lstlisting}[language=Python, caption={Complete Feature Platform Architecture}]
+from enum import Enum
+from abc import ABC, abstractmethod
+
+class ComputeLayer(Enum):
+    """Feature computation layers with different SLAs."""
+    BATCH = "batch"  # Hourly/daily batch jobs
+    STREAMING = "streaming"  # Near real-time (seconds)
+    REALTIME = "realtime"  # Online computation (<100ms)
+
+
+class FeaturePlatform:
+    """
+    Enterprise feature platform supporting the full ML lifecycle.
+
+    Architecture layers:
+    1. Ingestion Layer: Raw data from sources
+    2. Transformation Layer: Feature computation (batch/streaming/realtime)
+    3. Storage Layer: Offline (training) and Online (serving) stores
+    4. Serving Layer: Low-latency feature retrieval
+    5. Monitoring Layer: Drift detection, quality metrics
+    6. Governance Layer: Lineage, access control, compliance
+    """
+
+    def __init__(self,
+                 offline_store: "OfflineStore",
+                 online_store: "OnlineStore",
+                 transformation_engine: "TransformationEngine",
+                 monitoring_service: "MonitoringService",
+                 governance_service: "GovernanceService"):
+        self.offline_store = offline_store
+        self.online_store = online_store
+        self.transformation_engine = transformation_engine
+        self.monitoring = monitoring_service
+        self.governance = governance_service
+
+        self.feature_registry: Dict[str, FeatureDefinition] = {}
+
+    def register_feature(self, feature_def: "FeatureDefinition",
+                        owner: str, team: str) -> None:
+        """
+        Register a new feature with governance metadata.
+
+        Args:
+            feature_def: Feature definition (computation logic)
+            owner: Individual owner
+            team: Team responsible for feature
+        """
+        # Validate feature definition
+        self._validate_feature_definition(feature_def)
+
+        # Check for naming conflicts
+        if feature_def.name in self.feature_registry:
+            raise ValueError(f"Feature '{feature_def.name}' already exists")
+
+        # Register with governance
+        self.governance.register_feature(
+            feature_def=feature_def,
+            owner=owner,
+            team=team,
+            registration_time=datetime.now()
+        )
+
+        # Add to registry
+        self.feature_registry[feature_def.name] = feature_def
+
+        logger.info(f"Registered feature '{feature_def.name}' (owner: {owner})")
+
+    def materialize_features(self,
+                            feature_group: str,
+                            start_time: datetime,
+                            end_time: datetime,
+                            compute_layer: ComputeLayer = ComputeLayer.BATCH) -> None:
+        """
+        Compute and materialize features for a time range.
+
+        Args:
+            feature_group: Group of features to materialize
+            start_time: Start of time window
+            end_time: End of time window
+            compute_layer: Where to compute (batch/streaming/realtime)
+        """
+        logger.info(f"Materializing '{feature_group}' from {start_time} to {end_time}")
+
+        # Get features in group
+        features = self._get_features_in_group(feature_group)
+
+        # Execute transformation
+        features_df = self.transformation_engine.compute_features(
+            features=features,
+            start_time=start_time,
+            end_time=end_time,
+            compute_layer=compute_layer
+        )
+
+        # Write to offline store (for training)
+        self.offline_store.write_features(
+            feature_group=feature_group,
+            features_df=features_df,
+            event_timestamp_column="timestamp"
+        )
+
+        # Write to online store (for serving)
+        if compute_layer in [ComputeLayer.STREAMING, ComputeLayer.REALTIME]:
+            self.online_store.write_features(
+                feature_group=feature_group,
+                features_df=features_df
+            )
+
+        # Update monitoring metrics
+        self.monitoring.track_materialization(
+            feature_group=feature_group,
+            row_count=len(features_df),
+            compute_time=(datetime.now() - start_time).total_seconds()
+        )
+
+    def get_training_features(self,
+                             entity_df: pd.DataFrame,
+                             features: List[str],
+                             timestamp_column: str = "event_timestamp") -> pd.DataFrame:
+        """
+        Get point-in-time correct features for model training.
+
+        Critical for preventing data leakage: only returns features
+        that were available at the specified event timestamp.
+
+        Args:
+            entity_df: DataFrame with entities and timestamps
+            features: List of feature names to retrieve
+            timestamp_column: Column containing event timestamps
+
+        Returns:
+            DataFrame with entity IDs, timestamps, and features
+        """
+        # Validate features exist
+        for feature in features:
+            if feature not in self.feature_registry:
+                raise ValueError(f"Feature '{feature}' not found")
+
+        # Point-in-time join from offline store
+        result = self.offline_store.get_point_in_time_features(
+            entity_df=entity_df,
+            features=features,
+            timestamp_column=timestamp_column
+        )
+
+        # Track lineage
+        self.governance.track_feature_usage(
+            features=features,
+            usage_type="training",
+            timestamp=datetime.now()
+        )
+
+        return result
+
+    def get_online_features(self,
+                           entity_ids: List[str],
+                           features: List[str]) -> pd.DataFrame:
+        """
+        Get features for real-time inference (low latency).
+
+        Args:
+            entity_ids: List of entity IDs
+            features: Feature names to retrieve
+
+        Returns:
+            DataFrame with features for each entity
+        """
+        # Retrieve from online store
+        result = self.online_store.get_features(
+            entity_ids=entity_ids,
+            features=features
+        )
+
+        # Monitor serving latency
+        # Track usage for governance
+
+        return result
+
+    def monitor_feature_quality(self, feature_name: str,
+                               production_data: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Monitor feature quality in production.
+
+        Checks:
+        - Distribution drift vs. training data
+        - Missing value rate
+        - Outlier rate
+        - Correlation with target (if available)
+        """
+        if feature_name not in self.feature_registry:
+            raise ValueError(f"Feature '{feature_name}' not found")
+
+        # Get training reference distribution
+        feature_def = self.feature_registry[feature_name]
+        training_reference = self.offline_store.get_reference_distribution(
+            feature_name=feature_name
+        )
+
+        # Calculate quality metrics
+        quality_metrics = self.monitoring.compute_quality_metrics(
+            feature_name=feature_name,
+            production_data=production_data[feature_name],
+            reference_data=training_reference
+        )
+
+        # Check for alerts
+        alerts = self.monitoring.check_alert_thresholds(
+            feature_name=feature_name,
+            metrics=quality_metrics
+        )
+
+        if alerts:
+            logger.warning(f"Quality alerts for '{feature_name}': {alerts}")
+
+        return quality_metrics
+
+    def get_feature_lineage(self, feature_name: str) -> Dict[str, Any]:
+        """
+        Get complete lineage for a feature.
+
+        Returns:
+            - Source data tables and columns
+            - Transformation logic
+            - Downstream models using this feature
+            - Owners and teams
+            - Version history
+        """
+        return self.governance.get_feature_lineage(feature_name)
+
+    def _validate_feature_definition(self, feature_def: "FeatureDefinition") -> None:
+        """Validate feature definition before registration."""
+        # Check required fields
+        if not feature_def.name:
+            raise ValueError("Feature name required")
+
+        if not feature_def.transformation_logic:
+            raise ValueError("Transformation logic required")
+
+        # Validate computation feasibility
+        if feature_def.compute_layer == ComputeLayer.REALTIME:
+            estimated_latency = self._estimate_computation_latency(feature_def)
+            if estimated_latency > 100:  # ms
+                raise ValueError(
+                    f"Feature computation too slow for realtime "
+                    f"(estimated: {estimated_latency}ms)"
+                )
+
+    def _estimate_computation_latency(self, feature_def: "FeatureDefinition") -> float:
+        """Estimate feature computation latency."""
+        # Simplified estimation based on transformation complexity
+        # In production, would profile actual computation
+        base_latency = 10  # ms
+
+        if "aggregation" in feature_def.transformation_logic.lower():
+            base_latency += 50
+
+        if "join" in feature_def.transformation_logic.lower():
+            base_latency += 30
+
+        return base_latency
+
+    def _get_features_in_group(self, feature_group: str) -> List["FeatureDefinition"]:
+        """Get all features belonging to a feature group."""
+        return [
+            feature_def for feature_def in self.feature_registry.values()
+            if feature_def.feature_group == feature_group
+        ]
+\end{lstlisting}
+
+This enterprise feature platform architecture ensures:
+\begin{itemize}
+    \item \textbf{Scalability}: Separate compute layers for different latency requirements
+    \item \textbf{Consistency}: Point-in-time correctness prevents data leakage
+    \item \textbf{Observability}: Comprehensive monitoring and quality metrics
+    \item \textbf{Governance}: Lineage tracking, access control, and documentation
+    \item \textbf{Reliability}: Fallback mechanisms and graceful degradation
+\end{itemize}
+
 \section{Exercises}
 
 \subsection{Exercise 1: Basic Feature Engineering Pipeline (Easy)}
@@ -2003,6 +4920,153 @@ Build a complete feature engineering system for a real-world problem (e.g., cred
 \end{enumerate}
 
 Document the impact of each stage on model performance and create a feature engineering report suitable for stakeholders.
+
+\subsection{Exercise 8: Genetic Programming Feature Generation (Advanced)}
+
+Implement an automated feature generation system using genetic programming:
+
+\begin{enumerate}
+    \item Use the \texttt{GeneticFeatureGenerator} class to evolve 20 features on a regression dataset
+    \item Analyze the evolved mathematical expressions for interpretability
+    \item Compare performance against manually engineered features
+    \item Implement fitness function customization to penalize overly complex features
+    \item Create a feature selection step to identify which evolved features are actually useful
+\end{enumerate}
+
+Deliverables:
+\begin{itemize}
+    \item Report showing the top 5 evolved features and their mathematical expressions
+    \item Performance comparison: baseline vs. genetic features vs. manual features
+    \item Analysis of feature complexity vs. predictive power trade-offs
+    \item Recommendations for when genetic programming is worth the computational cost
+\end{itemize}
+
+\subsection{Exercise 9: Real-Time Feature Store Implementation (Advanced)}
+
+Build a complete feature store with both real-time and batch serving capabilities:
+
+\begin{enumerate}
+    \item Design schema for online and offline feature tables
+    \item Implement batch feature computation pipeline (using pandas/Spark)
+    \item Create real-time feature serving API with sub-100ms latency
+    \item Add point-in-time correctness for historical feature retrieval
+    \item Implement feature caching strategy for frequently accessed features
+    \item Set up consistency checks between online and offline stores
+\end{enumerate}
+
+Technical requirements:
+\begin{itemize}
+    \item Use Redis/DynamoDB for online store, Parquet/Delta for offline store
+    \item Implement feature materialization jobs with backfill support
+    \item Create monitoring dashboards for feature freshness and serving latency
+    \item Handle feature value staleness with configurable TTLs
+    \item Implement graceful degradation when features are unavailable
+\end{itemize}
+
+Test scenarios:
+\begin{itemize}
+    \item Verify point-in-time correctness: historical features match what was available at that time
+    \item Load test: serve 10,000 requests/second with p99 latency under 50ms
+    \item Consistency test: online and offline stores return same values (within configured freshness window)
+\end{itemize}
+
+\subsection{Exercise 10: Causal Feature Selection Framework (Advanced)}
+
+Implement causal feature selection with confounding adjustment:
+
+\begin{enumerate}
+    \item Create a synthetic dataset with known causal structure (use DAG)
+    \item Implement backdoor criterion to identify confounders
+    \item Apply propensity score matching for feature selection
+    \item Compare causal feature selection vs. correlation-based selection
+    \item Analyze impact on model generalization to different distributions
+\end{enumerate}
+
+Use the \texttt{dowhy} or \texttt{causalml} library for causal inference. Create scenarios where:
+\begin{itemize}
+    \item Correlation-based selection includes spurious features
+    \item Causal selection correctly identifies true causal features
+    \item Models trained on causal features generalize better to shifted distributions
+\end{itemize}
+
+Deliverables:
+\begin{itemize}
+    \item Causal DAG visualization showing true causal relationships
+    \item Comparison table: features selected by correlation vs. causality
+    \item Performance evaluation on both i.i.d. test set and shifted distribution
+    \item Report explaining when causal feature selection provides value
+\end{itemize}
+
+\subsection{Exercise 11: Feature Lineage and Governance System (Advanced)}
+
+Build a comprehensive feature governance framework:
+
+\begin{enumerate}
+    \item Implement automated feature lineage tracking from raw data to final features
+    \item Create feature documentation system with ownership and metadata
+    \item Build feature discovery portal (searchable catalog)
+    \item Implement access control for sensitive features (PII, protected attributes)
+    \item Set up automated feature quality monitoring with SLA tracking
+    \item Create deprecation workflow for retiring features
+\end{enumerate}
+
+Technical components:
+\begin{itemize}
+    \item Feature catalog database with full lineage graph
+    \item Automated documentation extraction from pipeline code
+    \item Data quality rules engine with configurable thresholds
+    \item Audit logging for feature access and usage
+    \item Integration with model registry to track feature-model relationships
+\end{itemize}
+
+Governance features:
+\begin{itemize}
+    \item Owner assignment and on-call rotation for feature issues
+    \item Feature certification workflow (experimental → validated → production)
+    \item Cost attribution per feature (storage + compute)
+    \item Impact analysis: which models depend on a feature
+    \item Compliance tracking for regulatory requirements
+\end{itemize}
+
+\subsection{Exercise 12: Online Feature Learning with Drift Adaptation (Advanced)}
+
+Implement an online learning system that adapts features to concept drift:
+
+\begin{enumerate}
+    \item Create streaming feature pipeline that updates statistics in real-time
+    \item Implement online feature selection with sliding window evaluation
+    \item Build drift detector that triggers feature re-engineering
+    \item Design adaptive binning/encoding that adjusts to distribution shifts
+    \item Set up A/B testing framework for feature changes
+\end{enumerate}
+
+Scenarios to implement:
+\begin{itemize}
+    \item \textbf{Gradual drift}: User behavior slowly changes over months
+    \item \textbf{Sudden drift}: Major event causes immediate distribution shift
+    \item \textbf{Recurring drift}: Seasonal patterns require time-aware features
+\end{itemize}
+
+Technical implementation:
+\begin{itemize}
+    \item Use streaming framework (Kafka + Flink/Spark Streaming)
+    \item Implement ADWIN or Page-Hinkley test for drift detection
+    \item Create feature adaptation strategies:
+    \begin{itemize}
+        \item Dynamic bucketing based on current distribution
+        \item Online updating of target encoding statistics
+        \item Adaptive scaling based on running statistics
+    \end{itemize}
+    \item Build rollback mechanism if new features degrade performance
+\end{itemize}
+
+Evaluation metrics:
+\begin{itemize}
+    \item Time to detect drift after it occurs
+    \item Model performance recovery time after adaptation
+    \item False positive rate for drift detection
+    \item A/B test results comparing static vs. adaptive features
+\end{itemize}
 
 \section{Summary}
 

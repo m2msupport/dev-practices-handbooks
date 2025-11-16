@@ -1,0 +1,140 @@
+\documentclass[12pt,a4paper]{book}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% Page setup
+\geometry{margin=1in}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[LO]{\nouppercase{\rightmark}}
+\fancyhead[RE]{\nouppercase{\leftmark}}
+
+% Code listing setup
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red}
+}
+
+% Theorem environments
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{example}{Example}[chapter]
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{proposition}{Proposition}[chapter]
+\newtheorem{lemma}{Lemma}[chapter]
+\newtheorem{corollary}{Corollary}[chapter]
+
+% Title page information
+\title{A/B Testing: Statistical Foundations and Practical Implementation}
+\author{Diogo Ribeiro\\
+        ESMAD - Instituto Politécnico do Porto\\
+        Mysense.ai}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\chapter{Preface}
+\input{chapters/preface}
+
+\mainmatter
+
+% Chapter 1: Introduction
+\chapter{Introduction to A/B Testing}
+\input{chapters/chapter01_introduction}
+
+% Chapter 2: Statistical Foundations
+\chapter{Statistical Foundations}
+\input{chapters/chapter02_statistical_foundations}
+
+% Chapter 3: Experimental Design
+\chapter{Experimental Design Principles}
+\input{chapters/chapter03_experimental_design}
+
+% Chapter 4: Sample Size and Power
+\chapter{Sample Size Calculation and Statistical Power}
+\input{chapters/chapter04_sample_size_power}
+
+% Chapter 5: Hypothesis Testing
+\chapter{Hypothesis Testing for A/B Tests}
+\input{chapters/chapter05_hypothesis_testing}
+
+% Chapter 6: Multiple Testing
+\chapter{Multiple Testing and False Discovery Rate}
+\input{chapters/chapter06_multiple_testing}
+
+% Chapter 7: Bayesian Methods
+\chapter{Bayesian Approaches to A/B Testing}
+\input{chapters/chapter07_bayesian_methods}
+
+% Chapter 8: Advanced Designs
+\chapter{Advanced Experimental Designs}
+\input{chapters/chapter08_advanced_designs}
+
+% Chapter 9: Implementation
+\chapter{Technical Implementation}
+\input{chapters/chapter09_implementation}
+
+% Chapter 10: Analysis and Interpretation
+\chapter{Data Analysis and Result Interpretation}
+\input{chapters/chapter10_analysis_interpretation}
+
+% Chapter 11: Case Studies
+\chapter{Case Studies and Real-World Applications}
+\input{chapters/chapter11_case_studies}
+
+% Chapter 12: Ethics and Best Practices
+\chapter{Ethics and Best Practices}
+\input{chapters/chapter12_ethics_best_practices}
+
+\backmatter
+
+% Appendices
+\appendix
+\chapter{Mathematical Proofs}
+\input{appendices/appendix_proofs}
+
+\chapter{Code Examples}
+\input{appendices/appendix_code}
+
+\chapter{Statistical Tables}
+\input{appendices/appendix_tables}
+
+% Bibliography
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

@@ -1704,6 +1704,1221 @@ class PerformanceMonitor:
         plt.close()
 \end{lstlisting}
 
+\section{Advanced Model Selection Frameworks}
+
+Modern model selection requires balancing multiple competing objectives: accuracy, fairness, interpretability, latency, and cost. This section presents advanced frameworks for systematic multi-objective optimization.
+
+\subsection{Multi-Objective Optimization with Pareto Analysis}
+
+Real-world model selection rarely optimizes a single metric. We must balance accuracy, inference speed, memory usage, interpretability, and fairness simultaneously.
+
+\begin{lstlisting}[language=Python, caption={Multi-Objective Model Optimization with Pareto Frontier}]
+from typing import List, Tuple, Callable, Dict
+from dataclasses import dataclass
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import euclidean
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+
+@dataclass
+class ObjectiveMetric:
+    """Single objective to optimize."""
+    name: str
+    value: float
+    weight: float = 1.0
+    minimize: bool = False  # True if lower is better
+
+    @property
+    def normalized_value(self) -> float:
+        """Value adjusted for minimization vs maximization."""
+        return -self.value if self.minimize else self.value
+
+@dataclass
+class MultiObjectiveScore:
+    """Scores across multiple objectives."""
+    model_name: str
+    objectives: Dict[str, ObjectiveMetric]
+
+    def get_objective_vector(self) -> np.ndarray:
+        """Get vector of normalized objective values."""
+        return np.array([obj.normalized_value for obj in self.objectives.values()])
+
+    def dominates(self, other: "MultiObjectiveScore") -> bool:
+        """
+        Check if this solution Pareto-dominates another.
+
+        A solution dominates another if it's better in at least one objective
+        and not worse in any objective.
+        """
+        self_vec = self.get_objective_vector()
+        other_vec = other.get_objective_vector()
+
+        better_in_some = np.any(self_vec > other_vec)
+        not_worse_in_any = np.all(self_vec >= other_vec)
+
+        return better_in_some and not_worse_in_any
+
+    def weighted_sum(self) -> float:
+        """Calculate weighted sum of objectives."""
+        return sum(obj.normalized_value * obj.weight
+                  for obj in self.objectives.values())
+
+class ParetoFrontierAnalyzer:
+    """
+    Analyze Pareto frontier for multi-objective model selection.
+
+    Identifies non-dominated solutions and provides trade-off analysis.
+    """
+
+    def __init__(self):
+        self.pareto_front: List[MultiObjectiveScore] = []
+        self.all_solutions: List[MultiObjectiveScore] = []
+
+    def add_solution(self, solution: MultiObjectiveScore):
+        """Add a solution and update Pareto frontier."""
+        self.all_solutions.append(solution)
+
+        # Check if solution is dominated by existing Pareto front
+        dominated = any(p.dominates(solution) for p in self.pareto_front)
+
+        if not dominated:
+            # Remove solutions dominated by new solution
+            self.pareto_front = [
+                p for p in self.pareto_front
+                if not solution.dominates(p)
+            ]
+            self.pareto_front.append(solution)
+
+    def find_pareto_frontier(self,
+                            solutions: List[MultiObjectiveScore]) -> List[MultiObjectiveScore]:
+        """Identify Pareto-optimal solutions."""
+        self.all_solutions = solutions
+        self.pareto_front = []
+
+        for solution in solutions:
+            self.add_solution(solution)
+
+        return self.pareto_front
+
+    def get_knee_point(self) -> Optional[MultiObjectiveScore]:
+        """
+        Find knee point on Pareto frontier.
+
+        Knee point provides best balance across objectives.
+        Uses maximum distance from ideal-nadir line.
+        """
+        if len(self.pareto_front) < 2:
+            return self.pareto_front[0] if self.pareto_front else None
+
+        # Get objective vectors for Pareto front
+        vectors = np.array([s.get_objective_vector() for s in self.pareto_front])
+
+        # Normalize to [0, 1]
+        scaler = StandardScaler()
+        vectors_norm = scaler.fit_transform(vectors)
+
+        # Find ideal and nadir points
+        ideal = vectors_norm.max(axis=0)
+        nadir = vectors_norm.min(axis=0)
+
+        # Calculate distance to ideal-nadir line for each point
+        max_distance = -1
+        knee_idx = 0
+
+        for i, vec in enumerate(vectors_norm):
+            # Distance from point to line connecting ideal and nadir
+            distance = np.linalg.norm(np.cross(nadir - ideal, ideal - vec)) / \
+                      np.linalg.norm(nadir - ideal)
+
+            if distance > max_distance:
+                max_distance = distance
+                knee_idx = i
+
+        return self.pareto_front[knee_idx]
+
+    def get_solution_by_preference(self,
+                                   preferences: Dict[str, float]) -> MultiObjectiveScore:
+        """
+        Select solution based on stakeholder preferences.
+
+        Args:
+            preferences: Weight for each objective (0-1, should sum to 1)
+
+        Returns:
+            Best solution according to weighted preferences
+        """
+        best_score = float('-inf')
+        best_solution = None
+
+        for solution in self.pareto_front:
+            score = sum(
+                solution.objectives[obj_name].normalized_value * weight
+                for obj_name, weight in preferences.items()
+                if obj_name in solution.objectives
+            )
+
+            if score > best_score:
+                best_score = score
+                best_solution = solution
+
+        return best_solution
+
+    def visualize_pareto_front_2d(self,
+                                  obj1_name: str,
+                                  obj2_name: str,
+                                  output_path: Optional[str] = None):
+        """Visualize 2D Pareto frontier."""
+        if not self.all_solutions:
+            logger.warning("No solutions to visualize")
+            return
+
+        # Extract objectives
+        all_obj1 = [s.objectives[obj1_name].value for s in self.all_solutions]
+        all_obj2 = [s.objectives[obj2_name].value for s in self.all_solutions]
+
+        pareto_obj1 = [s.objectives[obj1_name].value for s in self.pareto_front]
+        pareto_obj2 = [s.objectives[obj2_name].value for s in self.pareto_front]
+
+        # Create plot
+        plt.figure(figsize=(10, 6))
+        plt.scatter(all_obj1, all_obj2, c='lightgray', s=50,
+                   alpha=0.5, label='All Solutions')
+        plt.scatter(pareto_obj1, pareto_obj2, c='red', s=100,
+                   alpha=0.8, label='Pareto Front', edgecolors='black')
+
+        # Annotate Pareto solutions
+        for solution in self.pareto_front:
+            plt.annotate(solution.model_name,
+                        (solution.objectives[obj1_name].value,
+                         solution.objectives[obj2_name].value),
+                        xytext=(5, 5), textcoords='offset points', fontsize=8)
+
+        # Highlight knee point
+        knee = self.get_knee_point()
+        if knee:
+            plt.scatter([knee.objectives[obj1_name].value],
+                       [knee.objectives[obj2_name].value],
+                       c='gold', s=200, marker='*',
+                       edgecolors='black', linewidths=2,
+                       label='Knee Point', zorder=10)
+
+        plt.xlabel(obj1_name, fontsize=12)
+        plt.ylabel(obj2_name, fontsize=12)
+        plt.title('Pareto Frontier Analysis', fontsize=14, fontweight='bold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Saved Pareto frontier plot to {output_path}")
+
+        plt.close()
+
+    def generate_trade_off_report(self) -> pd.DataFrame:
+        """Generate trade-off analysis report."""
+        data = []
+
+        for solution in self.pareto_front:
+            row = {'Model': solution.model_name}
+            for obj_name, obj in solution.objectives.items():
+                row[obj_name] = obj.value
+            row['Weighted_Score'] = solution.weighted_sum()
+            data.append(row)
+
+        df = pd.DataFrame(data)
+        return df.sort_values('Weighted_Score', ascending=False)
+
+# Example usage for model selection
+class MultiObjectiveModelSelector:
+    """
+    Select models using multi-objective optimization.
+
+    Balances accuracy, latency, interpretability, fairness, etc.
+    """
+
+    def __init__(self):
+        self.analyzer = ParetoFrontierAnalyzer()
+
+    def evaluate_candidates(self,
+                           candidates: List[ModelCandidate]) -> List[MultiObjectiveScore]:
+        """Convert model candidates to multi-objective scores."""
+        solutions = []
+
+        for candidate in candidates:
+            objectives = {
+                'accuracy': ObjectiveMetric(
+                    name='accuracy',
+                    value=candidate.metrics.accuracy or 0.0,
+                    weight=1.0,
+                    minimize=False
+                ),
+                'latency': ObjectiveMetric(
+                    name='latency_ms',
+                    value=candidate.complexity.inference_time_ms,
+                    weight=0.8,
+                    minimize=True
+                ),
+                'memory': ObjectiveMetric(
+                    name='memory_mb',
+                    value=candidate.complexity.memory_mb,
+                    weight=0.5,
+                    minimize=True
+                ),
+                'interpretability': ObjectiveMetric(
+                    name='interpretability',
+                    value=self._score_interpretability(candidate),
+                    weight=0.7,
+                    minimize=False
+                )
+            }
+
+            solutions.append(MultiObjectiveScore(
+                model_name=candidate.name,
+                objectives=objectives
+            ))
+
+        return solutions
+
+    def _score_interpretability(self, candidate: ModelCandidate) -> float:
+        """Score model interpretability (0-1, higher is better)."""
+        complexity_map = {
+            ComplexityLevel.LOW: 1.0,
+            ComplexityLevel.MEDIUM: 0.5,
+            ComplexityLevel.HIGH: 0.2
+        }
+        return complexity_map.get(candidate.complexity.level, 0.5)
+
+    def select_best_model(self,
+                         candidates: List[ModelCandidate],
+                         preferences: Optional[Dict[str, float]] = None) -> ModelCandidate:
+        """
+        Select best model using multi-objective optimization.
+
+        Args:
+            candidates: List of model candidates
+            preferences: Optional stakeholder preferences for objectives
+
+        Returns:
+            Selected model candidate
+        """
+        solutions = self.evaluate_candidates(candidates)
+        pareto_front = self.analyzer.find_pareto_frontier(solutions)
+
+        logger.info(f"Found {len(pareto_front)} Pareto-optimal solutions "
+                   f"from {len(candidates)} candidates")
+
+        if preferences:
+            best_solution = self.analyzer.get_solution_by_preference(preferences)
+        else:
+            # Use knee point if no preferences specified
+            best_solution = self.analyzer.get_knee_point()
+
+        # Find corresponding candidate
+        for candidate in candidates:
+            if candidate.name == best_solution.model_name:
+                return candidate
+
+        raise ValueError(f"Could not find candidate for {best_solution.model_name}")
+\end{lstlisting}
+
+This multi-objective framework enables principled trade-off analysis. Rather than arbitrarily weighting metrics, we identify Pareto-optimal solutions and select based on stakeholder preferences or the knee point for balanced performance.
+
+\subsection{Advanced AutoML with Custom Search Spaces}
+
+Automated machine learning (AutoML) can explore vast model spaces efficiently, but production systems require custom constraints and domain knowledge integration.
+
+\begin{lstlisting}[language=Python, caption={Production-Grade AutoML with Custom Constraints}]
+from typing import Dict, Any, List, Callable, Optional
+import optuna
+from optuna.pruners import MedianPruner, SuccessiveHalvingPruner
+from optuna.samplers import TPESampler
+from sklearn.model_selection import cross_val_score
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+import xgboost as xgb
+import lightgbm as lgb
+
+class CustomAutoML:
+    """
+    Production-grade AutoML with custom search spaces and constraints.
+
+    Supports:
+    - Custom algorithm search spaces
+    - Business constraint integration
+    - Multi-objective optimization
+    - Early stopping for efficiency
+    """
+
+    def __init__(self,
+                 task_type: str = 'classification',
+                 time_budget_seconds: int = 3600,
+                 n_trials: int = 100,
+                 constraints: Optional[BusinessConstraints] = None):
+        """
+        Args:
+            task_type: 'classification' or 'regression'
+            time_budget_seconds: Maximum time for optimization
+            n_trials: Maximum number of trials
+            constraints: Business constraints for model selection
+        """
+        self.task_type = task_type
+        self.time_budget_seconds = time_budget_seconds
+        self.n_trials = n_trials
+        self.constraints = constraints or BusinessConstraints()
+        self.study: Optional[optuna.Study] = None
+        self.best_model: Optional[Any] = None
+
+    def define_search_space(self,
+                           trial: optuna.Trial,
+                           algorithm_family: Optional[List[str]] = None) -> Any:
+        """
+        Define custom search space for hyperparameters.
+
+        Args:
+            trial: Optuna trial object
+            algorithm_family: Restrict to specific algorithms (e.g., ['tree', 'linear'])
+
+        Returns:
+            Configured model instance
+        """
+        if algorithm_family is None:
+            algorithm_family = ['tree', 'linear', 'ensemble', 'neural']
+
+        # Select algorithm
+        algorithm = trial.suggest_categorical('algorithm', algorithm_family)
+
+        if algorithm == 'tree':
+            return self._configure_random_forest(trial)
+        elif algorithm == 'linear':
+            return self._configure_logistic_regression(trial)
+        elif algorithm == 'ensemble':
+            ensemble_type = trial.suggest_categorical('ensemble_type',
+                                                     ['xgboost', 'lightgbm', 'gbm'])
+            if ensemble_type == 'xgboost':
+                return self._configure_xgboost(trial)
+            elif ensemble_type == 'lightgbm':
+                return self._configure_lightgbm(trial)
+            else:
+                return self._configure_gradient_boosting(trial)
+        elif algorithm == 'neural':
+            return self._configure_mlp(trial)
+        else:
+            raise ValueError(f"Unknown algorithm: {algorithm}")
+
+    def _configure_random_forest(self, trial: optuna.Trial) -> RandomForestClassifier:
+        """Configure Random Forest search space."""
+        return RandomForestClassifier(
+            n_estimators=trial.suggest_int('rf_n_estimators', 50, 500),
+            max_depth=trial.suggest_int('rf_max_depth', 3, 20),
+            min_samples_split=trial.suggest_int('rf_min_samples_split', 2, 20),
+            min_samples_leaf=trial.suggest_int('rf_min_samples_leaf', 1, 10),
+            max_features=trial.suggest_categorical('rf_max_features',
+                                                   ['sqrt', 'log2', None]),
+            random_state=42,
+            n_jobs=-1
+        )
+
+    def _configure_logistic_regression(self, trial: optuna.Trial) -> LogisticRegression:
+        """Configure Logistic Regression search space."""
+        return LogisticRegression(
+            C=trial.suggest_loguniform('lr_C', 1e-4, 1e2),
+            penalty=trial.suggest_categorical('lr_penalty', ['l1', 'l2', 'elasticnet']),
+            solver='saga',
+            max_iter=1000,
+            random_state=42,
+            n_jobs=-1
+        )
+
+    def _configure_xgboost(self, trial: optuna.Trial) -> xgb.XGBClassifier:
+        """Configure XGBoost search space."""
+        return xgb.XGBClassifier(
+            n_estimators=trial.suggest_int('xgb_n_estimators', 50, 500),
+            max_depth=trial.suggest_int('xgb_max_depth', 3, 12),
+            learning_rate=trial.suggest_loguniform('xgb_learning_rate', 1e-3, 1.0),
+            subsample=trial.suggest_uniform('xgb_subsample', 0.6, 1.0),
+            colsample_bytree=trial.suggest_uniform('xgb_colsample_bytree', 0.6, 1.0),
+            gamma=trial.suggest_loguniform('xgb_gamma', 1e-8, 1.0),
+            reg_alpha=trial.suggest_loguniform('xgb_reg_alpha', 1e-8, 10.0),
+            reg_lambda=trial.suggest_loguniform('xgb_reg_lambda', 1e-8, 10.0),
+            random_state=42,
+            n_jobs=-1
+        )
+
+    def _configure_lightgbm(self, trial: optuna.Trial) -> lgb.LGBMClassifier:
+        """Configure LightGBM search space."""
+        return lgb.LGBMClassifier(
+            n_estimators=trial.suggest_int('lgb_n_estimators', 50, 500),
+            max_depth=trial.suggest_int('lgb_max_depth', 3, 12),
+            learning_rate=trial.suggest_loguniform('lgb_learning_rate', 1e-3, 1.0),
+            num_leaves=trial.suggest_int('lgb_num_leaves', 20, 300),
+            subsample=trial.suggest_uniform('lgb_subsample', 0.6, 1.0),
+            colsample_bytree=trial.suggest_uniform('lgb_colsample_bytree', 0.6, 1.0),
+            reg_alpha=trial.suggest_loguniform('lgb_reg_alpha', 1e-8, 10.0),
+            reg_lambda=trial.suggest_loguniform('lgb_reg_lambda', 1e-8, 10.0),
+            random_state=42,
+            n_jobs=-1
+        )
+
+    def _configure_gradient_boosting(self, trial: optuna.Trial) -> GradientBoostingClassifier:
+        """Configure Gradient Boosting search space."""
+        return GradientBoostingClassifier(
+            n_estimators=trial.suggest_int('gbm_n_estimators', 50, 500),
+            max_depth=trial.suggest_int('gbm_max_depth', 3, 10),
+            learning_rate=trial.suggest_loguniform('gbm_learning_rate', 1e-3, 1.0),
+            subsample=trial.suggest_uniform('gbm_subsample', 0.6, 1.0),
+            random_state=42
+        )
+
+    def _configure_mlp(self, trial: optuna.Trial) -> MLPClassifier:
+        """Configure MLP search space."""
+        n_layers = trial.suggest_int('mlp_n_layers', 1, 3)
+        hidden_layer_sizes = tuple(
+            trial.suggest_int(f'mlp_n_units_l{i}', 32, 256)
+            for i in range(n_layers)
+        )
+
+        return MLPClassifier(
+            hidden_layer_sizes=hidden_layer_sizes,
+            activation=trial.suggest_categorical('mlp_activation',
+                                                 ['relu', 'tanh']),
+            alpha=trial.suggest_loguniform('mlp_alpha', 1e-5, 1e-1),
+            learning_rate_init=trial.suggest_loguniform('mlp_learning_rate', 1e-4, 1e-2),
+            max_iter=500,
+            random_state=42
+        )
+
+    def objective(self, trial: optuna.Trial,
+                 X: np.ndarray, y: np.ndarray) -> float:
+        """
+        Objective function for optimization.
+
+        Evaluates model with cross-validation and checks constraints.
+        """
+        # Get model from search space
+        model = self.define_search_space(trial)
+
+        # Evaluate with cross-validation
+        scores = cross_val_score(model, X, y, cv=5,
+                                scoring='accuracy', n_jobs=-1)
+        mean_score = scores.mean()
+
+        # Check constraints (simplified - in production, train and measure actual metrics)
+        # Here we use heuristics based on model type
+        if self.constraints.require_interpretability:
+            algorithm = trial.params.get('algorithm', '')
+            if algorithm == 'neural':
+                # Penalize complex models when interpretability required
+                mean_score *= 0.8
+
+        # Report intermediate values for pruning
+        trial.report(mean_score, step=0)
+
+        # Check if trial should be pruned
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+        return mean_score
+
+    def optimize(self,
+                X: np.ndarray,
+                y: np.ndarray,
+                direction: str = 'maximize') -> ModelCandidate:
+        """
+        Run AutoML optimization.
+
+        Args:
+            X: Feature matrix
+            y: Target variable
+            direction: 'maximize' or 'minimize'
+
+        Returns:
+            Best model candidate
+        """
+        # Create study with pruning for efficiency
+        sampler = TPESampler(seed=42)
+        pruner = MedianPruner(n_warmup_steps=5)
+
+        self.study = optuna.create_study(
+            direction=direction,
+            sampler=sampler,
+            pruner=pruner
+        )
+
+        # Optimize with timeout
+        self.study.optimize(
+            lambda trial: self.objective(trial, X, y),
+            n_trials=self.n_trials,
+            timeout=self.time_budget_seconds,
+            show_progress_bar=True
+        )
+
+        # Train best model on full data
+        best_params = self.study.best_params
+        algorithm = best_params['algorithm']
+
+        # Reconstruct best model
+        best_trial = self.study.best_trial
+        self.best_model = self.define_search_space(best_trial)
+        self.best_model.fit(X, y)
+
+        # Create ModelCandidate
+        candidate = ModelCandidate(
+            name=f"AutoML_{algorithm}",
+            model=self.best_model,
+            algorithm_name=algorithm,
+            hyperparameters=best_params,
+            model_type=ModelType.BINARY_CLASSIFICATION
+        )
+
+        logger.info(f"AutoML found best model: {algorithm} with "
+                   f"score={self.study.best_value:.4f}")
+
+        return candidate
+
+    def get_optimization_history(self) -> pd.DataFrame:
+        """Get history of all trials."""
+        if not self.study:
+            raise ValueError("Must run optimize() first")
+
+        df = self.study.trials_dataframe()
+        return df.sort_values('value', ascending=False)
+\end{lstlisting}
+
+This AutoML framework provides production-grade capabilities while allowing customization of search spaces and integration of business constraints.
+
+\subsection{Ensemble Methods with Diversity Optimization}
+
+Ensemble methods combine multiple models to improve predictive performance, but naive ensembling can waste computational resources on redundant models. Diversity optimization ensures ensemble members contribute unique perspectives.
+
+\begin{lstlisting}[language=Python, caption={Ensemble Diversity Optimization and Stacking}]
+from sklearn.ensemble import VotingClassifier, StackingClassifier
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.stats import pearsonr
+import itertools
+
+class EnsembleDiversityOptimizer:
+    """
+    Optimize ensemble composition by maximizing diversity while
+    maintaining performance.
+
+    Diversity metrics:
+    - Prediction disagreement
+    - Error correlation
+    - Decision boundary difference
+    """
+
+    def __init__(self,
+                 max_ensemble_size: int = 5,
+                 diversity_weight: float = 0.3):
+        """
+        Args:
+            max_ensemble_size: Maximum number of models in ensemble
+            diversity_weight: Weight for diversity vs performance (0-1)
+        """
+        self.max_ensemble_size = max_ensemble_size
+        self.diversity_weight = diversity_weight
+
+    def compute_diversity_matrix(self,
+                                 predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Compute pairwise diversity between model predictions.
+
+        Args:
+            predictions: Dict mapping model names to prediction arrays
+
+        Returns:
+            Diversity matrix (higher = more diverse)
+        """
+        model_names = list(predictions.keys())
+        n_models = len(model_names)
+        diversity_matrix = np.zeros((n_models, n_models))
+
+        for i, j in itertools.combinations(range(n_models), 2):
+            pred_i = predictions[model_names[i]]
+            pred_j = predictions[model_names[j]]
+
+            # Disagreement rate (classification)
+            if pred_i.dtype == int or len(np.unique(pred_i)) < 10:
+                diversity = np.mean(pred_i != pred_j)
+            else:
+                # Correlation (regression)
+                diversity = 1 - abs(pearsonr(pred_i, pred_j)[0])
+
+            diversity_matrix[i, j] = diversity
+            diversity_matrix[j, i] = diversity
+
+        return diversity_matrix
+
+    def select_diverse_ensemble(self,
+                                candidates: List[ModelCandidate],
+                                X_val: np.ndarray,
+                                y_val: np.ndarray) -> List[ModelCandidate]:
+        """
+        Select ensemble members maximizing diversity and performance.
+
+        Args:
+            candidates: List of model candidates
+            X_val: Validation features
+            y_val: Validation targets
+
+        Returns:
+            Selected ensemble members
+        """
+        # Get predictions from all candidates
+        predictions = {
+            c.name: c.predict(X_val) for c in candidates
+        }
+
+        # Compute diversity
+        diversity_matrix = self.compute_diversity_matrix(predictions)
+
+        # Greedy selection
+        selected_indices = []
+        remaining_indices = list(range(len(candidates)))
+
+        # Start with best performing model
+        performances = [
+            self._compute_performance(candidates[i], X_val, y_val)
+            for i in range(len(candidates))
+        ]
+        best_idx = np.argmax(performances)
+        selected_indices.append(best_idx)
+        remaining_indices.remove(best_idx)
+
+        # Add models that maximize diversity + performance
+        while len(selected_indices) < self.max_ensemble_size and remaining_indices:
+            scores = []
+            for idx in remaining_indices:
+                # Diversity with selected ensemble
+                avg_diversity = np.mean([
+                    diversity_matrix[idx, sel_idx]
+                    for sel_idx in selected_indices
+                ])
+
+                # Combined score
+                score = (self.diversity_weight * avg_diversity +
+                        (1 - self.diversity_weight) * performances[idx])
+                scores.append(score)
+
+            best_remaining = remaining_indices[np.argmax(scores)]
+            selected_indices.append(best_remaining)
+            remaining_indices.remove(best_remaining)
+
+        selected_models = [candidates[i] for i in selected_indices]
+
+        logger.info(f"Selected {len(selected_models)} diverse ensemble members")
+        return selected_models
+
+    def _compute_performance(self,
+                           candidate: ModelCandidate,
+                           X_val: np.ndarray,
+                           y_val: np.ndarray) -> float:
+        """Compute normalized performance score."""
+        if candidate.model_type == ModelType.REGRESSION:
+            return candidate.performance.r2 or 0.0
+        else:
+            return candidate.performance.accuracy or 0.0
+
+    def build_stacking_ensemble(self,
+                               base_models: List[ModelCandidate],
+                               meta_learner: BaseEstimator,
+                               X_train: np.ndarray,
+                               y_train: np.ndarray,
+                               X_val: np.ndarray,
+                               y_val: np.ndarray) -> ModelCandidate:
+        """
+        Build stacking ensemble with meta-learner.
+
+        Args:
+            base_models: Base layer models
+            meta_learner: Meta-learning model (e.g., LogisticRegression)
+            X_train, y_train: Training data
+            X_val, y_val: Validation data
+
+        Returns:
+            Stacking ensemble as ModelCandidate
+        """
+        estimators = [
+            (model.name, model.estimator) for model in base_models
+        ]
+
+        stacking = StackingClassifier(
+            estimators=estimators,
+            final_estimator=meta_learner,
+            cv=5,
+            stack_method='auto'
+        )
+
+        # Build using ModelBuilder
+        builder = ModelBuilder(base_models[0].model_type)
+
+        stacking_candidate = builder.build_candidate(
+            name=f"Stacking_{len(base_models)}_models",
+            estimator=stacking,
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            feature_names=base_models[0].feature_names,
+            hyperparameters={
+                'base_models': [m.name for m in base_models],
+                'meta_learner': type(meta_learner).__name__
+            }
+        )
+
+        return stacking_candidate
+\end{lstlisting}
+
+\subsection{Neural Architecture Search with Efficiency Constraints}
+
+Neural Architecture Search (NAS) automates deep learning architecture design, but production systems require efficiency constraints for deployment feasibility.
+
+\begin{lstlisting}[language=Python, caption={NAS with Deployment Constraints}]
+from typing import Tuple, List, Dict
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class ArchitectureConstraints:
+    """Constraints for neural architecture search."""
+    max_params: int = 10_000_000  # Maximum parameters
+    max_latency_ms: float = 100.0  # Maximum inference latency
+    max_memory_mb: float = 500.0   # Maximum memory footprint
+    min_accuracy: float = 0.90     # Minimum acceptable accuracy
+
+class NeuralArchitectureSearch:
+    """
+    Neural Architecture Search with efficiency constraints.
+
+    Searches architecture space while respecting deployment constraints:
+    - Model size (parameter count)
+    - Inference latency
+    - Memory usage
+    - Accuracy requirements
+    """
+
+    def __init__(self,
+                 constraints: ArchitectureConstraints,
+                 search_space: Dict[str, List[Any]]):
+        """
+        Args:
+            constraints: Deployment constraints
+            search_space: Dictionary defining search space
+                         (e.g., {'layers': [2,3,4], 'units': [64,128,256]})
+        """
+        self.constraints = constraints
+        self.search_space = search_space
+        self.search_history: List[Dict] = []
+
+    def sample_architecture(self) -> Dict[str, Any]:
+        """Sample architecture from search space."""
+        architecture = {}
+        for param, values in self.search_space.items():
+            architecture[param] = np.random.choice(values)
+        return architecture
+
+    def evaluate_architecture(self,
+                            architecture: Dict[str, Any],
+                            X_train: np.ndarray,
+                            y_train: np.ndarray,
+                            X_val: np.ndarray,
+                            y_val: np.ndarray) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate architecture on validation data.
+
+        Returns:
+            (accuracy, constraints_dict) tuple
+        """
+        # Build model from architecture specification
+        model = self._build_model(architecture, X_train.shape[1])
+
+        # Train
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=10,
+            batch_size=32,
+            verbose=0
+        )
+
+        # Evaluate
+        accuracy = history.history['val_accuracy'][-1]
+
+        # Measure constraints
+        n_params = model.count_params()
+        latency = self._measure_latency(model, X_val[:100])
+        memory = self._estimate_memory(model)
+
+        constraints_met = {
+            'params_ok': n_params <= self.constraints.max_params,
+            'latency_ok': latency <= self.constraints.max_latency_ms,
+            'memory_ok': memory <= self.constraints.max_memory_mb,
+            'accuracy_ok': accuracy >= self.constraints.min_accuracy
+        }
+
+        metrics = {
+            'accuracy': accuracy,
+            'n_params': n_params,
+            'latency_ms': latency,
+            'memory_mb': memory,
+            'all_constraints_met': all(constraints_met.values())
+        }
+
+        return accuracy, metrics
+
+    def search(self,
+              X_train: np.ndarray,
+              y_train: np.ndarray,
+              X_val: np.ndarray,
+              y_val: np.ndarray,
+              n_trials: int = 50) -> Dict[str, Any]:
+        """
+        Perform architecture search.
+
+        Args:
+            X_train, y_train: Training data
+            X_val, y_val: Validation data
+            n_trials: Number of architectures to evaluate
+
+        Returns:
+            Best architecture satisfying constraints
+        """
+        best_architecture = None
+        best_accuracy = 0.0
+        valid_architectures = []
+
+        for trial in range(n_trials):
+            architecture = self.sample_architecture()
+            accuracy, metrics = self.evaluate_architecture(
+                architecture, X_train, y_train, X_val, y_val
+            )
+
+            self.search_history.append({
+                'trial': trial,
+                'architecture': architecture,
+                'accuracy': accuracy,
+                **metrics
+            })
+
+            # Track valid architectures (meeting all constraints)
+            if metrics['all_constraints_met']:
+                valid_architectures.append({
+                    'architecture': architecture,
+                    'accuracy': accuracy,
+                    'metrics': metrics
+                })
+
+                if accuracy > best_accuracy:
+                    best_accuracy = accuracy
+                    best_architecture = architecture
+
+            logger.info(f"Trial {trial}: accuracy={accuracy:.4f}, "
+                       f"params={metrics['n_params']}, "
+                       f"latency={metrics['latency_ms']:.1f}ms, "
+                       f"constraints_met={metrics['all_constraints_met']}")
+
+        if best_architecture is None:
+            logger.warning("No architecture met all constraints. "
+                          "Relaxing constraints...")
+            # Fall back to best accuracy regardless of constraints
+            best_trial = max(self.search_history, key=lambda x: x['accuracy'])
+            best_architecture = best_trial['architecture']
+
+        logger.info(f"Best architecture: {best_architecture}, "
+                   f"accuracy={best_accuracy:.4f}, "
+                   f"{len(valid_architectures)}/{n_trials} met constraints")
+
+        return best_architecture
+
+    def _build_model(self, architecture: Dict[str, Any], input_dim: int):
+        """Build Keras model from architecture specification."""
+        from tensorflow import keras
+
+        model = keras.Sequential()
+        model.add(keras.layers.Input(shape=(input_dim,)))
+
+        for i in range(architecture.get('n_layers', 2)):
+            units = architecture.get(f'units_layer_{i}', 128)
+            activation = architecture.get('activation', 'relu')
+            dropout = architecture.get('dropout', 0.2)
+
+            model.add(keras.layers.Dense(units, activation=activation))
+            if dropout > 0:
+                model.add(keras.layers.Dropout(dropout))
+
+        # Output layer
+        model.add(keras.layers.Dense(1, activation='sigmoid'))
+
+        optimizer = architecture.get('optimizer', 'adam')
+        model.compile(
+            optimizer=optimizer,
+            loss='binary_crossentropy',
+            metrics=['accuracy']
+        )
+
+        return model
+
+    def _measure_latency(self, model, X_sample: np.ndarray) -> float:
+        """Measure average inference latency in milliseconds."""
+        import time
+
+        n_samples = len(X_sample)
+        start = time.time()
+        _ = model.predict(X_sample, verbose=0)
+        latency_ms = (time.time() - start) * 1000 / n_samples
+
+        return latency_ms
+
+    def _estimate_memory(self, model) -> float:
+        """Estimate model memory footprint in MB."""
+        # Rough estimate based on parameters
+        n_params = model.count_params()
+        bytes_per_param = 4  # Float32
+        memory_mb = (n_params * bytes_per_param) / (1024 * 1024)
+        return memory_mb
+\end{lstlisting}
+
+\subsection{Transfer Learning Evaluation with Domain Adaptation}
+
+Transfer learning leverages pre-trained models for new tasks, but requires careful evaluation of domain similarity and adaptation effectiveness.
+
+\begin{lstlisting}[language=Python, caption={Transfer Learning Evaluation Framework}]
+from typing import Optional, Callable
+from sklearn.metrics import accuracy_score
+import numpy as np
+
+class TransferLearningEvaluator:
+    """
+    Evaluate transfer learning effectiveness with domain adaptation metrics.
+
+    Metrics:
+    - Transfer performance gain vs training from scratch
+    - Domain similarity assessment
+    - Fine-tuning convergence analysis
+    - Sample efficiency comparison
+    """
+
+    def __init__(self, source_model: BaseEstimator, task_type: ModelType):
+        """
+        Args:
+            source_model: Pre-trained model from source domain
+            task_type: Type of ML task
+        """
+        self.source_model = source_model
+        self.task_type = task_type
+        self.evaluation_results: Dict[str, Any] = {}
+
+    def evaluate_domain_similarity(self,
+                                   X_source: np.ndarray,
+                                   X_target: np.ndarray) -> float:
+        """
+        Assess similarity between source and target domains.
+
+        Uses maximum mean discrepancy (MMD) to measure distribution difference.
+
+        Args:
+            X_source: Features from source domain
+            X_target: Features from target domain
+
+        Returns:
+            Similarity score (0-1, higher = more similar)
+        """
+        # Compute MMD (simplified version)
+        def rbf_kernel(X1, X2, gamma=1.0):
+            """RBF kernel for MMD computation."""
+            from scipy.spatial.distance import cdist
+            dists = cdist(X1, X2, metric='sqeuclidean')
+            return np.exp(-gamma * dists)
+
+        # Sample for efficiency
+        n_samples = min(1000, len(X_source), len(X_target))
+        X_source_sample = X_source[np.random.choice(len(X_source), n_samples)]
+        X_target_sample = X_target[np.random.choice(len(X_target), n_samples)]
+
+        # Compute kernels
+        K_ss = rbf_kernel(X_source_sample, X_source_sample)
+        K_tt = rbf_kernel(X_target_sample, X_target_sample)
+        K_st = rbf_kernel(X_source_sample, X_target_sample)
+
+        # MMD statistic
+        mmd = (K_ss.mean() + K_tt.mean() - 2 * K_st.mean())
+
+        # Convert to similarity (0-1 scale, normalized)
+        similarity = np.exp(-mmd)
+
+        self.evaluation_results['domain_similarity'] = similarity
+        logger.info(f"Domain similarity: {similarity:.4f}")
+
+        return similarity
+
+    def compare_transfer_vs_scratch(self,
+                                   X_train: np.ndarray,
+                                   y_train: np.ndarray,
+                                   X_val: np.ndarray,
+                                   y_val: np.ndarray,
+                                   scratch_model_factory: Callable,
+                                   sample_sizes: List[int] = [100, 500, 1000]) -> Dict:
+        """
+        Compare transfer learning vs training from scratch across sample sizes.
+
+        Args:
+            X_train, y_train: Target domain training data
+            X_val, y_val: Target domain validation data
+            scratch_model_factory: Function returning new untrained model
+            sample_sizes: Training set sizes to evaluate
+
+        Returns:
+            Dict with performance comparison results
+        """
+        results = {
+            'sample_sizes': sample_sizes,
+            'transfer_performance': [],
+            'scratch_performance': [],
+            'performance_gain': []
+        }
+
+        for n_samples in sample_sizes:
+            # Sample training data
+            indices = np.random.choice(len(X_train),
+                                      min(n_samples, len(X_train)),
+                                      replace=False)
+            X_train_sample = X_train[indices]
+            y_train_sample = y_train[indices]
+
+            # Transfer learning: fine-tune pre-trained model
+            transfer_model = self._finetune_model(
+                self.source_model,
+                X_train_sample,
+                y_train_sample
+            )
+            transfer_pred = transfer_model.predict(X_val)
+            transfer_acc = accuracy_score(y_val, transfer_pred)
+
+            # Training from scratch
+            scratch_model = scratch_model_factory()
+            scratch_model.fit(X_train_sample, y_train_sample)
+            scratch_pred = scratch_model.predict(X_val)
+            scratch_acc = accuracy_score(y_val, scratch_pred)
+
+            gain = transfer_acc - scratch_acc
+
+            results['transfer_performance'].append(transfer_acc)
+            results['scratch_performance'].append(scratch_acc)
+            results['performance_gain'].append(gain)
+
+            logger.info(f"Samples={n_samples}: transfer={transfer_acc:.4f}, "
+                       f"scratch={scratch_acc:.4f}, gain={gain:.4f}")
+
+        self.evaluation_results['transfer_comparison'] = results
+        return results
+
+    def analyze_fine_tuning_convergence(self,
+                                       X_train: np.ndarray,
+                                       y_train: np.ndarray,
+                                       X_val: np.ndarray,
+                                       y_val: np.ndarray,
+                                       max_iterations: int = 100) -> Dict:
+        """
+        Analyze how quickly fine-tuning converges vs training from scratch.
+
+        Returns:
+            Dict with convergence analysis
+        """
+        # This is a simplified example - would need iterative training
+        # for true convergence analysis
+
+        transfer_scores = []
+        iterations = range(1, max_iterations + 1, 10)
+
+        for n_iter in iterations:
+            # Simulate partial training (in practice, use early stopping)
+            model_copy = self._copy_model(self.source_model)
+
+            # Partial fit (simplified - actual implementation depends on algorithm)
+            if hasattr(model_copy, 'partial_fit'):
+                for _ in range(n_iter):
+                    model_copy.partial_fit(X_train, y_train)
+            else:
+                # For models without partial_fit, use full training
+                # and measure at different epochs/iterations
+                model_copy.fit(X_train, y_train)
+
+            score = accuracy_score(y_val, model_copy.predict(X_val))
+            transfer_scores.append(score)
+
+        results = {
+            'iterations': list(iterations),
+            'scores': transfer_scores,
+            'convergence_rate': self._compute_convergence_rate(transfer_scores)
+        }
+
+        self.evaluation_results['convergence_analysis'] = results
+        return results
+
+    def _finetune_model(self,
+                       base_model: BaseEstimator,
+                       X: np.ndarray,
+                       y: np.ndarray) -> BaseEstimator:
+        """Fine-tune pre-trained model on target data."""
+        # Create copy to avoid modifying original
+        from sklearn.base import clone
+        model_copy = clone(base_model)
+
+        # Fine-tune (retrain on target data)
+        model_copy.fit(X, y)
+
+        return model_copy
+
+    def _copy_model(self, model: BaseEstimator) -> BaseEstimator:
+        """Create copy of model."""
+        from sklearn.base import clone
+        return clone(model)
+
+    def _compute_convergence_rate(self, scores: List[float]) -> float:
+        """Compute convergence rate from score progression."""
+        if len(scores) < 2:
+            return 0.0
+
+        # Compute average improvement rate
+        improvements = [scores[i+1] - scores[i]
+                       for i in range(len(scores) - 1)]
+        return np.mean([max(0, imp) for imp in improvements])
+
+    def compute_transfer_score(self) -> float:
+        """
+        Compute overall transfer learning quality score.
+
+        Combines:
+        - Domain similarity
+        - Performance gain
+        - Sample efficiency
+
+        Returns:
+            Transfer score (0-1, higher = better transfer)
+        """
+        if not self.evaluation_results:
+            raise ValueError("Must run evaluations first")
+
+        # Weight different factors
+        domain_sim = self.evaluation_results.get('domain_similarity', 0.5)
+
+        transfer_comp = self.evaluation_results.get('transfer_comparison', {})
+        avg_gain = (np.mean(transfer_comp.get('performance_gain', [0]))
+                   if transfer_comp else 0)
+
+        # Normalize gain to 0-1
+        gain_score = max(0, min(1, avg_gain + 0.5))
+
+        # Combined score
+        transfer_score = 0.4 * domain_sim + 0.6 * gain_score
+
+        logger.info(f"Transfer learning score: {transfer_score:.4f}")
+        return transfer_score
+\end{lstlisting}
+
 \section{Real-World Scenario: Model Selection for Medical Diagnosis}
 
 \subsection{MedTech's Diabetic Retinopathy Detection System}
@@ -2154,6 +3369,540 @@ class ABTestManager:
         else:
             return f"Keep {config.model_a_id}. New model did not improve performance."
 \end{lstlisting}
+
+\section{Statistical Validation Rigor}
+
+Production model selection requires statistical rigor beyond simple cross-validation. We must quantify uncertainty, test significance, and analyze stability.
+
+\subsection{Nested Cross-Validation with Bias-Variance Decomposition}
+
+Standard cross-validation for hyperparameter tuning can overestimate performance. Nested CV provides unbiased estimates and enables bias-variance analysis.
+
+\begin{lstlisting}[language=Python, caption={Nested Cross-Validation Framework}]
+from sklearn.model_selection import KFold, GridSearchCV
+from typing import Dict, List, Tuple
+import numpy as np
+
+class NestedCrossValidator:
+    """
+    Nested cross-validation for unbiased model evaluation.
+
+    Outer loop: Estimates generalization performance
+    Inner loop: Hyperparameter tuning
+    """
+
+    def __init__(self,
+                 outer_cv: int = 5,
+                 inner_cv: int = 3,
+                 random_state: int = 42):
+        """
+        Args:
+            outer_cv: Number of outer CV folds (for performance estimation)
+            inner_cv: Number of inner CV folds (for hyperparameter tuning)
+            random_state: Random seed for reproducibility
+        """
+        self.outer_cv = KFold(n_splits=outer_cv, shuffle=True,
+                             random_state=random_state)
+        self.inner_cv = inner_cv
+        self.outer_scores: List[float] = []
+        self.inner_scores: List[List[float]] = []
+        self.best_params_per_fold: List[Dict] = []
+
+    def evaluate(self,
+                model,
+                param_grid: Dict,
+                X: np.ndarray,
+                y: np.ndarray,
+                scoring: str = 'accuracy') -> Dict[str, float]:
+        """
+        Perform nested cross-validation.
+
+        Returns:
+            Dictionary with performance statistics
+        """
+        self.outer_scores = []
+        self.inner_scores = []
+        self.best_params_per_fold = []
+
+        for fold_idx, (train_idx, test_idx) in enumerate(self.outer_cv.split(X)):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Inner loop: Hyperparameter tuning
+            grid_search = GridSearchCV(
+                model,
+                param_grid,
+                cv=self.inner_cv,
+                scoring=scoring,
+                n_jobs=-1
+            )
+            grid_search.fit(X_train, y_train)
+
+            # Store inner CV scores
+            self.inner_scores.append(grid_search.cv_results_['mean_test_score'].tolist())
+            self.best_params_per_fold.append(grid_search.best_params_)
+
+            # Outer loop: Evaluate on held-out test set
+            test_score = grid_search.score(X_test, y_test)
+            self.outer_scores.append(test_score)
+
+            logger.info(f"Fold {fold_idx+1}/{self.outer_cv.n_splits}: "
+                       f"test_score={test_score:.4f}, "
+                       f"best_params={grid_search.best_params_}")
+
+        return self.get_statistics()
+
+    def get_statistics(self) -> Dict[str, float]:
+        """Calculate performance statistics."""
+        outer_scores_array = np.array(self.outer_scores)
+
+        return {
+            'mean_score': outer_scores_array.mean(),
+            'std_score': outer_scores_array.std(),
+            'min_score': outer_scores_array.min(),
+            'max_score': outer_scores_array.max(),
+            'score_range': outer_scores_array.max() - outer_scores_array.min(),
+            'cv_coefficient': outer_scores_array.std() / outer_scores_array.mean()  # Relative stability
+        }
+
+    def bias_variance_decomposition(self) -> Dict[str, float]:
+        """
+        Estimate bias-variance trade-off.
+
+        Note: This is a simplified approximation.
+        True bias-variance requires knowing optimal predictor.
+        """
+        outer_mean = np.mean(self.outer_scores)
+        outer_var = np.var(self.outer_scores)
+
+        # Average variance across inner CV folds
+        inner_variances = [np.var(scores) for scores in self.inner_scores]
+        avg_inner_var = np.mean(inner_variances)
+
+        return {
+            'estimated_bias': 1.0 - outer_mean,  # Simplified: 1 - performance
+            'estimated_variance': outer_var,
+            'inner_variance': avg_inner_var,
+            'stability_score': 1.0 / (1.0 + outer_var)  # Higher is more stable
+        }
+
+\subsection{Learning Curve Analysis}
+
+Learning curves reveal how model performance scales with training data size, helping determine if more data would help.
+
+class LearningCurveAnalyzer:
+    """
+    Analyze learning curves to assess sample efficiency and convergence.
+    """
+
+    def __init__(self,
+                 train_sizes: np.ndarray = None,
+                 cv: int = 5):
+        """
+        Args:
+            train_sizes: Training set sizes to evaluate (fractions or absolute)
+            cv: Number of cross-validation folds
+        """
+        if train_sizes is None:
+            train_sizes = np.linspace(0.1, 1.0, 10)
+        self.train_sizes = train_sizes
+        self.cv = cv
+        self.train_scores: Optional[np.ndarray] = None
+        self.val_scores: Optional[np.ndarray] = None
+
+    def analyze(self,
+               model,
+               X: np.ndarray,
+               y: np.ndarray,
+               scoring: str = 'accuracy') -> Dict[str, Any]:
+        """
+        Generate and analyze learning curves.
+
+        Returns:
+            Analysis results including convergence assessment
+        """
+        from sklearn.model_selection import learning_curve
+
+        train_sizes_abs, train_scores, val_scores = learning_curve(
+            model, X, y,
+            train_sizes=self.train_sizes,
+            cv=self.cv,
+            scoring=scoring,
+            n_jobs=-1,
+            shuffle=True,
+            random_state=42
+        )
+
+        self.train_scores = train_scores
+        self.val_scores = val_scores
+
+        # Calculate statistics
+        train_mean = train_scores.mean(axis=1)
+        train_std = train_scores.std(axis=1)
+        val_mean = val_scores.mean(axis=1)
+        val_std = val_scores.std(axis=1)
+
+        # Assess convergence
+        convergence = self._assess_convergence(val_mean)
+
+        # Calculate sample efficiency
+        efficiency = self._calculate_sample_efficiency(train_sizes_abs, val_mean)
+
+        return {
+            'train_sizes': train_sizes_abs,
+            'train_mean': train_mean,
+            'train_std': train_std,
+            'val_mean': val_mean,
+            'val_std': val_std,
+            'has_converged': convergence['has_converged'],
+            'convergence_point': convergence['convergence_point'],
+            'sample_efficiency': efficiency,
+            'recommendation': self._generate_recommendation(convergence, efficiency)
+        }
+
+    def _assess_convergence(self, val_scores: np.ndarray,
+                           threshold: float = 0.01) -> Dict[str, Any]:
+        """Check if learning curve has converged."""
+        if len(val_scores) < 3:
+            return {'has_converged': False, 'convergence_point': None}
+
+        # Check if slope of last few points is near zero
+        recent_scores = val_scores[-3:]
+        slope = (recent_scores[-1] - recent_scores[0]) / len(recent_scores)
+
+        has_converged = abs(slope) < threshold
+
+        # Find convergence point (where improvement drops below threshold)
+        convergence_point = None
+        for i in range(1, len(val_scores)):
+            improvement = val_scores[i] - val_scores[i-1]
+            if abs(improvement) < threshold:
+                convergence_point = i
+                break
+
+        return {
+            'has_converged': has_converged,
+            'convergence_point': convergence_point,
+            'final_slope': slope
+        }
+
+    def _calculate_sample_efficiency(self,
+                                    train_sizes: np.ndarray,
+                                    val_scores: np.ndarray) -> float:
+        """
+        Calculate sample efficiency.
+
+        Higher is better - means model learns quickly from few samples.
+        """
+        # Area under learning curve (normalized)
+        if len(train_sizes) < 2:
+            return 0.0
+
+        # Normalize train sizes to [0, 1]
+        sizes_norm = (train_sizes - train_sizes.min()) / \
+                    (train_sizes.max() - train_sizes.min())
+
+        # Calculate area using trapezoidal rule
+        area = np.trapz(val_scores, sizes_norm)
+
+        return area
+
+    def _generate_recommendation(self,
+                                convergence: Dict,
+                                efficiency: float) -> str:
+        """Generate actionable recommendation."""
+        if convergence['has_converged']:
+            if efficiency > 0.8:
+                return "Model has converged with good sample efficiency. Current data size is sufficient."
+            else:
+                return "Model has converged but sample efficiency is low. Consider model complexity or feature engineering."
+        else:
+            return "Model has not converged. Collecting more data would likely improve performance."
+
+    def visualize(self, output_path: Optional[str] = None):
+        """Plot learning curves."""
+        if self.train_scores is None:
+            raise ValueError("Must run analyze() first")
+
+        train_mean = self.train_scores.mean(axis=1)
+        train_std = self.train_scores.std(axis=1)
+        val_mean = self.val_scores.mean(axis=1)
+        val_std = self.val_scores.std(axis=1)
+
+        plt.figure(figsize=(10, 6))
+
+        plt.plot(self.train_sizes, train_mean, label='Training Score',
+                marker='o', color='blue')
+        plt.fill_between(self.train_sizes,
+                        train_mean - train_std,
+                        train_mean + train_std,
+                        alpha=0.2, color='blue')
+
+        plt.plot(self.train_sizes, val_mean, label='Validation Score',
+                marker='o', color='red')
+        plt.fill_between(self.train_sizes,
+                        val_mean - val_std,
+                        val_mean + val_std,
+                        alpha=0.2, color='red')
+
+        plt.xlabel('Training Set Size', fontsize=12)
+        plt.ylabel('Score', fontsize=12)
+        plt.title('Learning Curves', fontsize=14, fontweight='bold')
+        plt.legend(loc='best')
+        plt.grid(True, alpha=0.3)
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+
+        plt.close()
+\end{lstlisting}
+
+\section{Business-Aware Model Selection}
+
+Production model selection must account for business realities: deployment costs, interpretability requirements, and regulatory constraints.
+
+\subsection{Cost-Sensitive Learning with Business Loss Functions}
+
+Different errors have different costs. A fraud detection false negative might cost thousands while a false positive costs manual review time.
+
+\begin{lstlisting}[language=Python, caption={Cost-Sensitive Model Selection}]
+@dataclass
+class BusinessLossFunction:
+    """Define business costs for different prediction errors."""
+    true_positive_value: float = 0.0  # Revenue/saving from correct positive
+    true_negative_value: float = 0.0  # Value from correct negative
+    false_positive_cost: float = 0.0  # Cost of false alarm
+    false_negative_cost: float = 0.0  # Cost of missing positive
+
+    def calculate_total_cost(self,
+                            y_true: np.ndarray,
+                            y_pred: np.ndarray) -> float:
+        """Calculate total business cost/value."""
+        from sklearn.metrics import confusion_matrix
+
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+
+        total_value = (
+            tp * self.true_positive_value +
+            tn * self.true_negative_value -
+            fp * self.false_positive_cost -
+            fn * self.false_negative_cost
+        )
+
+        return total_value
+
+    def get_expected_value_per_prediction(self,
+                                         y_true: np.ndarray,
+                                         y_pred: np.ndarray) -> float:
+        """Average business value per prediction."""
+        total = self.calculate_total_cost(y_true, y_pred)
+        return total / len(y_true)
+
+class CostSensitiveModelSelector:
+    """
+    Select models based on business value rather than just accuracy.
+    """
+
+    def __init__(self, loss_function: BusinessLossFunction):
+        self.loss_function = loss_function
+
+    def evaluate_candidate(self,
+                          candidate: ModelCandidate,
+                          X_test: np.ndarray,
+                          y_test: np.ndarray) -> Dict[str, float]:
+        """
+        Evaluate model using business loss function.
+
+        Returns metrics including business value.
+        """
+        y_pred = candidate.model.predict(X_test)
+
+        # Standard metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score
+
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
+
+        # Business metrics
+        total_value = self.loss_function.calculate_total_cost(y_test, y_pred)
+        value_per_prediction = self.loss_function.get_expected_value_per_prediction(
+            y_test, y_pred
+        )
+
+        return {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'total_business_value': total_value,
+            'value_per_prediction': value_per_prediction
+        }
+
+    def compare_candidates(self,
+                          candidates: List[ModelCandidate],
+                          X_test: np.ndarray,
+                          y_test: np.ndarray) -> pd.DataFrame:
+        """
+        Compare candidates on both ML and business metrics.
+
+        Returns ranked comparison table.
+        """
+        results = []
+
+        for candidate in candidates:
+            metrics = self.evaluate_candidate(candidate, X_test, y_test)
+            metrics['model_name'] = candidate.name
+            metrics['inference_time_ms'] = candidate.complexity.inference_time_ms
+            results.append(metrics)
+
+        df = pd.DataFrame(results)
+        df = df.sort_values('total_business_value', ascending=False)
+
+        return df
+
+    def select_optimal_threshold(self,
+                                candidate: ModelCandidate,
+                                X_test: np.ndarray,
+                                y_test: np.ndarray,
+                                thresholds: np.ndarray = None) -> Tuple[float, Dict]:
+        """
+        Find optimal classification threshold for business value.
+
+        Args:
+            candidate: Model candidate with predict_proba
+            X_test: Test features
+            y_test: Test labels
+            thresholds: Thresholds to test (default: 0.1 to 0.9)
+
+        Returns:
+            (optimal_threshold, metrics_at_threshold)
+        """
+        if thresholds is None:
+            thresholds = np.arange(0.1, 0.95, 0.05)
+
+        # Get prediction probabilities
+        y_proba = candidate.model.predict_proba(X_test)[:, 1]
+
+        best_value = float('-inf')
+        best_threshold = 0.5
+        best_metrics = {}
+
+        for threshold in thresholds:
+            y_pred = (y_proba >= threshold).astype(int)
+
+            business_value = self.loss_function.calculate_total_cost(y_test, y_pred)
+
+            if business_value > best_value:
+                best_value = business_value
+                best_threshold = threshold
+                best_metrics = self.evaluate_candidate(
+                    candidate, X_test, y_test
+                )
+
+        logger.info(f"Optimal threshold: {best_threshold:.3f} "
+                   f"with business value: ${best_value:.2f}")
+
+        return best_threshold, best_metrics
+\end{lstlisting}
+
+\section{Advanced Scenarios: Model Selection Challenges}
+
+Real-world model selection faces challenges beyond technical metrics. These scenarios illustrate common pitfalls and solutions.
+
+\subsection{Scenario 1: The Accuracy Trap}
+
+\textbf{Situation}: An e-commerce company built a product recommendation model. The deep learning ensemble achieved 94\% accuracy vs. 91\% for a simple collaborative filtering approach. The team deployed the complex model.
+
+\textbf{Problem}: In production, the deep learning model:
+\begin{itemize}
+    \item Required 300ms inference time (vs. 15ms for simple model)
+    \item Used 8GB RAM per instance (vs. 500MB)
+    \item Needed GPU instances costing \$2,000/month (vs. \$200)
+    \item Was impossible to debug when making poor recommendations
+\end{itemize}
+
+The 3\% accuracy gain generated \$500/month in additional revenue, while infrastructure costs increased by \$1,800/month.
+
+\textbf{Lesson}: Always calculate total cost of ownership. A 3\% accuracy improvement rarely justifies 10x infrastructure costs. The team should have used the multi-objective optimization framework to balance accuracy, latency, and operational cost.
+
+\textbf{Resolution}: Switched to the simpler model and invested engineering time in better feature engineering, achieving 92.5\% accuracy at 20ms latency and 1/10th the cost.
+
+\subsection{Scenario 2: The Interpretability Mandate}
+
+\textbf{Situation}: A lending institution built a credit risk model. XGBoost achieved 88\% AUC while logistic regression achieved 82\% AUC.
+
+\textbf{Problem}: Regulators required the institution to explain all loan denials to applicants. The XGBoost model provided SHAP values, but:
+\begin{itemize}
+    \item Explanations varied significantly for similar applicants
+    \item SHAP values didn't satisfy "clearly understandable to non-technical consumers" regulatory requirement
+    \item Legal team couldn't defend model decisions in disputes
+    \item Audit trails were complex and costly to maintain
+\end{itemize}
+
+\textbf{Lesson}: In regulated industries, interpretability is not optional. A 6\% performance gain means nothing if you can't deploy the model legally.
+
+\textbf{Resolution}: Deployed the logistic regression model with clear coefficient interpretations. Each feature's impact could be explained in plain language: "Your income-to-debt ratio of 45\% is above our 40\% threshold, contributing -0.3 to your risk score."
+
+\subsection{Scenario 3: The Resource Reality Check}
+
+\textbf{Situation}: A startup built a computer vision model for manufacturing defect detection. Their EfficientNet model achieved 96\% accuracy on edge cases versus 93\% for MobileNet.
+
+\textbf{Problem}: The model needed to run on edge devices in factories:
+\begin{itemize}
+    \item EfficientNet required 250ms inference on edge hardware (unacceptable for real-time)
+    \item Model size was 180MB (exceeding device storage budget)
+    \item Power consumption was too high for battery operation
+    \item Device couldn't run CUDA, falling back to slow CPU inference
+\end{itemize}
+
+\textbf{Lesson}: Deployment constraints must be tested early. Lab benchmarks on GPUs don't predict edge device performance.
+
+\textbf{Resolution}: Optimized MobileNet with quantization, achieving 94\% accuracy at 45ms inference time. The 2\% accuracy loss was acceptable given 5x speedup enabled real-time operation.
+
+\subsection{Scenario 4: The Fairness Trade-off}
+
+\textbf{Situation}: A hiring screening tool used deep learning to rank candidates. The model achieved 75\% precision in predicting successful hires versus 68\% for a simpler model.
+
+\textbf{Problem}: Fairness audit revealed:
+\begin{itemize}
+    \item Model had 15\% lower recall for female candidates
+    \item Bias stemmed from historical hiring patterns in training data
+    \item SHAP analysis showed years of experience weighted heavily (correlating with gender)
+    \item Legal risk and PR damage potential far exceeded hiring efficiency gains
+\end{itemize}
+
+\textbf{Lesson}: Accuracy without fairness creates existential business risk. Model selection must include bias testing.
+
+\textbf{Resolution}: Implemented fairness-constrained model selection:
+\begin{itemize}
+    \item Added demographic parity constraint (max 5\% difference in selection rates)
+    \item Re-trained models with fairness penalty in loss function
+    \item Final model: 71\% precision with <2\% demographic disparity
+    \item Accepted 4\% precision loss to mitigate legal and ethical risks
+\end{itemize}
+
+\subsection{Scenario 5: The Concept Drift Surprise}
+
+\textbf{Situation}: A fraud detection system selected the best model using standard 80/20 train/test split from historical data. The model performed excellently in backtesting.
+
+\textbf{Problem}: After deployment:
+\begin{itemize}
+    \item Precision dropped from 85\% to 62\% within 3 months
+    \item Fraudsters adapted to detection patterns
+    \item Seasonal patterns in legitimate transactions weren't captured in random split
+    \item Model was trained on all historical data, masking temporal degradation
+\end{itemize}
+
+\textbf{Lesson}: Static validation doesn't reveal temporal dynamics. For time-dependent problems, use time-series cross-validation and test on future time periods.
+
+\textbf{Resolution}: Implemented temporal validation strategy:
+\begin{itemize}
+    \item Time-series cross-validation with walk-forward analysis
+    \item Required models to perform well on data from 3+ months in future
+    \item Set up monthly model retraining pipeline
+    \item Added drift monitoring with automatic performance degradation alerts
+    \item Selected more adaptable model (online learning) over highest accuracy static model
+\end{itemize}
 
 \section{Exercises}
 
